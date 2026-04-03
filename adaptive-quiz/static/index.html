@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Adaptive Quiz</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <h1>🎓 Adaptive Quiz</h1>
+  <p class="subtitle">AI-powered · Personalized difficulty · Immediate feedback</p>
+
+  <!-- Config Panel -->
+  <div class="config" id="configPanel">
+    <h2>Session Setup</h2>
+
+    <label>Topic</label>
+    <input id="topicInput" value="recursion" />
+
+    <label>Course Source Text</label>
+    <textarea id="sourceText">A recursive function calls itself to solve a problem. Every recursive function needs a base case to stop the recursion. Without a base case the function calls itself infinitely causing a stack overflow. The classic example is factorial: factorial(n) = n * factorial(n-1) with base case factorial(0) = 1. Another example is binary search, which recursively searches half the array each time.</textarea>
+
+    <label>Quiz Mode</label>
+    <select id="modeSelect">
+      <option value="auto">Auto (adaptive)</option>
+      <option value="weakness_review">Weakness Review</option>
+      <option value="challenge">Challenge</option>
+    </select>
+
+    <button class="start-btn" onclick="startSession()">Start Quiz →</button>
+  </div>
+
+  <!-- Mastery Bar -->
+  <div class="mastery-section" id="masterySection" style="display:none">
+    <div class="mastery-label">
+      <span id="masteryTopic">Topic Mastery</span>
+      <span id="masteryValue">50%</span>
+    </div>
+    <div class="bar-track">
+      <div class="bar-fill" id="masteryBar" style="width:50%"></div>
+    </div>
+  </div>
+
+  <!-- Session badges -->
+  <div class="session-info" id="sessionInfo" style="display:none">
+    <div class="badge" id="difficultyBadge">Difficulty: Medium</div>
+    <div class="badge" id="modeBadge">Mode: Auto</div>
+    <div class="badge" id="irtBadge">IRT: Warming up</div>
+  </div>
+
+  <!-- Question counter -->
+  <div class="q-counter" id="qCounter" style="display:none"></div>
+
+  <!-- Loading spinner -->
+  <div class="loading" id="loading" style="display:none">
+    <div class="spinner"></div>
+    Generating your question...
+  </div>
+
+  <!-- Question card -->
+  <div class="question-card" id="questionCard" style="display:none">
+    <div class="question-meta" id="questionMeta"></div>
+    <div class="question-text" id="questionText"></div>
+  </div>
+
+  <!-- Options -->
+  <div class="options" id="optionsContainer"></div>
+
+  <!-- Feedback -->
+  <div class="feedback" id="feedback">
+    <div class="feedback-title" id="feedbackTitle"></div>
+    <div id="feedbackBody"></div>
+  </div>
+
+  <!-- Support features -->
+  <div class="support" id="supportFeatures">
+    <button class="support-btn" id="btnExplainSimpler"
+      style="display:none" onclick="explainSimpler()">
+      💡 Explain simpler
+    </button>
+    <button class="support-btn" id="btnOneMore"
+      style="display:none" onclick="oneMoreLikeThis()">
+      🔁 One more like this
+    </button>
+  </div>
+
+  <!-- Next button -->
+  <button class="next-btn" id="nextBtn" onclick="loadNextQuestion()">
+    Next Question →
+  </button>
+</div>
+
+<script src="quiz.js"></script>
+</body>
+</html>

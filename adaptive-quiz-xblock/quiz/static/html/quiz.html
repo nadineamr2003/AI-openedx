@@ -1,0 +1,190 @@
+<div class="aq-xblock-root" id="aq-root">
+
+  <!-- ── START SCREEN ─────────────────────────────────────── -->
+  <div class="aq-screen" id="aq-screen-start">
+    <div class="aq-card aq-start-card">
+      <div class="aq-logo">🧠</div>
+      <h2 class="aq-title">$display_name</h2>
+      <p class="aq-subtitle">
+        Answer personalized questions and get instant adaptive feedback.
+        Difficulty adjusts to your level as you go.
+      </p>
+      <div class="aq-features">
+        <span>📈 Adaptive difficulty</span>
+        <span>💡 Instant explanations</span>
+        <span>🎯 Topic mastery tracking</span>
+      </div>
+      <div class="aq-start-controls">
+        <label class="aq-select-label" for="aq-question-count">Questions</label>
+        <select id="aq-question-count" class="aq-select">
+          <option value="5">5 questions</option>
+          <option value="10" selected>10 questions</option>
+          <option value="15">15 questions</option>
+        </select>
+      </div>
+
+      <div class="aq-start-actions">
+        <button class="aq-btn aq-btn-primary" id="aq-btn-start">Start Quiz</button>
+        <button class="aq-btn aq-btn-secondary" id="aq-btn-progress-start">View My Progress</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── LOADING SCREEN ────────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-loading">
+    <div class="aq-card aq-loading-card">
+      <div class="aq-spinner"></div>
+      <p id="aq-loading-msg">Preparing your quiz…</p>
+    </div>
+  </div>
+
+  <!-- ── QUESTION SCREEN ───────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-question">
+
+    <!-- Progress bar -->
+    <div class="aq-progress-bar-wrap">
+      <div class="aq-progress-bar" id="aq-progress-bar" style="width:0%"></div>
+    </div>
+
+    <!-- Header row -->
+    <div class="aq-q-header">
+      <span class="aq-badge aq-badge-topic" id="aq-badge-topic">Topic</span>
+      <span class="aq-counter" id="aq-counter">Q 1 / 10</span>
+      <span class="aq-badge aq-badge-diff" id="aq-badge-diff">Medium</span>
+    </div>
+
+    <!-- Question card -->
+    <div class="aq-card">
+      <p class="aq-question-text" id="aq-question-text">Loading question…</p>
+
+      <!-- Answer options -->
+      <div class="aq-options" id="aq-options">
+        <button class="aq-option" data-key="A" id="aq-opt-A">A. …</button>
+        <button class="aq-option" data-key="B" id="aq-opt-B">B. …</button>
+        <button class="aq-option" data-key="C" id="aq-opt-C">C. …</button>
+        <button class="aq-option" data-key="D" id="aq-opt-D">D. …</button>
+      </div>
+
+      <!-- Feedback area (hidden until answer submitted) -->
+      <div class="aq-feedback aq-hidden" id="aq-feedback">
+        <div class="aq-feedback-header" id="aq-feedback-header">✅ Correct!</div>
+        <div class="aq-feedback-body">
+          <p class="aq-explanation" id="aq-explanation"></p>
+
+          <!-- Mastery bar -->
+          <div class="aq-mastery-wrap">
+            <span class="aq-mastery-label">Topic Mastery</span>
+            <div class="aq-mastery-bar-bg">
+              <div class="aq-mastery-bar-fill" id="aq-mastery-fill" style="width:50%"></div>
+            </div>
+            <span class="aq-mastery-pct" id="aq-mastery-pct">50%</span>
+          </div>
+
+          <!-- Support buttons (shown conditionally) -->
+          <div class="aq-support-row" id="aq-support-row"></div>
+
+          <button class="aq-btn aq-btn-primary" id="aq-btn-next">Next Question →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── RESULTS SCREEN ────────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-results">
+    <div class="aq-card aq-results-card">
+      <div class="aq-result-emoji" id="aq-result-emoji">🎉</div>
+      <h2>Session Complete!</h2>
+
+      <div class="aq-score-display">
+        <span class="aq-score-num" id="aq-score-num">0</span>
+        <span class="aq-score-denom" id="aq-score-denom">/ 10</span>
+      </div>
+
+      <p class="aq-score-msg" id="aq-score-msg">Great work!</p>
+
+      <!-- NEW: session summary -->
+      <div class="aq-session-summary">
+        <h3 class="aq-summary-title">Session Summary</h3>
+
+        <div class="aq-summary-grid">
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Accuracy</span>
+            <span class="aq-summary-value" id="aq-summary-accuracy">0%</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Incorrect</span>
+            <span class="aq-summary-value" id="aq-summary-incorrect">0</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Last Topic</span>
+            <span class="aq-summary-value" id="aq-summary-topic">—</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Updated Mastery</span>
+            <span class="aq-summary-value" id="aq-summary-mastery">50%</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Next Difficulty</span>
+            <span class="aq-summary-value" id="aq-summary-difficulty">Medium</span>
+          </div>
+        </div>
+      </div>
+
+      <button class="aq-btn aq-btn-primary" id="aq-btn-progress">View My Progress</button>
+      <button class="aq-btn aq-btn-secondary" id="aq-btn-retry">Start New Quiz</button>
+    </div>
+  </div>
+
+  <!-- ── DASHBOARD SCREEN ───────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-dashboard">
+    <div class="aq-card aq-results-card">
+      <div class="aq-result-emoji">📈</div>
+      <h2>My Progress</h2>
+      <p class="aq-score-msg">Your all-time learning progress in this quiz module.</p>
+
+      <div class="aq-session-summary">
+        <h3 class="aq-summary-title">Overview</h3>
+
+        <div class="aq-summary-grid">
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Sessions</span>
+            <span class="aq-summary-value" id="aq-dash-sessions">0</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Total Answers</span>
+            <span class="aq-summary-value" id="aq-dash-total-answers">0</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">IRT Status</span>
+            <span class="aq-summary-value" id="aq-dash-irt">Warming up</span>
+          </div>
+
+          <div class="aq-summary-item">
+            <span class="aq-summary-label">Current Difficulty</span>
+            <span class="aq-summary-value" id="aq-dash-difficulty">Medium</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="aq-session-summary">
+        <h3 class="aq-summary-title">Topic Mastery</h3>
+        <p class="aq-dashboard-empty aq-hidden" id="aq-dashboard-empty">
+          No progress yet. Start your first quiz session to build your mastery dashboard.
+        </p>
+        <div id="aq-dashboard-topics"></div>
+      </div>
+
+      <div class="aq-dashboard-actions">
+        <button class="aq-btn aq-btn-secondary" id="aq-btn-back-results">← Back</button>
+        <button class="aq-btn aq-btn-primary" id="aq-btn-dashboard-retry">Start New Quiz</button>
+      </div>
+    </div>
+  </div>
+
+</div>
