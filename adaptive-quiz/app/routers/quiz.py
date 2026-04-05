@@ -323,3 +323,10 @@ async def list_content(course_id: str):
         {"_id": 0}
     ).to_list(100)
     return {"course_id": course_id, "items": items}
+
+@router.get("/courses")
+async def list_courses():
+    """Return all available course IDs that have active content."""
+    db = get_db()
+    courses = await db.course_content.distinct("course_id", {"active": True})
+    return {"courses": sorted(courses)}

@@ -14,6 +14,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
   var urlProgress = runtime.handlerUrl(element, 'get_progress');
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
+  var urlGetCourses = runtime.handlerUrl(element, 'get_courses');
 
   // ── State ────────────────────────────────────────────────────────────
   var state = {
@@ -36,7 +37,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function $(sel) { return element.querySelector(sel); }
 
   // ── Show / hide screens ─────────────────────────────────────────────
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'content'];
+  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'course', 'content'];
   function showScreen(name) {
     SCREENS.forEach(function (s) {
       var el = element.querySelector('#aq-screen-' + s);
@@ -72,22 +73,71 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       progress.style.width = Math.round((questionsSeenNow / state.maxQuestionsCurrent) * 100) + '%';
   }
 
+  var selectedCourseId = '';
   var selectedContentIds = [];
 
-  function loadContentPicker() {
+  function loadCoursePicker() {
+    setLoading('Loading available courses…');
+    jQuery.ajax({
+      type: 'POST',
+      url: urlGetCourses,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
+      success: function (data) {
+        if (!data.success || !data.courses || data.courses.length === 0) {
+          alert('No courses available yet.');
+          showScreen('start');
+          return;
+        }
+        renderCoursePicker(data.courses);
+      },
+      error: function () {
+        alert('Could not load courses.');
+        showScreen('start');
+      }
+    });
+  }
+
+  function renderCoursePicker(courses) {
+    var list = $('#aq-course-list');
+    if (!list) {
+      showScreen('start');
+      return;
+    }
+
+    list.innerHTML = '';
+    courses.forEach(function (courseId, index) {
+      var label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer;';
+      label.innerHTML = `
+      <input type="radio" name="aq-course-choice" value="${courseId}" ${index === 0 ? 'checked' : ''}>
+      <span><strong>${courseId}</strong></span>
+    `;
+      list.appendChild(label);
+    });
+
+    showScreen('course');
+  }
+
+  function loadContentPicker(courseId) {
     setLoading('Loading your course content…');
     jQuery.ajax({
-      type: 'POST', url: urlGetContent,
-      data: JSON.stringify({}), contentType: 'application/json',
+      type: 'POST',
+      url: urlGetContent,
+      data: JSON.stringify({ selected_course_id: courseId }),
+      contentType: 'application/json',
       success: function (data) {
         if (!data.success || !data.items || data.items.length === 0) {
-          // No content in DB — use placeholder flow
-          startSessionWithIds([]);
+          alert('No content found for this course yet.');
+          showScreen('course');
           return;
         }
         renderContentPicker(data.items);
       },
-      error: function () { startSessionWithIds([]); }
+      error: function () {
+        alert('Could not load course content.');
+        showScreen('course');
+      }
     });
   }
 
@@ -120,28 +170,41 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         alert('Please select at least one topic.');
         return;
       }
-      startSessionWithIds(selectedContentIds);
+      startSessionWithIds(selectedContentIds, selectedCourseId);
     };
   }
 
   var contentBackBtn = $('#aq-btn-content-back');
-  if (contentBackBtn) contentBackBtn.onclick = function () { showScreen('start'); };
+  if (contentBackBtn) contentBackBtn.onclick = function () { showScreen('course'); };
 
-  function startSessionWithIds(ids) {
+  function startSessionWithIds(ids, courseId) {
     var countSelect = $('#aq-question-count');
     var chosenCount = countSelect ? parseInt(countSelect.value, 10) : MAX_Q;
+
     state.questionsSeenSoFar = 0;
     state.sessionScore = 0;
+    state.lastTopic = '—';
+    state.lastMasteryPct = 50;
+    state.lastDifficulty = 2;
+
     setLoading('Preparing your adaptive quiz…');
     jQuery.ajax({
-      type: 'POST', url: urlStart,
-      data: JSON.stringify({ question_count: chosenCount, content_ids: ids }),
+      type: 'POST',
+      url: urlStart,
+      data: JSON.stringify({
+        question_count: chosenCount,
+        selected_course_id: courseId,
+        content_ids: ids
+      }),
       contentType: 'application/json',
       success: function (data) {
         state.maxQuestionsCurrent = (data && data.max_questions) ? data.max_questions : chosenCount;
         renderQuestion(data);
       },
-      error: function () { alert('Could not connect to the quiz backend.'); showScreen('start'); }
+      error: function () {
+        alert('Could not connect to the quiz backend.');
+        showScreen('start');
+      }
     });
   }
 
@@ -511,10 +574,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   // ── Wire up static buttons ───────────────────────────────────────────
   var startBtn = $('#aq-btn-start');
-  if (startBtn) startBtn.onclick = loadContentPicker;
+  if (startBtn) startBtn.onclick = loadCoursePicker;
 
   var retryBtn = $('#aq-btn-retry');
-  if (retryBtn) retryBtn.onclick = startSession;
+  if (retryBtn) retryBtn.onclick = loadCoursePicker;
 
   var progressBtn = $('#aq-btn-progress');
   if (progressBtn) {
@@ -529,11 +592,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   var dashRetryBtn = $('#aq-btn-dashboard-retry');
-  if (dashRetryBtn) dashRetryBtn.onclick = startSession;
+  if (dashRetryBtn) dashRetryBtn.onclick = loadCoursePicker;
 
   var progressStartBtn = $('#aq-btn-progress-start');
   if (progressStartBtn) {
     progressStartBtn.onclick = function () { loadDashboard('start'); };
+  }
+
+  var courseBackBtn = $('#aq-btn-course-back');
+  if (courseBackBtn) courseBackBtn.onclick = function () { showScreen('start'); };
+
+  var courseContinueBtn = $('#aq-btn-course-continue');
+  if (courseContinueBtn) {
+    courseContinueBtn.onclick = function () {
+      var checked = element.querySelector('#aq-course-list input[type=radio]:checked');
+      if (!checked) {
+        alert('Please select a course.');
+        return;
+      }
+      selectedCourseId = checked.value;
+      loadContentPicker(selectedCourseId);
+    };
   }
 
   // ── Restore in-progress session ──────────────────────────────────────

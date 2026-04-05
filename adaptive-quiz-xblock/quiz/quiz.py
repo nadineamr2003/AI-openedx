@@ -161,6 +161,7 @@ class AdaptiveQuizXBlock(XBlock):
     session_topics_json = String(default="", scope=Scope.user_state)
     session_source_text = String(default="", scope=Scope.user_state)
     session_target_questions = Integer(default=0, scope=Scope.user_state)
+    selected_course_id = String(default="", scope=Scope.user_state)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -192,6 +193,10 @@ class AdaptiveQuizXBlock(XBlock):
         """Return the contents of a static resource file."""
         data = pkg_resources.resource_string(__name__, path)
         return data.decode("utf8")
+    
+    def _active_course_id(self):
+        """Use the learner-selected course if available, otherwise fall back to Studio default."""
+        return self.selected_course_id or self.course_id
 
     # ------------------------------------------------------------------ #
     # Student view                                                         #
@@ -286,58 +291,36 @@ class AdaptiveQuizXBlock(XBlock):
         self.session_target_questions = requested_q
 
         student_id = self._student_id()
+        selected_course = data.get("selected_course_id") or self._active_course_id()
         content_ids = data.get("content_ids", [])
 
-        if content_ids:
-            # Student selected real content from DB
-            self.session_source_text = ""
-            self.session_topics_json = json.dumps([])
-            self.questions_seen = 0
-            self.session_score = 0
-            self.session_active = True
+        # Persist selected learner course for the rest of the session
+        self.selected_course_id = selected_course
 
-            start_resp = self._api("/api/quiz/session/start", payload={
-                "student_id": student_id,
-                "course_id": self.course_id,
-                "topic": "",
-                "source_text": "",
-                "content_ids": content_ids,
-            })
+        self.questions_seen = 0
+        self.session_score = 0
+        self.session_active = True
+        self.session_source_text = ""
+        self.session_topics_json = json.dumps([])
 
-            if not start_resp:
-                return {"success": False, "error": "Could not reach quiz backend."}
+        if not content_ids:
+            return {"success": False, "error": "Please select at least one content item."}
 
-            # Store resolved topics and source text from backend response
-            self.session_topics_json = json.dumps(start_resp.get("topics", []))
-            self.session_source_text = start_resp.get("resolved_source_text", "")
-            self.current_difficulty = start_resp.get("current_difficulty", 2)
-            self.current_topic = start_resp.get("topics", [""])[0] if start_resp.get("topics") else ""
+        start_resp = self._api("/api/quiz/session/start", payload={
+            "student_id": student_id,
+            "course_id": selected_course,
+            "topic": "",
+            "source_text": "",
+            "content_ids": content_ids,
+        })
 
-        else:
-            # Fallback — placeholder content pool
-            content = self._pick_content()
-            topics = content["topics"]
-            source_text = content["source_text"]
+        if not start_resp:
+            return {"success": False, "error": "Could not reach quiz backend."}
 
-            self.session_source_text = source_text
-            self.session_topics_json = json.dumps(topics)
-            self.questions_seen = 0
-            self.session_score = 0
-            self.session_active = True
-
-            start_resp = self._api("/api/quiz/session/start", payload={
-                "student_id": student_id,
-                "course_id": self.course_id,
-                "topic": ", ".join(topics),
-                "source_text": source_text,
-                "content_ids": [],
-            })
-
-            if not start_resp:
-                return {"success": False, "error": "Could not reach quiz backend."}
-
-            self.current_difficulty = start_resp.get("current_difficulty", 2)
-            self.current_topic = topics[0]
+        self.session_topics_json = json.dumps(start_resp.get("topics", []))
+        self.session_source_text = start_resp.get("resolved_source_text", "")
+        self.current_difficulty = start_resp.get("current_difficulty", 2)
+        self.current_topic = start_resp.get("topics", [""])[0] if start_resp.get("topics") else ""
 
         return self._fetch_and_store_question()
 
@@ -365,7 +348,7 @@ class AdaptiveQuizXBlock(XBlock):
 
         submit_resp = self._api("/api/quiz/submit", payload={
             "student_id": student_id,
-            "course_id": self.course_id,
+            "course_id": self._active_course_id(),
             "question_id": question.get("question", "")[:80],  # use truncated question as ID
             "selected_answer": selected,
             "correct_answer": question.get("correct_answer", ""),
@@ -430,7 +413,7 @@ class AdaptiveQuizXBlock(XBlock):
         """Proxy to /api/quiz/support/similar for one-more-like-this."""
         resp = self._api("/api/quiz/support/similar", payload={
             "student_id": self._student_id(),
-            "course_id": self.course_id,
+            "course_id": self._active_course_id(),
             "topic": self.current_topic,
             "difficulty": self.current_difficulty,
             "source_text": self.session_source_text,
@@ -444,13 +427,14 @@ class AdaptiveQuizXBlock(XBlock):
     def get_progress(self, data, suffix=""):
         """Return all-time dashboard data by combining mastery + full state."""
         student_id = self._student_id()
+        active_course = self._active_course_id()
 
         mastery_resp = self._api(
-            f"/api/quiz/mastery/{student_id}/{self.course_id}",
+            f"/api/quiz/mastery/{student_id}/{active_course}",
             method="GET"
         )
         state_resp = self._api(
-            f"/api/quiz/state/{student_id}/{self.course_id}",
+            f"/api/quiz/state/{student_id}/{active_course}",
             method="GET"
         )
 
@@ -460,7 +444,7 @@ class AdaptiveQuizXBlock(XBlock):
                 "success": True,
                 "has_progress": False,
                 "student_id": student_id,
-                "course_id": self.course_id,
+                "course_id": active_course,
                 "topic_mastery": {},
                 "weak_topics": [],
                 "strong_topics": [],
@@ -480,7 +464,7 @@ class AdaptiveQuizXBlock(XBlock):
             "success": True,
             "has_progress": True,
             "student_id": student_id,
-            "course_id": self.course_id,
+            "course_id": active_course,
             "topic_mastery": mastery_resp.get("topic_mastery", {}),
             "weak_topics": mastery_resp.get("weak_topics", []),
             "strong_topics": mastery_resp.get("strong_topics", []),
@@ -501,10 +485,22 @@ class AdaptiveQuizXBlock(XBlock):
     
     @XBlock.json_handler
     def get_content(self, data, suffix=""):
-        resp = self._api(f"/api/quiz/content/{self.course_id}", method="GET")
+        selected_course = data.get("selected_course_id") or self._active_course_id()
+        resp = self._api(f"/api/quiz/content/{selected_course}", method="GET")
         if resp:
-            return {"success": True, "items": resp.get("items", [])}
-        return {"success": True, "items": []}
+            return {
+                "success": True,
+                "course_id": selected_course,
+                "items": resp.get("items", [])
+            }
+        return {"success": True, "course_id": selected_course, "items": []}
+    
+    @XBlock.json_handler
+    def get_courses(self, data, suffix=""):
+        resp = self._api("/api/quiz/courses", method="GET")
+        if resp:
+            return {"success": True, "courses": resp.get("courses", [])}
+        return {"success": True, "courses": []}
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #
@@ -520,7 +516,7 @@ class AdaptiveQuizXBlock(XBlock):
 
         resp = self._api("/api/quiz/generate", payload={
             "student_id": self._student_id(),
-            "course_id": self.course_id,
+            "course_id": self._active_course_id(),
             "topic": topic,
             "difficulty": self.current_difficulty,
             "source_text": self.session_source_text,
