@@ -13,6 +13,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
   var urlProgress = runtime.handlerUrl(element, 'get_progress');
+  var urlGetContent = runtime.handlerUrl(element, 'get_content');
 
   // ── State ────────────────────────────────────────────────────────────
   var state = {
@@ -35,7 +36,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function $(sel) { return element.querySelector(sel); }
 
   // ── Show / hide screens ─────────────────────────────────────────────
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard'];
+  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'content'];
   function showScreen(name) {
     SCREENS.forEach(function (s) {
       var el = element.querySelector('#aq-screen-' + s);
@@ -69,6 +70,79 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
     if (progress)
       progress.style.width = Math.round((questionsSeenNow / state.maxQuestionsCurrent) * 100) + '%';
+  }
+
+  var selectedContentIds = [];
+
+  function loadContentPicker() {
+    setLoading('Loading your course content…');
+    jQuery.ajax({
+      type: 'POST', url: urlGetContent,
+      data: JSON.stringify({}), contentType: 'application/json',
+      success: function (data) {
+        if (!data.success || !data.items || data.items.length === 0) {
+          // No content in DB — use placeholder flow
+          startSessionWithIds([]);
+          return;
+        }
+        renderContentPicker(data.items);
+      },
+      error: function () { startSessionWithIds([]); }
+    });
+  }
+
+  function renderContentPicker(items) {
+    var list = $('#aq-content-list');
+    if (!list) { startSessionWithIds([]); return; }
+    list.innerHTML = '';
+    items.forEach(function (item) {
+      var label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer;';
+      label.innerHTML = `
+      <input type="checkbox" value="${item.title}" style="width:18px;height:18px;">
+      <span>
+        <strong>${item.title}</strong>
+        <span style="color:#6b7280;font-size:0.82rem;margin-left:8px;">Week ${item.week} · ${item.content_type}</span>
+      </span>`;
+      list.appendChild(label);
+    });
+    showScreen('content');
+  }
+
+  // Change start button to go through content picker first
+
+  var contentStartBtn = $('#aq-btn-content-start');
+  if (contentStartBtn) {
+    contentStartBtn.onclick = function () {
+      var checked = element.querySelectorAll('#aq-content-list input[type=checkbox]:checked');
+      selectedContentIds = Array.from(checked).map(function (cb) { return cb.value; });
+      if (selectedContentIds.length === 0) {
+        alert('Please select at least one topic.');
+        return;
+      }
+      startSessionWithIds(selectedContentIds);
+    };
+  }
+
+  var contentBackBtn = $('#aq-btn-content-back');
+  if (contentBackBtn) contentBackBtn.onclick = function () { showScreen('start'); };
+
+  function startSessionWithIds(ids) {
+    var countSelect = $('#aq-question-count');
+    var chosenCount = countSelect ? parseInt(countSelect.value, 10) : MAX_Q;
+    state.questionsSeenSoFar = 0;
+    state.sessionScore = 0;
+    setLoading('Preparing your adaptive quiz…');
+    jQuery.ajax({
+      type: 'POST', url: urlStart,
+      data: JSON.stringify({ question_count: chosenCount, content_ids: ids }),
+      contentType: 'application/json',
+      success: function (data) {
+        state.maxQuestionsCurrent = (data && data.max_questions) ? data.max_questions : chosenCount;
+        renderQuestion(data);
+      },
+      error: function () { alert('Could not connect to the quiz backend.'); showScreen('start'); }
+    });
   }
 
   // ── Render a question ────────────────────────────────────────────────
@@ -437,7 +511,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   // ── Wire up static buttons ───────────────────────────────────────────
   var startBtn = $('#aq-btn-start');
-  if (startBtn) startBtn.onclick = startSession;
+  if (startBtn) startBtn.onclick = loadContentPicker;
 
   var retryBtn = $('#aq-btn-retry');
   if (retryBtn) retryBtn.onclick = startSession;

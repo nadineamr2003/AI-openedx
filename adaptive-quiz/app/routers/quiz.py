@@ -1,7 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 from app.models.quiz import (
-    GenerateRequest, SubmitRequest, SubmitResponse, MasteryResponse
+    GenerateRequest,
+    SubmitRequest,
+    SubmitResponse,
+    MasteryResponse,
+    ContentItem,
 )
 from app.services.ai_engine import generate_question, generate_simple_explanation
 from app.services.adaptation import (
@@ -196,39 +200,76 @@ async def get_mastery(student_id: str, course_id: str):
 
 @router.post("/session/start")
 async def session_start(req: GenerateRequest):
-    """
-    Initialize a quiz session.
-    - Creates student state if not exists
-    - Pre-fills question cache for all topics and difficulties
-    - Returns session info
-    """
     db = get_db()
 
+    resolved_topics = []
+    resolved_source_text = ""
+
+    if req.content_ids:
+        # Resolve content items from MongoDB
+        for title in req.content_ids:
+            item = await db.course_content.find_one(
+                {"course_id": req.course_id, "title": title, "active": True},
+                {"_id": 0}
+            )
+            if item:
+                resolved_topics.extend(item.get("topics", [title]))
+                resolved_source_text += "\n\n" + item.get("source_text", "")
+
+        # Deduplicate topics while preserving order
+        seen = set()
+        deduped = []
+        for t in resolved_topics:
+            if t not in seen:
+                seen.add(t)
+                deduped.append(t)
+        resolved_topics = deduped
+
+        if not resolved_topics:
+            raise HTTPException(
+                status_code=404,
+                detail="No active content found for the selected items."
+            )
+    else:
+        # Fallback — use topic/source_text from request directly
+        resolved_topics = [t.strip() for t in req.topic.split(",") if t.strip()]
+        resolved_source_text = req.source_text
+
     # Get or create student state
-    topics = [t.strip() for t in req.topic.split(",")]
-    state = await _get_state(req.student_id, req.course_id, topics)
+    state = await _get_state(req.student_id, req.course_id, resolved_topics)
+
+    # Add any new topics not yet in student state
+    for topic in resolved_topics:
+        if topic not in state["topic_mastery"]:
+            state["topic_mastery"][topic] = 0.5
 
     # Increment session count
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
-    # Fire background cache fill for all topic/difficulty combos
-    for topic in topics:
+    # Fire background cache fill for all resolved topics
+    for topic in resolved_topics:
         asyncio.create_task(
-            _replenish_cache(topic, state["current_difficulty"],
-                            req.course_id, req.source_text, target=3)
+            _replenish_cache(
+                topic,
+                state["current_difficulty"],
+                req.course_id,
+                resolved_source_text,
+                target=3
+            )
         )
 
     return {
         "student_id": req.student_id,
         "course_id": req.course_id,
-        "topics": topics,
+        "topics": resolved_topics,
+        "resolved_source_text": resolved_source_text,
         "session_count": state["session_count"],
         "current_difficulty": state["current_difficulty"],
         "topic_mastery": state["topic_mastery"],
         "irt_active": state["irt_active"],
         "cache_filling": True,
-        "message": f"Session started. Pre-generating questions for {len(topics)} topic(s)."
+        "message": f"Session started. Pre-generating questions for {len(resolved_topics)} topic(s)."
     }
 
 @router.post("/support/explain")
@@ -263,3 +304,22 @@ async def support_similar(req: GenerateRequest):
         return question
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    
+@router.post("/content/add")
+async def add_content(item: ContentItem):
+    """Instructor adds a content item (paste text + metadata)."""
+    db = get_db()
+    doc = item.model_dump()
+    doc["uploaded_at"] = datetime.now(timezone.utc).isoformat()
+    await db.course_content.insert_one(doc)
+    return {"success": True, "message": f"Content '{item.title}' added."}
+
+@router.get("/content/{course_id}")
+async def list_content(course_id: str):
+    """Student fetches available content items for this course."""
+    db = get_db()
+    items = await db.course_content.find(
+        {"course_id": course_id, "active": True},
+        {"_id": 0}
+    ).to_list(100)
+    return {"course_id": course_id, "items": items}

@@ -281,45 +281,64 @@ class AdaptiveQuizXBlock(XBlock):
 
     @XBlock.json_handler
     def start_session(self, data, suffix=""):
-        """
-        Student clicks "Start Quiz".
-        1. Pick a random content bundle.
-        2. Call /api/quiz/session/start on the backend.
-        3. Fetch the first question.
-        """
         requested_q = int(data.get("question_count", self.max_questions))
         requested_q = max(1, min(50, requested_q))
         self.session_target_questions = requested_q
-        
-        content = self._pick_content()
-        topics = content["topics"]
-        source_text = content["source_text"]
-
-        # Persist chosen content for this session (needed for /generate calls)
-        self.session_source_text = source_text
-        self.session_topics_json = json.dumps(topics)
-        self.questions_seen = 0
-        self.session_score = 0
-        self.session_active = True
 
         student_id = self._student_id()
+        content_ids = data.get("content_ids", [])
 
-        # Tell backend to init state + warm cache
-        start_resp = self._api("/api/quiz/session/start", payload={
-            "student_id": student_id,
-            "course_id": self.course_id,
-            "topic": ", ".join(topics),
-            "source_text": source_text,
-        })
+        if content_ids:
+            # Student selected real content from DB
+            self.session_source_text = ""
+            self.session_topics_json = json.dumps([])
+            self.questions_seen = 0
+            self.session_score = 0
+            self.session_active = True
 
-        if not start_resp:
-            return {"success": False, "error": "Could not reach quiz backend."}
+            start_resp = self._api("/api/quiz/session/start", payload={
+                "student_id": student_id,
+                "course_id": self.course_id,
+                "topic": "",
+                "source_text": "",
+                "content_ids": content_ids,
+            })
 
-        # Remember backend-chosen difficulty and first topic
-        self.current_difficulty = start_resp.get("current_difficulty", 2)
-        self.current_topic = topics[0]
+            if not start_resp:
+                return {"success": False, "error": "Could not reach quiz backend."}
 
-        # Fetch first question
+            # Store resolved topics and source text from backend response
+            self.session_topics_json = json.dumps(start_resp.get("topics", []))
+            self.session_source_text = start_resp.get("resolved_source_text", "")
+            self.current_difficulty = start_resp.get("current_difficulty", 2)
+            self.current_topic = start_resp.get("topics", [""])[0] if start_resp.get("topics") else ""
+
+        else:
+            # Fallback — placeholder content pool
+            content = self._pick_content()
+            topics = content["topics"]
+            source_text = content["source_text"]
+
+            self.session_source_text = source_text
+            self.session_topics_json = json.dumps(topics)
+            self.questions_seen = 0
+            self.session_score = 0
+            self.session_active = True
+
+            start_resp = self._api("/api/quiz/session/start", payload={
+                "student_id": student_id,
+                "course_id": self.course_id,
+                "topic": ", ".join(topics),
+                "source_text": source_text,
+                "content_ids": [],
+            })
+
+            if not start_resp:
+                return {"success": False, "error": "Could not reach quiz backend."}
+
+            self.current_difficulty = start_resp.get("current_difficulty", 2)
+            self.current_topic = topics[0]
+
         return self._fetch_and_store_question()
 
     @XBlock.json_handler
@@ -479,6 +498,13 @@ class AdaptiveQuizXBlock(XBlock):
         self.backend_url = data.get("backend_url", self.backend_url)
         self.max_questions = int(data.get("max_questions", self.max_questions))
         return {"success": True}
+    
+    @XBlock.json_handler
+    def get_content(self, data, suffix=""):
+        resp = self._api(f"/api/quiz/content/{self.course_id}", method="GET")
+        if resp:
+            return {"success": True, "items": resp.get("items", [])}
+        return {"success": True, "items": []}
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #

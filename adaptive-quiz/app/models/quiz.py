@@ -7,6 +7,7 @@ class GenerateRequest(BaseModel):
     difficulty: int = 2       # 1=easy 2=medium 3=hard
     source_text: str
     mode: str = "auto"        # auto | weakness_review | challenge
+    content_ids: list[str] = []
 
 class SubmitRequest(BaseModel):
     student_id: str
@@ -34,3 +35,16 @@ class MasteryResponse(BaseModel):
     topic_mastery: dict[str, float]
     weak_topics: list[str]
     strong_topics: list[str]
+
+class ContentItem(BaseModel):
+    course_id: str
+    week: int
+    content_type: str        # lecture | tutorial | lab 
+    title: str
+    topics: list[str]
+    source_text: str
+    active: bool = True
+
+class ContentListResponse(BaseModel):
+    course_id: str
+    items: list[dict]
