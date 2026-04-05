@@ -74,7 +74,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   var selectedCourseId = '';
+  var selectedCourseName = '';
   var selectedContentIds = [];
+  var pickerMode = 'quiz';
+  var allContentItems = [];
 
   function loadCoursePicker() {
     setLoading('Loading available courses…');
@@ -113,7 +116,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       var label = document.createElement('label');
       label.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer;';
       label.innerHTML = `
-      <input type="radio" name="aq-course-choice" value="${courseId}" ${index === 0 ? 'checked' : ''}>
+<input type="radio" name="aq-course-choice" value="${courseId}" data-course-name="${courseName}" ${index === 0 ? 'checked' : ''}>
       <span>
         <strong>${courseId}</strong>
         <span style="color:#6b7280;font-size:0.9rem;margin-left:8px;">${courseName}</span>
@@ -138,7 +141,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           showScreen('course');
           return;
         }
-        renderContentPicker(data.items);
+        allContentItems = data.items || [];
+        renderContentPicker(allContentItems);
+        initializeContentFilters(allContentItems);
       },
       error: function () {
         alert('Could not load course content.');
@@ -153,7 +158,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       showScreen('start');
       return;
     }
+
     list.innerHTML = '';
+
+    if (!items || items.length === 0) {
+      list.innerHTML = '<p style="color:#6b7280;">No content matches the selected filters.</p>';
+      showScreen('content');
+      return;
+    }
+
     items.forEach(function (item) {
       var label = document.createElement('label');
       label.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer;';
@@ -165,7 +178,75 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       </span>`;
       list.appendChild(label);
     });
+
     showScreen('content');
+  }
+
+  function initializeContentFilters(items) {
+    var weekSelect = $('#aq-filter-week');
+    var typeSelect = $('#aq-filter-type');
+    var searchInput = $('#aq-filter-search');
+
+    if (!weekSelect || !typeSelect || !searchInput) return;
+
+    populateWeekFilter(items);
+    populateTypeFilter(items);
+
+    weekSelect.onchange = applyContentFilters;
+    typeSelect.onchange = applyContentFilters;
+    searchInput.oninput = applyContentFilters;
+  }
+
+  function populateWeekFilter(items) {
+    var weekSelect = $('#aq-filter-week');
+    if (!weekSelect) return;
+
+    var weeks = Array.from(new Set(items.map(function (item) { return item.week; })))
+      .sort(function (a, b) { return a - b; });
+
+    weekSelect.innerHTML = '<option value="">All weeks</option>';
+    weeks.forEach(function (week) {
+      var opt = document.createElement('option');
+      opt.value = String(week);
+      opt.textContent = 'Week ' + week;
+      weekSelect.appendChild(opt);
+    });
+  }
+
+  function populateTypeFilter(items) {
+    var typeSelect = $('#aq-filter-type');
+    if (!typeSelect) return;
+
+    var types = Array.from(new Set(items.map(function (item) { return item.content_type; })))
+      .sort();
+
+    typeSelect.innerHTML = '<option value="">All types</option>';
+    types.forEach(function (type) {
+      var opt = document.createElement('option');
+      opt.value = type;
+      opt.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+      typeSelect.appendChild(opt);
+    });
+  }
+
+  function applyContentFilters() {
+    var weekSelect = $('#aq-filter-week');
+    var typeSelect = $('#aq-filter-type');
+    var searchInput = $('#aq-filter-search');
+
+    var selectedWeek = weekSelect ? weekSelect.value : '';
+    var selectedType = typeSelect ? typeSelect.value : '';
+    var searchTerm = searchInput ? searchInput.value.trim().toLowerCase() : '';
+
+    var filtered = allContentItems.filter(function (item) {
+      var weekOk = !selectedWeek || String(item.week) === selectedWeek;
+      var typeOk = !selectedType || item.content_type === selectedType;
+      var searchOk = !searchTerm || (item.title || '').toLowerCase().indexOf(searchTerm) !== -1;
+
+      return weekOk && typeOk && searchOk;
+    });
+
+    renderContentPicker(filtered);
   }
 
   // Change start button to go through content picker first
@@ -456,6 +537,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       showScreen('results');
       return;
     }
+    var courseLabelEl = $('#aq-dashboard-course-label');
+    if (courseLabelEl) {
+      courseLabelEl.textContent = 'Course: ' + (selectedCourseName || data.course_id || '—');
+    }
 
     var sessionsEl = $('#aq-dash-sessions');
     var totalAnswersEl = $('#aq-dash-total-answers');
@@ -525,14 +610,23 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     showScreen('dashboard');
   }
 
-  function loadDashboard(origin) {
+  function loadDashboard(origin, courseId, courseName) {
     state.dashboardOrigin = origin || 'start';
+
+    if (courseId) {
+      selectedCourseId = courseId;
+    }
+    if (courseName) {
+      selectedCourseName = courseName;
+    }
 
     setLoading('Loading your progress…');
     jQuery.ajax({
       type: 'POST',
       url: urlProgress,
-      data: JSON.stringify({}),
+      data: JSON.stringify({
+        selected_course_id: selectedCourseId
+      }),
       contentType: 'application/json',
       success: function (data) {
         if (!data || !data.success) {
@@ -551,14 +645,26 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   // ── Wire up static buttons ───────────────────────────────────────────
   var startBtn = $('#aq-btn-start');
-  if (startBtn) startBtn.onclick = loadCoursePicker;
+  if (startBtn) {
+    startBtn.onclick = function () {
+      pickerMode = 'quiz';
+      loadCoursePicker();
+    };
+  }
 
   var retryBtn = $('#aq-btn-retry');
-  if (retryBtn) retryBtn.onclick = loadCoursePicker;
+  if (retryBtn) {
+    retryBtn.onclick = function () {
+      pickerMode = 'quiz';
+      loadCoursePicker();
+    };
+  }
 
   var progressBtn = $('#aq-btn-progress');
   if (progressBtn) {
-    progressBtn.onclick = function () { loadDashboard('results'); };
+    progressBtn.onclick = function () {
+      loadDashboard('results', selectedCourseId, selectedCourseName);
+    };
   }
 
   var backResultsBtn = $('#aq-btn-back-results');
@@ -569,11 +675,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   var dashRetryBtn = $('#aq-btn-dashboard-retry');
-  if (dashRetryBtn) dashRetryBtn.onclick = loadCoursePicker;
+  if (dashRetryBtn) {
+    dashRetryBtn.onclick = function () {
+      pickerMode = 'quiz';
+      loadCoursePicker();
+    };
+  }
 
   var progressStartBtn = $('#aq-btn-progress-start');
   if (progressStartBtn) {
-    progressStartBtn.onclick = function () { loadDashboard('start'); };
+    progressStartBtn.onclick = function () {
+      pickerMode = 'progress';
+      loadCoursePicker();
+    };
   }
 
   var courseBackBtn = $('#aq-btn-course-back');
@@ -587,8 +701,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         alert('Please select a course.');
         return;
       }
+
       selectedCourseId = checked.value;
-      loadContentPicker(selectedCourseId);
+      selectedCourseName = checked.getAttribute('data-course-name') || checked.value;
+
+      if (pickerMode === 'progress') {
+        loadDashboard('start', selectedCourseId, selectedCourseName);
+      } else {
+        loadContentPicker(selectedCourseId);
+      }
     };
   }
 

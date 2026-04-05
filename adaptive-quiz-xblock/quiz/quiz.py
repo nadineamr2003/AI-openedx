@@ -367,7 +367,10 @@ help="Default fallback course identifier used if no learner-selected course is a
     def get_progress(self, data, suffix=""):
         """Return all-time dashboard data by combining mastery + full state."""
         student_id = self._student_id()
-        active_course = self._active_course_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+
+        if active_course:
+            self.selected_course_id = active_course
 
         mastery_resp = self._api(
             f"/api/quiz/mastery/{student_id}/{active_course}",

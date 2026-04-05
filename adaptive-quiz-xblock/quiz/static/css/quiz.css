@@ -502,3 +502,42 @@
 #aq-btn-dashboard-retry {
   min-width: 170px;
 }
+
+/* content filters */
+.aq-content-filters {
+  margin-bottom: 16px;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.aq-content-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.aq-content-filter-field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #111827;
+}
+
+.aq-content-filter-field select,
+.aq-content-filter-field input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+@media (max-width: 640px) {
+  .aq-content-filter-row {
+    grid-template-columns: 1fr;
+  }
+}

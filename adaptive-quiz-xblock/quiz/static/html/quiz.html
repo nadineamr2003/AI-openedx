@@ -34,7 +34,7 @@
     <div class="aq-card aq-start-card">
       <div class="aq-logo">🎓</div>
       <h2 class="aq-title">Choose a course</h2>
-      <p class="aq-subtitle">Select the course you want to practice.</p>
+      <p class="aq-subtitle">Select your desired course.</p>
 
       <div id="aq-course-list">
         <p style="color:#999">Loading available courses…</p>
@@ -53,6 +53,28 @@
       <div class="aq-logo">📚</div>
       <h2 class="aq-title">What do you want to practice?</h2>
       <p class="aq-subtitle">Select one or more topics from your course content.</p>
+      <div class="aq-content-filters">
+        <div class="aq-content-filter-row">
+          <div class="aq-content-filter-field">
+            <label for="aq-filter-week">Week</label>
+            <select id="aq-filter-week">
+              <option value="">All weeks</option>
+            </select>
+          </div>
+
+          <div class="aq-content-filter-field">
+            <label for="aq-filter-type">Content Type</label>
+            <select id="aq-filter-type">
+              <option value="">All types</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="aq-content-filter-field">
+          <label for="aq-filter-search">Search title</label>
+          <input type="text" id="aq-filter-search" placeholder="Search content title..." />
+        </div>
+      </div>
       <div id="aq-content-list">
         <p style="color:#999">Loading available content…</p>
       </div>
@@ -177,6 +199,7 @@
     <div class="aq-card aq-results-card">
       <div class="aq-result-emoji">📈</div>
       <h2>My Progress</h2>
+      <p class="aq-score-msg" id="aq-dashboard-course-label">Course: —</p>
       <p class="aq-score-msg">Your all-time learning progress in this quiz module.</p>
 
       <div class="aq-session-summary">
