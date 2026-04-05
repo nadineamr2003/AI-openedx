@@ -130,7 +130,7 @@ async def submit(req: SubmitRequest):
     await _save_state(state)
 
     # Decide next question parameters
-    allowed_topics = state.get("session_topics") or [req.topic]
+    allowed_topics = state.get("session_topics") or list(state["topic_mastery"].keys()) or [req.topic]
 
     scoped_mastery = {
         topic: state["topic_mastery"].get(topic, 0.5)

@@ -453,10 +453,8 @@ help="Default fallback course identifier used if no learner-selected course is a
         """Call /api/quiz/generate, store result in user_state, return to JS."""
         topics = json.loads(self.session_topics_json) if self.session_topics_json else ["General"]
 
-        
-
-            # Rotate topic if multiple topics available
-            # Backend's next_topic drives this after first answer; before that pick first
+        # Rotate topic if multiple topics available
+         # Backend's next_topic drives this after first answer; before that pick first
         topic = self.current_topic if self.current_topic else topics[0]
         if topic not in topics:
             topic = topics[0]
