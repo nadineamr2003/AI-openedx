@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.routers import quiz
 from app.db.mongodb import connect_db, close_db
+import logging
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="Adaptive Quiz API",

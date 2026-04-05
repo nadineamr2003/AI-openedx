@@ -268,7 +268,7 @@ class AdaptiveQuizXBlock(XBlock):
             new FormData(this).forEach(function(v, k) {{ data[k] = v; }});
             data.max_questions = parseInt(data.max_questions);
             Xblock.runtime.handler_url && runtime.notify('save', {{state: 'start'}});
-            $.post(runtime.handlerUrl(element, 'studio_submit'), JSON.stringify(data))
+            jQuery.post(runtime.handlerUrl(element, 'studio_submit'), JSON.stringify(data))
               .done(function() {{ runtime.notify('save', {{state: 'end'}}); }});
           }});
         </script>
