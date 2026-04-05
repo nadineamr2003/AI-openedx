@@ -130,7 +130,14 @@ async def submit(req: SubmitRequest):
     await _save_state(state)
 
     # Decide next question parameters
-    next_topic, next_mode   = select_next_topic(state["topic_mastery"])
+    allowed_topics = state.get("session_topics") or [req.topic]
+
+    scoped_mastery = {
+        topic: state["topic_mastery"].get(topic, 0.5)
+        for topic in allowed_topics
+    }
+
+    next_topic, next_mode = select_next_topic(scoped_mastery)
     next_difficulty         = state["current_difficulty"]
     updated_mastery         = state["topic_mastery"].get(req.topic, 0.5)
 
@@ -243,6 +250,9 @@ async def session_start(req: GenerateRequest):
         if topic not in state["topic_mastery"]:
             state["topic_mastery"][topic] = 0.5
 
+    # Restrict this session to the learner-selected topics only
+    state["session_topics"] = resolved_topics
+
     # Increment session count
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
@@ -326,7 +336,26 @@ async def list_content(course_id: str):
 
 @router.get("/courses")
 async def list_courses():
-    """Return all available course IDs that have active content."""
+    """Return all available courses with friendly names if available."""
     db = get_db()
-    courses = await db.course_content.distinct("course_id", {"active": True})
-    return {"courses": sorted(courses)}
+
+    docs = await db.course_content.find(
+        {"active": True},
+        {"_id": 0, "course_id": 1, "course_name": 1}
+    ).to_list(500)
+
+    seen = {}
+    for doc in docs:
+        cid = doc.get("course_id")
+        if not cid:
+            continue
+
+        cname = doc.get("course_name") or cid
+        if cid not in seen:
+            seen[cid] = {
+                "course_id": cid,
+                "course_name": cname
+            }
+
+    courses = sorted(seen.values(), key=lambda x: x["course_id"])
+    return {"courses": courses}

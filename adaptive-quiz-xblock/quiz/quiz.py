@@ -5,91 +5,16 @@ XBlock fields store only rendering/session state (never adaptive state).
 All mastery, IRT, and difficulty live in MongoDB via the FastAPI backend.
 """
 
-import random
 import json
 import logging
 import pkg_resources
 import requests
 
 from xblock.core import XBlock
-from xblock.fields import Scope, Integer, String, Float, List, Boolean
+from xblock.fields import Scope, Integer, String, Boolean
 from xblock.fragment import Fragment
 
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Placeholder content pool — randomly selected per session start.
-# Each entry has a topic list and a source_text the LLM will use.
-# ---------------------------------------------------------------------------
-PLACEHOLDER_CONTENT = [
-    {
-        "topics": ["Photosynthesis", "Cellular Respiration", "Chloroplasts"],
-        "source_text": (
-            "Photosynthesis is the process by which green plants, algae, and some bacteria "
-            "convert light energy into chemical energy stored as glucose. It occurs in the "
-            "chloroplasts, specifically using chlorophyll to absorb sunlight. The overall "
-            "equation is: 6CO2 + 6H2O + light energy → C6H12O6 + 6O2. "
-            "Photosynthesis has two main stages: the light-dependent reactions, which occur "
-            "in the thylakoid membranes and produce ATP and NADPH, and the Calvin cycle "
-            "(light-independent reactions), which occur in the stroma and use that energy "
-            "to fix CO2 into glucose. Cellular respiration is essentially the reverse — "
-            "glucose is broken down to release energy in the form of ATP. It occurs in the "
-            "mitochondria and involves glycolysis, the Krebs cycle, and the electron "
-            "transport chain. Aerobic respiration produces approximately 36–38 ATP per "
-            "glucose molecule, making it far more efficient than anaerobic respiration."
-        ),
-    },
-    {
-        "topics": ["Newton's Laws", "Forces", "Momentum"],
-        "source_text": (
-            "Newton's three laws of motion form the foundation of classical mechanics. "
-            "The first law (Law of Inertia) states that an object at rest stays at rest "
-            "and an object in motion stays in motion unless acted upon by an external force. "
-            "The second law defines force as F = ma: the net force on an object equals its "
-            "mass multiplied by its acceleration. This means heavier objects require more "
-            "force to accelerate at the same rate. The third law states that for every "
-            "action there is an equal and opposite reaction — forces always come in pairs. "
-            "Momentum is defined as p = mv (mass × velocity) and is conserved in closed "
-            "systems. An impulse (force × time) changes an object's momentum. These laws "
-            "break down at relativistic speeds (near the speed of light), where Einstein's "
-            "special relativity must be used instead."
-        ),
-    },
-    {
-        "topics": ["HTTP Protocol", "REST APIs", "Status Codes"],
-        "source_text": (
-            "HTTP (HyperText Transfer Protocol) is the foundation of data communication "
-            "on the web. It is a stateless, request-response protocol. A client sends an "
-            "HTTP request to a server, which responds with a status code and optional body. "
-            "Common methods include GET (retrieve data), POST (send data), PUT (replace "
-            "resource), PATCH (partial update), and DELETE (remove resource). "
-            "Status codes are grouped: 2xx means success (200 OK, 201 Created), 3xx means "
-            "redirection, 4xx means client error (400 Bad Request, 401 Unauthorized, "
-            "403 Forbidden, 404 Not Found), and 5xx means server error (500 Internal "
-            "Server Error, 503 Service Unavailable). REST (Representational State Transfer) "
-            "is an architectural style for designing APIs using HTTP. RESTful APIs are "
-            "stateless, use standard HTTP methods, and treat everything as a resource "
-            "identified by a URL. JSON is the most common format for REST API bodies."
-        ),
-    },
-    {
-        "topics": ["Supply and Demand", "Market Equilibrium", "Elasticity"],
-        "source_text": (
-            "Supply and demand are the core forces that determine prices in a free market. "
-            "The law of demand states that as price increases, quantity demanded decreases "
-            "(inverse relationship). The law of supply states that as price increases, "
-            "quantity supplied increases (direct relationship). Market equilibrium is the "
-            "point where supply equals demand — the equilibrium price and quantity. "
-            "If price is above equilibrium, there is a surplus; below equilibrium, a shortage. "
-            "Price elasticity of demand measures how sensitive consumers are to price changes: "
-            "elastic demand (elasticity > 1) means consumers are very responsive, inelastic "
-            "demand (elasticity < 1) means they are not. Necessities tend to be inelastic "
-            "(e.g., insulin), while luxuries tend to be elastic. Shifts in supply or demand "
-            "curves — caused by changes in income, preferences, input costs, or technology — "
-            "move the equilibrium price and quantity."
-        ),
-    },
-]
 
 # ---------------------------------------------------------------------------
 # Default FastAPI backend URL — can override in Studio
@@ -132,7 +57,7 @@ class AdaptiveQuizXBlock(XBlock):
         display_name="Course ID",
         default="demo_course_01",
         scope=Scope.settings,
-        help="Unique identifier for this course, used to namespace student state in MongoDB.",
+help="Default fallback course identifier used if no learner-selected course is active.",
     )
 
     backend_url = String(
@@ -185,10 +110,6 @@ class AdaptiveQuizXBlock(XBlock):
             log.error("Backend call failed [%s %s]: %s", method, url, exc)
             return None
 
-    def _pick_content(self):
-        """Randomly pick a content bundle from the placeholder pool."""
-        return random.choice(PLACEHOLDER_CONTENT)
-
     def resource_string(self, path):
         """Return the contents of a static resource file."""
         data = pkg_resources.resource_string(__name__, path)
@@ -224,58 +145,77 @@ class AdaptiveQuizXBlock(XBlock):
     # ------------------------------------------------------------------ #
 
     def studio_view(self, context=None):
-        """Render the Studio editor — instructors set display_name, course_id, etc."""
+        save_url = self.runtime.handler_url(self, "studio_submit")
+
         html = f"""
         <div class="aq-studio-editor">
-          <h2>Adaptive Quiz Settings</h2>
-          <form id="aq-studio-form">
+        <h2>Adaptive Quiz Settings</h2>
+        <form id="aq-studio-form">
 
             <label>Display Name
-              <input type="text" name="display_name" value="{self.display_name}" />
+            <input type="text" name="display_name" value="{self.display_name}" />
             </label>
 
-            <label>Course ID
-              <input type="text" name="course_id" value="{self.course_id}" />
-              <small>Namespace for student state in MongoDB. Use a stable identifier.</small>
+            <label>Default Course ID
+            <input type="text" name="course_id" value="{self.course_id}" />
+            <small>Optional fallback course if no learner-selected course is active.</small>
             </label>
 
             <label>Backend URL
-              <input type="text" name="backend_url" value="{self.backend_url}" />
-              <small>Base URL of the FastAPI server (e.g. http://host.docker.internal:8100).</small>
+            <input type="text" name="backend_url" value="{self.backend_url}" />
+            <small>Base URL of the FastAPI server (e.g. http://host.docker.internal:8100).</small>
             </label>
 
             <label>Questions Per Session
-              <input type="number" name="max_questions" value="{self.max_questions}" min="1" max="50" />
+            <input type="number" name="max_questions" value="{self.max_questions}" min="1" max="50" />
             </label>
 
-            <p class="aq-studio-note">
-              <strong>Content:</strong> This prototype uses randomly selected built-in
-              topic content. Future versions will support instructor-uploaded PDFs.
-            </p>
-
             <button type="submit" class="button action-primary">Save</button>
-          </form>
+        </form>
         </div>
+
         <style>
-          .aq-studio-editor {{ font-family: sans-serif; padding: 20px; }}
-          .aq-studio-editor label {{ display: block; margin-bottom: 14px; font-weight: bold; }}
-          .aq-studio-editor input {{ display: block; width: 100%; max-width: 480px;
+        .aq-studio-editor {{ font-family: sans-serif; padding: 20px; }}
+        .aq-studio-editor label {{ display: block; margin-bottom: 14px; font-weight: bold; }}
+        .aq-studio-editor input {{ display: block; width: 100%; max-width: 480px;
             padding: 6px 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; }}
-          .aq-studio-editor small {{ display: block; color: #666; font-weight: normal; margin-top: 2px; }}
-          .aq-studio-note {{ background: #fff8e1; border-left: 4px solid #ffc107;
+        .aq-studio-editor small {{ display: block; color: #666; font-weight: normal; margin-top: 2px; }}
+        .aq-studio-note {{ background: #fff8e1; border-left: 4px solid #ffc107;
             padding: 10px 14px; margin: 16px 0; border-radius: 4px; font-weight: normal; }}
-          .aq-studio-editor button {{ margin-top: 12px; padding: 8px 20px; }}
+        .aq-studio-editor button {{ margin-top: 12px; padding: 8px 20px; }}
         </style>
+
         <script>
-          document.getElementById('aq-studio-form').addEventListener('submit', function(e) {{
+        (function() {{
+            var form = document.getElementById('aq-studio-form');
+            if (!form) return;
+
+            form.addEventListener('submit', function(e) {{
             e.preventDefault();
+
             var data = {{}};
-            new FormData(this).forEach(function(v, k) {{ data[k] = v; }});
-            data.max_questions = parseInt(data.max_questions);
-            Xblock.runtime.handler_url && runtime.notify('save', {{state: 'start'}});
-            jQuery.post(runtime.handlerUrl(element, 'studio_submit'), JSON.stringify(data))
-              .done(function() {{ runtime.notify('save', {{state: 'end'}}); }});
-          }});
+            new FormData(form).forEach(function(v, k) {{
+                data[k] = v;
+            }});
+
+            data.max_questions = parseInt(data.max_questions, 10);
+
+            jQuery.ajax({{
+                type: 'POST',
+                url: '{save_url}',
+                data: JSON.stringify(data),
+                contentType: 'application/json',
+                success: function() {{
+                alert('Adaptive Quiz settings saved successfully.');
+                window.location.reload();
+                }},
+                error: function(xhr) {{
+                console.error('studio_submit failed', xhr);
+                alert('Failed to save Adaptive Quiz settings.');
+                }}
+            }});
+            }});
+        }})();
         </script>
         """
         return Fragment(html)
@@ -510,10 +450,14 @@ class AdaptiveQuizXBlock(XBlock):
         """Call /api/quiz/generate, store result in user_state, return to JS."""
         topics = json.loads(self.session_topics_json) if self.session_topics_json else ["General"]
 
-        # Rotate topic if multiple topics available
-        # Backend's next_topic drives this after first answer; before that pick first
-        topic = self.current_topic if self.current_topic else topics[0]
+        
 
+            # Rotate topic if multiple topics available
+            # Backend's next_topic drives this after first answer; before that pick first
+        topic = self.current_topic if self.current_topic else topics[0]
+        if topic not in topics:
+            topic = topics[0]
+            self.current_topic = topic
         resp = self._api("/api/quiz/generate", payload={
             "student_id": self._student_id(),
             "course_id": self._active_course_id(),

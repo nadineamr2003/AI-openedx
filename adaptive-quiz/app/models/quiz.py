@@ -38,8 +38,9 @@ class MasteryResponse(BaseModel):
 
 class ContentItem(BaseModel):
     course_id: str
+    course_name: str | None = None
     week: int
-    content_type: str        # lecture | tutorial | lab 
+    content_type: str
     title: str
     topics: list[str]
     source_text: str

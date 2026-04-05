@@ -76,6 +76,7 @@ def get_initial_student_state(student_id: str, course_id: str, topics: list) -> 
         "irt_active": False,
         "recent_answers": [],
         "session_count": 0,
+        "session_topics": topics,
         "last_updated": None
     }
 

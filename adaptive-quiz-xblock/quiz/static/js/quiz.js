@@ -106,12 +106,18 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     list.innerHTML = '';
-    courses.forEach(function (courseId, index) {
+    courses.forEach(function (course, index) {
+      var courseId = course.course_id;
+      var courseName = course.course_name || courseId;
+
       var label = document.createElement('label');
       label.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #e5e7eb;border-radius:8px;margin-bottom:8px;cursor:pointer;';
       label.innerHTML = `
       <input type="radio" name="aq-course-choice" value="${courseId}" ${index === 0 ? 'checked' : ''}>
-      <span><strong>${courseId}</strong></span>
+      <span>
+        <strong>${courseId}</strong>
+        <span style="color:#6b7280;font-size:0.9rem;margin-left:8px;">${courseName}</span>
+      </span>
     `;
       list.appendChild(label);
     });
@@ -143,7 +149,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function renderContentPicker(items) {
     var list = $('#aq-content-list');
-    if (!list) { startSessionWithIds([]); return; }
+    if (!list) {
+      showScreen('start');
+      return;
+    }
     list.innerHTML = '';
     items.forEach(function (item) {
       var label = document.createElement('label');
@@ -438,38 +447,6 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (pb) pb.style.width = '100%';
 
     showScreen('results');
-  }
-
-  // ── Start session ────────────────────────────────────────────────────
-  function startSession() {
-    var countSelect = $('#aq-question-count');
-    var chosenCount = countSelect ? parseInt(countSelect.value, 10) : MAX_Q;
-
-    state.questionsSeenSoFar = 0;
-    state.sessionScore = 0;
-    state.lastTopic = '—';
-    state.lastMasteryPct = 50;
-    state.lastDifficulty = 2;
-
-    setLoading('Preparing your adaptive quiz…');
-    jQuery.ajax({
-      type: 'POST',
-      url: urlStart,
-      data: JSON.stringify({ question_count: chosenCount }),
-      contentType: 'application/json',
-      success: function (data) {
-        if (data && data.max_questions) {
-          state.maxQuestionsCurrent = data.max_questions;
-        } else {
-          state.maxQuestionsCurrent = chosenCount;
-        }
-        renderQuestion(data);
-      },
-      error: function () {
-        alert('Could not connect to the quiz backend. Please try again later.');
-        showScreen('start');
-      },
-    });
   }
 
   // dashboard
