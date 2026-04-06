@@ -87,6 +87,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     session_source_text = String(default="", scope=Scope.user_state)
     session_target_questions = Integer(default=0, scope=Scope.user_state)
     selected_course_id = String(default="", scope=Scope.user_state)
+    active_session_id = String(default="", scope=Scope.user_state)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -252,11 +253,13 @@ help="Default fallback course identifier used if no learner-selected course is a
             "topic": "",
             "source_text": "",
             "content_ids": content_ids,
+            "question_count": requested_q,
         })
 
         if not start_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
-
+        
+        self.active_session_id = start_resp.get("session_id", "")
         self.session_topics_json = json.dumps(start_resp.get("topics", []))
         self.session_source_text = start_resp.get("resolved_source_text", "")
         self.current_difficulty = start_resp.get("current_difficulty", 2)
@@ -289,12 +292,13 @@ help="Default fallback course identifier used if no learner-selected course is a
         submit_resp = self._api("/api/quiz/submit", payload={
             "student_id": student_id,
             "course_id": self._active_course_id(),
-            "question_id": question.get("question", "")[:80],  # use truncated question as ID
+            "question_id": question.get("question", "")[:80],
             "selected_answer": selected,
             "correct_answer": question.get("correct_answer", ""),
             "topic": self.current_topic,
             "difficulty": self.current_difficulty,
             "time_spent_ms": time_spent_ms,
+            "session_id": self.active_session_id or None,
         })
 
         if not submit_resp:
@@ -310,11 +314,12 @@ help="Default fallback course identifier used if no learner-selected course is a
         self.current_topic = submit_resp.get("next_topic", self.current_topic)
 
         target_questions = self.session_target_questions or self.max_questions
-        session_complete = self.questions_seen >= target_questions
+        backend_complete = submit_resp.get("session_complete", False)
+        session_complete = backend_complete or (self.questions_seen >= target_questions)
 
         if session_complete:
             self.session_active = False
-            # Publish grade to Open edX gradebook
+            self.active_session_id = ""
             grade_pct = self.session_score / target_questions
             self.runtime.publish(self, "grade", {
                 "value": grade_pct,
@@ -333,6 +338,11 @@ help="Default fallback course identifier used if no learner-selected course is a
             "session_score": self.session_score,
             "max_questions": target_questions,
             "session_complete": session_complete,
+            "session_recommendation": submit_resp.get("session_recommendation"),
+            "weakest_topic_this_session": submit_resp.get("weakest_topic_this_session"),
+            "strongest_topic_this_session": submit_resp.get("strongest_topic_this_session"),
+            "session_accuracy": submit_resp.get("session_accuracy"),
+            "avg_time_spent_ms": submit_resp.get("avg_time_spent_ms"),
         }
 
     @XBlock.json_handler
@@ -444,6 +454,24 @@ help="Default fallback course identifier used if no learner-selected course is a
         if resp:
             return {"success": True, "courses": resp.get("courses", [])}
         return {"success": True, "courses": []}
+    
+    @XBlock.json_handler
+    def get_session_history(self, data, suffix=""):
+        """Return recent completed session history for the selected course."""
+        student_id = self._student_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+
+        if active_course:
+            self.selected_course_id = active_course
+
+        resp = self._api(
+            f"/api/quiz/sessions/{student_id}/{active_course}?limit=5",
+            method="GET"
+        )
+
+        if resp:
+            return {"success": True, "sessions": resp.get("sessions", [])}
+        return {"success": True, "sessions": []}
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #

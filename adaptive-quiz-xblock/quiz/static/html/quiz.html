@@ -1,4 +1,5 @@
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet">
 
 <div class="aq-root" id="aq-root">
 
@@ -25,7 +26,10 @@
       <div class="aq-hero-actions">
         <button class="aq-btn aq-btn-primary aq-btn-large" id="aq-btn-start">
           <span>Start Quiz</span>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+              stroke-linejoin="round" />
+          </svg>
         </button>
         <button class="aq-btn aq-btn-ghost" id="aq-btn-progress-start">View My Progress</button>
       </div>
@@ -75,7 +79,10 @@
         <div class="aq-filter-group aq-filter-search-group">
           <label class="aq-filter-label">Search</label>
           <div class="aq-search-wrap">
-            <svg class="aq-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="#9CA3AF" stroke-width="1.5"/><path d="M10 10l3.5 3.5" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <svg class="aq-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="6.5" cy="6.5" r="4.5" stroke="#9CA3AF" stroke-width="1.5" />
+              <path d="M10 10l3.5 3.5" stroke="#9CA3AF" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
             <input type="text" id="aq-filter-search" class="aq-filter-input" placeholder="Search content…">
           </div>
         </div>
@@ -122,10 +129,14 @@
       <p class="aq-q-text" id="aq-question-text">Loading…</p>
 
       <div class="aq-options" id="aq-options">
-        <button class="aq-opt" data-key="A" id="aq-opt-A"><span class="aq-opt-key">A</span><span class="aq-opt-text">…</span></button>
-        <button class="aq-opt" data-key="B" id="aq-opt-B"><span class="aq-opt-key">B</span><span class="aq-opt-text">…</span></button>
-        <button class="aq-opt" data-key="C" id="aq-opt-C"><span class="aq-opt-key">C</span><span class="aq-opt-text">…</span></button>
-        <button class="aq-opt" data-key="D" id="aq-opt-D"><span class="aq-opt-key">D</span><span class="aq-opt-text">…</span></button>
+        <button class="aq-opt" data-key="A" id="aq-opt-A"><span class="aq-opt-key">A</span><span
+            class="aq-opt-text">…</span></button>
+        <button class="aq-opt" data-key="B" id="aq-opt-B"><span class="aq-opt-key">B</span><span
+            class="aq-opt-text">…</span></button>
+        <button class="aq-opt" data-key="C" id="aq-opt-C"><span class="aq-opt-key">C</span><span
+            class="aq-opt-text">…</span></button>
+        <button class="aq-opt" data-key="D" id="aq-opt-D"><span class="aq-opt-key">D</span><span
+            class="aq-opt-text">…</span></button>
       </div>
 
       <!-- Feedback -->
@@ -157,8 +168,8 @@
       <div class="aq-results-top">
         <div class="aq-score-ring">
           <svg viewBox="0 0 120 120" class="aq-ring-svg">
-            <circle cx="60" cy="60" r="52" class="aq-ring-track"/>
-            <circle cx="60" cy="60" r="52" class="aq-ring-fill" id="aq-ring-fill"/>
+            <circle cx="60" cy="60" r="52" class="aq-ring-track" />
+            <circle cx="60" cy="60" r="52" class="aq-ring-fill" id="aq-ring-fill" />
           </svg>
           <div class="aq-score-center">
             <span class="aq-score-num" id="aq-score-num">0</span>
@@ -192,6 +203,32 @@
         <div class="aq-stat">
           <span class="aq-stat-label">Next level</span>
           <span class="aq-stat-val" id="aq-summary-difficulty">—</span>
+        </div>
+      </div>
+
+      <div class="aq-session-insight aq-hidden" id="aq-session-insight">
+        <h3 class="aq-section-title">Session Insight</h3>
+
+        <div class="aq-insight-grid">
+          <div class="aq-insight-card">
+            <span class="aq-insight-label">Strongest Topic</span>
+            <strong class="aq-insight-value" id="aq-insight-strongest">—</strong>
+          </div>
+
+          <div class="aq-insight-card">
+            <span class="aq-insight-label">Needs Review</span>
+            <strong class="aq-insight-value" id="aq-insight-weakest">—</strong>
+          </div>
+
+          <div class="aq-insight-card">
+            <span class="aq-insight-label">Avg Response Time</span>
+            <strong class="aq-insight-value" id="aq-insight-avg-time">—</strong>
+          </div>
+        </div>
+
+        <div class="aq-recommendation-card" id="aq-recommendation-card">
+          <span class="aq-recommendation-label">Recommended next step</span>
+          <p class="aq-recommendation-text" id="aq-recommendation-text">—</p>
         </div>
       </div>
 
@@ -235,6 +272,14 @@
           No progress yet — start your first quiz session to see mastery data here.
         </p>
         <div id="aq-dashboard-topics"></div>
+      </div>
+
+      <div class="aq-session-history-section">
+        <h3 class="aq-section-title">Recent Sessions</h3>
+        <p class="aq-empty-state aq-hidden" id="aq-session-history-empty">
+          Finish a quiz session to see recent results, topic insights, and recommendations here.
+        </p>
+        <div id="aq-session-history-list"></div>
       </div>
 
       <div class="aq-panel-actions">

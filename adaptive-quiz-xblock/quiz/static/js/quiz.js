@@ -2,28 +2,29 @@
 
 function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
-  var MAX_Q        = initArgs.max_questions || 10;
-  var DISPLAY_NAME = initArgs.display_name  || 'Adaptive Quiz';
+  var MAX_Q = initArgs.max_questions || 10;
+  var DISPLAY_NAME = initArgs.display_name || 'Adaptive Quiz';
 
-  var urlStart      = runtime.handlerUrl(element, 'start_session');
-  var urlSubmit     = runtime.handlerUrl(element, 'submit_answer');
-  var urlExplain    = runtime.handlerUrl(element, 'explain_simpler');
-  var urlSimilar    = runtime.handlerUrl(element, 'similar_question');
-  var urlProgress   = runtime.handlerUrl(element, 'get_progress');
+  var urlStart = runtime.handlerUrl(element, 'start_session');
+  var urlSubmit = runtime.handlerUrl(element, 'submit_answer');
+  var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
+  var urlSimilar = runtime.handlerUrl(element, 'similar_question');
+  var urlProgress = runtime.handlerUrl(element, 'get_progress');
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
   var urlGetCourses = runtime.handlerUrl(element, 'get_courses');
+  var urlSessionHistory = runtime.handlerUrl(element, 'get_session_history');
 
   var state = {
-    currentQuestion:     null,
-    answered:            false,
-    questionStart:       null,
-    questionsSeenSoFar:  initArgs.questions_seen || 0,
-    sessionScore:        initArgs.session_score  || 0,
-    lastTopic:           '—',
-    lastMasteryPct:      50,
-    lastDifficulty:      2,
-    maxQuestionsCurrent: initArgs.max_questions  || 10,
-    dashboardOrigin:     'start',
+    currentQuestion: null,
+    answered: false,
+    questionStart: null,
+    questionsSeenSoFar: initArgs.questions_seen || 0,
+    sessionScore: initArgs.session_score || 0,
+    lastTopic: '—',
+    lastMasteryPct: 50,
+    lastDifficulty: 2,
+    maxQuestionsCurrent: initArgs.max_questions || 10,
+    dashboardOrigin: 'start',
   };
 
   function $(sel) { return element.querySelector(sel); }
@@ -61,11 +62,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   // ── Course picker ──────────────────────────────────────────────────
-  var selectedCourseId   = '';
+  var selectedCourseId = '';
   var selectedCourseName = '';
   var selectedContentIds = [];
-  var pickerMode         = 'quiz';
-  var allContentItems    = [];
+  var pickerMode = 'quiz';
+  var allContentItems = [];
 
   function loadCoursePicker() {
     setLoading('Loading available courses…');
@@ -89,7 +90,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (!list) { showScreen('start'); return; }
     list.innerHTML = '';
     courses.forEach(function (course, index) {
-      var cid   = course.course_id;
+      var cid = course.course_id;
       var cname = course.course_name || cid;
       var label = document.createElement('label');
       label.innerHTML =
@@ -137,8 +138,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       label.innerHTML =
         '<input type="checkbox" value="' + item.title + '">' +
         '<span>' +
-          '<strong style="font-size:.9rem;">' + item.title + '</strong>' +
-          '<span class="aq-content-meta"> Week ' + item.week + ' · ' + item.content_type + '</span>' +
+        '<strong style="font-size:.9rem;">' + item.title + '</strong>' +
+        '<span class="aq-content-meta"> Week ' + item.week + ' · ' + item.content_type + '</span>' +
         '</span>';
       list.appendChild(label);
     });
@@ -146,12 +147,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function initContentFilters(items) {
-    var weekSel   = $('#aq-filter-week');
-    var typeSel   = $('#aq-filter-type');
+    var weekSel = $('#aq-filter-week');
+    var typeSel = $('#aq-filter-type');
     var searchInp = $('#aq-filter-search');
     if (!weekSel || !typeSel || !searchInp) return;
 
-    var weeks = Array.from(new Set(items.map(function (i) { return i.week; }))).sort(function (a,b) { return a-b; });
+    var weeks = Array.from(new Set(items.map(function (i) { return i.week; }))).sort(function (a, b) { return a - b; });
     weekSel.innerHTML = '<option value="">All weeks</option>';
     weeks.forEach(function (w) {
       var o = document.createElement('option');
@@ -171,13 +172,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function applyFilters() {
-    var week   = ($('#aq-filter-week')   || {}).value || '';
-    var type   = ($('#aq-filter-type')   || {}).value || '';
+    var week = ($('#aq-filter-week') || {}).value || '';
+    var type = ($('#aq-filter-type') || {}).value || '';
     var search = (($('#aq-filter-search') || {}).value || '').trim().toLowerCase();
     var filtered = allContentItems.filter(function (item) {
-      return (!week   || String(item.week) === week) &&
-             (!type   || item.content_type === type) &&
-             (!search || (item.title || '').toLowerCase().indexOf(search) !== -1);
+      return (!week || String(item.week) === week) &&
+        (!type || item.content_type === type) &&
+        (!search || (item.title || '').toLowerCase().indexOf(search) !== -1);
     });
     renderContentPicker(filtered);
   }
@@ -185,15 +186,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   // ── Question rendering ──────────────────────────────────────────────
   function updateHeader(question, seenNow) {
     var topicBadge = $('#aq-badge-topic');
-    var diffBadge  = $('#aq-badge-diff');
-    var counter    = $('#aq-counter');
-    var progress   = $('#aq-progress-bar');
+    var diffBadge = $('#aq-badge-diff');
+    var counter = $('#aq-counter');
+    var progress = $('#aq-progress-bar');
     if (topicBadge) topicBadge.textContent = question.topic || 'General';
-    if (counter)    counter.textContent    = (seenNow + 1) + ' / ' + state.maxQuestionsCurrent;
+    if (counter) counter.textContent = (seenNow + 1) + ' / ' + state.maxQuestionsCurrent;
     if (diffBadge) {
       var d = question.difficulty || 2;
       diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
-      diffBadge.className   = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
+      diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
     }
     if (progress)
       progress.style.width = Math.round((seenNow / state.maxQuestionsCurrent) * 100) + '%';
@@ -209,22 +210,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var q = resp.question;
     state.currentQuestion = q;
-    state.answered        = false;
-    state.questionStart   = Date.now();
+    state.answered = false;
+    state.questionStart = Date.now();
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
 
     var qtEl = $('#aq-question-text');
     if (qtEl) qtEl.textContent = q.question;
 
-    ['A','B','C','D'].forEach(function (key) {
-      var btn  = $('#aq-opt-' + key);
+    ['A', 'B', 'C', 'D'].forEach(function (key) {
+      var btn = $('#aq-opt-' + key);
       if (!btn) return;
       var textEl = btn.querySelector('.aq-opt-text');
       if (textEl) textEl.textContent = q.options[key] || '';
       btn.className = 'aq-opt';
-      btn.disabled  = false;
-      btn.onclick   = function () { handleOptionClick(key); };
+      btn.disabled = false;
+      btn.onclick = function () { handleOptionClick(key); };
     });
 
     var fb = $('#aq-feedback');
@@ -238,7 +239,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.answered = true;
 
     $('#aq-opt-' + selectedKey).classList.add('selected');
-    ['A','B','C','D'].forEach(function (k) {
+    ['A', 'B', 'C', 'D'].forEach(function (k) {
       var b = $('#aq-opt-' + k);
       if (b) b.disabled = true;
     });
@@ -249,7 +250,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({ selected_answer: selectedKey, time_spent_ms: timeSpentMs }),
       contentType: 'application/json',
       success: function (data) { renderFeedback(data, selectedKey); },
-      error:   function ()     { alert('Network error submitting answer.'); }
+      error: function () { alert('Network error submitting answer.'); }
     });
   }
 
@@ -260,48 +261,59 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     state.questionsSeenSoFar = data.questions_seen;
-    state.sessionScore       = data.session_score;
+    state.sessionScore = data.session_score;
     if (data.max_questions) state.maxQuestionsCurrent = data.max_questions;
 
-    state.lastTopic      = (state.currentQuestion && state.currentQuestion.topic) || 'General';
+    state.lastTopic = (state.currentQuestion && state.currentQuestion.topic) || 'General';
     state.lastMasteryPct = Math.round((data.updated_mastery || 0.5) * 100);
     state.lastDifficulty = data.next_difficulty || 2;
 
     var correct = data.correct_answer;
-    ['A','B','C','D'].forEach(function (k) {
+    ['A', 'B', 'C', 'D'].forEach(function (k) {
       var b = $('#aq-opt-' + k);
       if (!b) return;
-      if (k === correct)                  b.classList.add('correct');
+      if (k === correct) b.classList.add('correct');
       if (k === selectedKey && k !== correct) b.classList.add('incorrect');
     });
 
     // Feedback banner
     var banner = $('#aq-feedback-banner');
-    var icon   = $('#aq-feedback-icon');
-    var label  = $('#aq-feedback-label');
+    var icon = $('#aq-feedback-icon');
+    var label = $('#aq-feedback-label');
     if (banner) {
       banner.className = 'aq-feedback-banner ' + (data.is_correct ? 'correct' : 'incorrect');
     }
-    if (icon)  icon.textContent  = data.is_correct ? '✓' : '✕';
+    if (icon) icon.textContent = data.is_correct ? '✓' : '✕';
     if (label) label.textContent = data.is_correct ? 'Correct!' : 'Incorrect';
 
     var expEl = $('#aq-explanation');
     if (expEl) expEl.textContent = data.explanation || '';
 
-    var pct    = Math.round((data.updated_mastery || 0.5) * 100);
+    var pct = Math.round((data.updated_mastery || 0.5) * 100);
     var fillEl = $('#aq-mastery-fill');
-    var pctEl  = $('#aq-mastery-pct');
+    var pctEl = $('#aq-mastery-pct');
     if (fillEl) fillEl.style.width = pct + '%';
-    if (pctEl)  pctEl.textContent  = pct + '%';
+    if (pctEl) pctEl.textContent = pct + '%';
 
-    var supportRow = $('#aq-support-row');
+        var supportRow = $('#aq-support-row');
     if (supportRow) {
       supportRow.innerHTML = '';
       var features = data.support_features || [];
-      if (features.indexOf('explain_simpler') !== -1)
-        supportRow.appendChild(makeSupportBtn('💬 Simpler explanation', handleExplainSimpler));
-      if (features.indexOf('one_more_like_this') !== -1)
-        supportRow.appendChild(makeSupportBtn('🔄 One more like this', handleSimilarQuestion));
+
+      if (features.indexOf('explain_simpler') !== -1) {
+        supportRow.appendChild(
+          makeSupportBtn('💬 Simpler explanation', handleExplainSimpler)
+        );
+      }
+
+      // IMPORTANT:
+      // Do not allow "one more like this" after the session is already complete,
+      // otherwise the frontend score can diverge from finalized backend session history.
+      if (!data.session_complete && features.indexOf('one_more_like_this') !== -1) {
+        supportRow.appendChild(
+          makeSupportBtn('🔄 One more like this', handleSimilarQuestion)
+        );
+      }
     }
 
     var nextBtn = $('#aq-btn-next');
@@ -318,10 +330,31 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function makeSupportBtn(label, handler) {
     var btn = document.createElement('button');
-    btn.className   = 'aq-btn-support';
+    btn.className = 'aq-btn-support';
     btn.textContent = label;
-    btn.onclick     = handler;
+    btn.onclick = handler;
     return btn;
+  }
+
+  function formatDateTime(isoString) {
+    if (!isoString) return '—';
+    var d = new Date(isoString);
+    return d.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function formatMs(ms) {
+    if (!ms || ms <= 0) return '—';
+    var seconds = Math.round(ms / 1000);
+    if (seconds < 60) return seconds + 's';
+    var mins = Math.floor(seconds / 60);
+    var rem = seconds % 60;
+    return mins + 'm ' + rem + 's';
   }
 
   function handleExplainSimpler() {
@@ -337,7 +370,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
-  function handleSimilarQuestion() {
+    function handleSimilarQuestion() {
+    if (state.questionsSeenSoFar >= state.maxQuestionsCurrent) {
+      return;
+    }
+
     setLoading('Generating a similar question…');
     jQuery.ajax({
       type: 'POST', url: urlSimilar,
@@ -356,27 +393,54 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       type: 'POST', url: runtime.handlerUrl(element, 'get_question'),
       data: JSON.stringify({}), contentType: 'application/json',
       success: function (data) { renderQuestion(data); },
-      error:   function () { alert('Could not load next question.'); showScreen('start'); }
+      error: function () { alert('Could not load next question.'); showScreen('start'); }
     });
+  }
+
+  function renderSessionInsight(data) {
+    var wrap = $('#aq-session-insight');
+    if (!wrap) return;
+
+    var strongest = data.strongest_topic_this_session || '';
+    var weakest = data.weakest_topic_this_session || '';
+    var recommendation = data.session_recommendation || '';
+    var avgTime = data.avg_time_spent_ms || 0;
+
+    if (!strongest && !weakest && !recommendation) {
+      wrap.classList.add('aq-hidden');
+      return;
+    }
+
+    var strongestEl = $('#aq-insight-strongest');
+    var weakestEl = $('#aq-insight-weakest');
+    var avgTimeEl = $('#aq-insight-avg-time');
+    var recTextEl = $('#aq-recommendation-text');
+
+    if (strongestEl) strongestEl.textContent = strongest || '—';
+    if (weakestEl) weakestEl.textContent = weakest || '—';
+    if (avgTimeEl) avgTimeEl.textContent = formatMs(avgTime);
+    if (recTextEl) recTextEl.textContent = recommendation || 'Keep practising to reinforce your learning.';
+
+    wrap.classList.remove('aq-hidden');
   }
 
   // ── Results ────────────────────────────────────────────────────────
   function showResults(data) {
-    var score    = data.session_score || state.sessionScore;
-    var total    = state.maxQuestionsCurrent;
-    var pct      = Math.round((score / total) * 100);
+    var score = data.session_score || state.sessionScore;
+    var total = state.maxQuestionsCurrent;
+    var pct = Math.round((score / total) * 100);
     var incorrect = total - score;
 
     var emojiEl = $('#aq-result-emoji');
-    var msgEl   = $('#aq-results-msg') || $('#aq-score-msg');
+    var msgEl = $('#aq-results-msg') || $('#aq-score-msg');
     if (emojiEl) emojiEl.textContent = pct >= 80 ? '🏆' : pct >= 60 ? '🎉' : '📚';
-    if (msgEl)   msgEl.textContent   = pct >= 80 ? 'Excellent — you\'ve mastered this material!'
-                                      : pct >= 60 ? 'Good work! Keep practising to improve.'
-                                      : 'Keep going — every attempt builds mastery!';
+    if (msgEl) msgEl.textContent = pct >= 80 ? 'Excellent — you\'ve mastered this material!'
+      : pct >= 60 ? 'Good work! Keep practising to improve.'
+        : 'Keep going — every attempt builds mastery!';
 
-    var numEl   = $('#aq-score-num');
+    var numEl = $('#aq-score-num');
     var denomEl = $('#aq-score-denom');
-    if (numEl)   numEl.textContent   = score;
+    if (numEl) numEl.textContent = score;
     if (denomEl) denomEl.textContent = '/ ' + total;
 
     // Animate ring
@@ -389,10 +453,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     // Stats
     var els = {
-      '#aq-summary-accuracy':   pct + '%',
-      '#aq-summary-incorrect':  incorrect,
-      '#aq-summary-topic':      state.lastTopic || 'General',
-      '#aq-summary-mastery':    state.lastMasteryPct + '%',
+      '#aq-summary-accuracy': pct + '%',
+      '#aq-summary-incorrect': incorrect,
+      '#aq-summary-topic': state.lastTopic || 'General',
+      '#aq-summary-mastery': state.lastMasteryPct + '%',
       '#aq-summary-difficulty': DIFF_LABEL[state.lastDifficulty] || 'Medium'
     };
     Object.keys(els).forEach(function (sel) {
@@ -402,6 +466,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var pb = $('#aq-progress-bar');
     if (pb) pb.style.width = '100%';
+
+    renderSessionInsight(data);
 
     showScreen('results');
   }
@@ -423,7 +489,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       backBtn.textContent = state.dashboardOrigin === 'results' ? '← Back to Results' : '← Back to Home';
 
     var topicsWrap = $('#aq-dashboard-topics');
-    var emptyEl    = $('#aq-dashboard-empty');
+    var emptyEl = $('#aq-dashboard-empty');
     if (topicsWrap) topicsWrap.innerHTML = '';
 
     if (!data.has_progress || !data.topic_mastery || Object.keys(data.topic_mastery).length === 0) {
@@ -434,10 +500,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (emptyEl) emptyEl.classList.add('aq-hidden');
 
     var fields = {
-      '#aq-dash-sessions':      data.session_count || 0,
+      '#aq-dash-sessions': data.session_count || 0,
       '#aq-dash-total-answers': data.total_answers || 0,
-      '#aq-dash-irt':           data.irt_active ? 'Active' : 'Warming up',
-      '#aq-dash-difficulty':    DIFF_LABEL[data.current_difficulty || 2] || 'Medium'
+      '#aq-dash-irt': data.irt_active ? 'Active' : 'Warming up',
+      '#aq-dash-difficulty': DIFF_LABEL[data.current_difficulty || 2] || 'Medium'
     };
     Object.keys(fields).forEach(function (sel) {
       var el = element.querySelector(sel);
@@ -445,27 +511,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
 
     if (topicsWrap) {
-      var mastery     = data.topic_mastery || {};
-      var weakTopics  = data.weak_topics   || [];
-      var strongTopics= data.strong_topics || [];
+      var mastery = data.topic_mastery || {};
+      var weakTopics = data.weak_topics || [];
+      var strongTopics = data.strong_topics || [];
 
       Object.keys(mastery).forEach(function (topic) {
-        var pct       = Math.round((mastery[topic] || 0) * 100);
-        var cls       = weakTopics.indexOf(topic) !== -1   ? 'weak'
-                      : strongTopics.indexOf(topic) !== -1 ? 'strong'
-                      : 'normal';
-        var badgeText = cls === 'weak'   ? pct + '% · Needs review'
-                      : cls === 'strong' ? pct + '% · Strong'
-                      : pct + '%';
+        var pct = Math.round((mastery[topic] || 0) * 100);
+        var cls = weakTopics.indexOf(topic) !== -1 ? 'weak'
+          : strongTopics.indexOf(topic) !== -1 ? 'strong'
+            : 'normal';
+        var badgeText = cls === 'weak' ? pct + '% · Needs review'
+          : cls === 'strong' ? pct + '% · Strong'
+            : pct + '%';
         var block = document.createElement('div');
         block.className = 'aq-dash-topic';
         block.innerHTML =
           '<div class="aq-dash-topic-row">' +
-            '<span class="aq-dash-topic-name">' + topic + '</span>' +
-            '<span class="aq-dash-topic-badge ' + cls + '">' + badgeText + '</span>' +
+          '<span class="aq-dash-topic-name">' + topic + '</span>' +
+          '<span class="aq-dash-topic-badge ' + cls + '">' + badgeText + '</span>' +
           '</div>' +
           '<div class="aq-dash-track">' +
-            '<div class="aq-dash-fill ' + cls + '" style="width:' + pct + '%"></div>' +
+          '<div class="aq-dash-fill ' + cls + '" style="width:' + pct + '%"></div>' +
           '</div>';
         topicsWrap.appendChild(block);
       });
@@ -474,9 +540,77 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     showScreen('dashboard');
   }
 
+  function renderSessionHistory(sessions) {
+    var wrap = $('#aq-session-history-list');
+    var empty = $('#aq-session-history-empty');
+    if (!wrap) return;
+
+    wrap.innerHTML = '';
+
+    if (!sessions || sessions.length === 0) {
+      if (empty) empty.classList.remove('aq-hidden');
+      return;
+    }
+
+    if (empty) empty.classList.add('aq-hidden');
+
+    sessions.forEach(function (session) {
+      var score = (session.correct_answers || 0) + ' / ' + (session.target_questions || 0);
+      var pct = Math.round((session.accuracy || 0) * 100);
+
+      var card = document.createElement('div');
+      card.className = 'aq-session-card';
+      card.innerHTML =
+        '<div class="aq-session-card-top">' +
+        '<div>' +
+        '<div class="aq-session-date">' + formatDateTime(session.ended_at || session.started_at) + '</div>' +
+        '<div class="aq-session-meta">Completed session</div>' +
+        '</div>' +
+        '<div class="aq-session-score-badge">' + score + ' · ' + pct + '%</div>' +
+        '</div>' +
+
+        '<div class="aq-session-card-grid">' +
+        '<div class="aq-session-mini">' +
+        '<span class="aq-session-mini-label">Strongest Topic</span>' +
+        '<span class="aq-session-mini-value">' + (session.strongest_topic_this_session || '—') + '</span>' +
+        '</div>' +
+        '<div class="aq-session-mini">' +
+        '<span class="aq-session-mini-label">Needs Review</span>' +
+        '<span class="aq-session-mini-value">' + (session.weakest_topic_this_session || '—') + '</span>' +
+        '</div>' +
+        '<div class="aq-session-mini">' +
+        '<span class="aq-session-mini-label">Avg Response Time</span>' +
+        '<span class="aq-session-mini-value">' + formatMs(session.avg_time_spent_ms || 0) + '</span>' +
+        '</div>' +
+        '</div>' +
+
+        '<div class="aq-session-recommendation">' +
+        '<strong>Recommendation:</strong> ' + (session.recommendation || 'Keep building mastery through regular practice.') +
+        '</div>';
+
+      wrap.appendChild(card);
+    });
+  }
+
+  function loadSessionHistory(courseId) {
+    jQuery.ajax({
+      type: 'POST',
+      url: urlSessionHistory,
+      data: JSON.stringify({ selected_course_id: courseId }),
+      contentType: 'application/json',
+      success: function (data) {
+        if (data && data.success) renderSessionHistory(data.sessions || []);
+        else renderSessionHistory([]);
+      },
+      error: function () {
+        renderSessionHistory([]);
+      }
+    });
+  }
+
   function loadDashboard(origin, courseId, courseName) {
     state.dashboardOrigin = origin || 'start';
-    if (courseId)   selectedCourseId   = courseId;
+    if (courseId) selectedCourseId = courseId;
     if (courseName) selectedCourseName = courseName;
     setLoading('Loading your progress…');
     jQuery.ajax({
@@ -490,6 +624,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           return;
         }
         renderDashboard(data);
+        loadSessionHistory(selectedCourseId);
       },
       error: function (xhr) {
         alert('Could not load progress. HTTP ' + xhr.status);
@@ -503,10 +638,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var countInput = $('#aq-question-count');
     var chosenCount = countInput ? parseInt(countInput.value, 10) : MAX_Q;
     state.questionsSeenSoFar = 0;
-    state.sessionScore       = 0;
-    state.lastTopic          = '—';
-    state.lastMasteryPct     = 50;
-    state.lastDifficulty     = 2;
+    state.sessionScore = 0;
+    state.lastTopic = '—';
+    state.lastMasteryPct = 50;
+    state.lastDifficulty = 2;
     setLoading('Preparing your adaptive quiz…');
     jQuery.ajax({
       type: 'POST', url: urlStart,
@@ -549,7 +684,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     courseContinueBtn.onclick = function () {
       var checked = element.querySelector('#aq-course-list input[type=radio]:checked');
       if (!checked) { alert('Please select a course.'); return; }
-      selectedCourseId   = checked.value;
+      selectedCourseId = checked.value;
       selectedCourseName = checked.getAttribute('data-course-name') || checked.value;
       if (pickerMode === 'progress') loadDashboard('start', selectedCourseId, selectedCourseName);
       else loadContentPicker(selectedCourseId);

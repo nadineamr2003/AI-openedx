@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
+from uuid import uuid4
 from app.models.quiz import (
     GenerateRequest,
     SubmitRequest,
@@ -38,6 +39,172 @@ async def _save_state(state: dict) -> None:
         {"$set": state},
         upsert=True
     )
+
+async def _create_session_history(
+    student_id: str,
+    course_id: str,
+    session_topics: list[str],
+    mastery_before: dict,
+    start_difficulty: int,
+    target_questions: int,
+    selected_content_ids: list[str],
+) -> str:
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    session_id = str(uuid4())
+
+    doc = {
+        "session_id": session_id,
+        "student_id": student_id,
+        "course_id": course_id,
+        "started_at": now,
+        "ended_at": None,
+        "target_questions": target_questions,
+        "questions_answered": 0,
+        "correct_answers": 0,
+        "accuracy": 0.0,
+        "selected_content_ids": selected_content_ids,
+        "session_topics": session_topics,
+        "start_difficulty": start_difficulty,
+        "end_difficulty": start_difficulty,
+        "difficulty_path": [],
+        "topic_mastery_before": mastery_before,
+        "topic_mastery_after": {},
+        "question_log": [],
+        "avg_time_spent_ms": 0,
+        "total_time_spent_ms": 0,
+        "weakest_topic_this_session": None,
+        "strongest_topic_this_session": None,
+        "recommendation": None,
+    }
+
+    await db.student_session_history.insert_one(doc)
+    return session_id
+
+
+async def _append_question_log(
+    session_id: str,
+    question_entry: dict,
+    is_correct: bool,
+    time_spent_ms: int,
+    question_difficulty: int,
+    end_difficulty: int,
+):
+    db = get_db()
+
+    await db.student_session_history.update_one(
+        {"session_id": session_id},
+        {
+            "$push": {
+                "question_log": question_entry,
+                "difficulty_path": question_difficulty,
+            },
+            "$inc": {
+                "questions_answered": 1,
+                "correct_answers": 1 if is_correct else 0,
+                "total_time_spent_ms": time_spent_ms,
+            },
+            "$set": {
+                "end_difficulty": end_difficulty,
+            }
+        }
+    )
+
+
+async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
+    db = get_db()
+    doc = await db.student_session_history.find_one({"session_id": session_id})
+    if not doc:
+        return {}
+
+    questions_answered = doc.get("questions_answered", 0)
+    correct_answers = doc.get("correct_answers", 0)
+    total_time_spent_ms = doc.get("total_time_spent_ms", 0)
+
+    accuracy = (correct_answers / questions_answered) if questions_answered > 0 else 0.0
+    avg_time = int(total_time_spent_ms / questions_answered) if questions_answered > 0 else 0
+
+    # NEW: derive practiced topics from the actual question log
+    question_log = doc.get("question_log", [])
+    practiced_topics = []
+    seen = set()
+
+    for entry in question_log:
+        topic = entry.get("topic")
+        if topic and topic not in seen:
+            seen.add(topic)
+            practiced_topics.append(topic)
+
+    practiced_mastery_after = {
+        topic: topic_mastery_after.get(topic, 0.5)
+        for topic in practiced_topics
+        if topic in topic_mastery_after
+    }
+
+    weakest_topic = None
+    strongest_topic = None
+
+    # Prefer practiced topics for learner-facing insight
+    if practiced_mastery_after:
+        weakest_topic = min(practiced_mastery_after, key=practiced_mastery_after.get)
+        strongest_topic = max(practiced_mastery_after, key=practiced_mastery_after.get)
+    elif topic_mastery_after:
+        # fallback only if something goes wrong
+        weakest_topic = min(topic_mastery_after, key=topic_mastery_after.get)
+        strongest_topic = max(topic_mastery_after, key=topic_mastery_after.get)
+
+    recommendation = None
+    if weakest_topic:
+        recommendation = (
+            f"Among the topics you practiced, {weakest_topic} needs the most review. "
+            f"Revisit it before your next session."
+        )
+
+    ended_at = datetime.now(timezone.utc).isoformat()
+
+    await db.student_session_history.update_one(
+        {"session_id": session_id},
+        {
+            "$set": {
+                "ended_at": ended_at,
+                "accuracy": accuracy,
+                "avg_time_spent_ms": avg_time,
+                "topic_mastery_after": topic_mastery_after,
+                "practiced_topics": practiced_topics,
+                "weakest_topic_this_session": weakest_topic,
+                "strongest_topic_this_session": strongest_topic,
+                "recommendation": recommendation,
+            }
+        }
+    )
+
+    return {
+        "ended_at": ended_at,
+        "accuracy": accuracy,
+        "avg_time_spent_ms": avg_time,
+        "practiced_topics": practiced_topics,
+        "weakest_topic_this_session": weakest_topic,
+        "strongest_topic_this_session": strongest_topic,
+        "recommendation": recommendation,
+    }
+
+
+def _serialize_session(doc: dict) -> dict:
+    return {
+        "session_id": doc.get("session_id"),
+        "started_at": doc.get("started_at"),
+        "ended_at": doc.get("ended_at"),
+        "target_questions": doc.get("target_questions", 0),
+        "questions_answered": doc.get("questions_answered", 0),
+        "correct_answers": doc.get("correct_answers", 0),
+        "accuracy": doc.get("accuracy", 0.0),
+        "avg_time_spent_ms": doc.get("avg_time_spent_ms", 0),
+        "total_time_spent_ms": doc.get("total_time_spent_ms", 0),
+        "weakest_topic_this_session": doc.get("weakest_topic_this_session"),
+        "strongest_topic_this_session": doc.get("strongest_topic_this_session"),
+        "recommendation": doc.get("recommendation"),
+        "end_difficulty": doc.get("end_difficulty", 2),
+    }
 
 async def _get_cached_question(topic: str, difficulty: int, course_id: str) -> dict | None:
     db = get_db()
@@ -108,13 +275,12 @@ async def generate(req: GenerateRequest):
 
 @router.post("/submit", response_model=SubmitResponse)
 async def submit(req: SubmitRequest):
-    """Submit an answer, update mastery, return next question parameters."""
+    """Submit an answer, update mastery, log session analytics, return next parameters."""
     is_correct = req.selected_answer == req.correct_answer
 
     # Load state from MongoDB
     state = await _get_state(req.student_id, req.course_id, [req.topic])
 
-    # Add any new topic that wasn't in the original state
     if req.topic not in state["topic_mastery"]:
         state["topic_mastery"][req.topic] = 0.5
 
@@ -126,10 +292,9 @@ async def submit(req: SubmitRequest):
         time_ms=req.time_spent_ms
     )
 
-    # Save updated state to MongoDB
     await _save_state(state)
 
-    # Decide next question parameters
+    # Decide next parameters (scoped to current session topics)
     allowed_topics = state.get("session_topics") or list(state["topic_mastery"].keys()) or [req.topic]
 
     scoped_mastery = {
@@ -138,24 +303,66 @@ async def submit(req: SubmitRequest):
     }
 
     next_topic, next_mode = select_next_topic(scoped_mastery)
-    next_difficulty         = state["current_difficulty"]
-    updated_mastery         = state["topic_mastery"].get(req.topic, 0.5)
+    next_difficulty = state["current_difficulty"]
+    updated_mastery = state["topic_mastery"].get(req.topic, 0.5)
 
-    # Support features
+        # Support features
     support_features = []
     recent = state["recent_answers"]
-    if not is_correct:
-        support_features.append("explanation")
+
     consecutive_wrong = 0
     for ans in reversed(recent):
         if not ans["correct"]:
             consecutive_wrong += 1
         else:
             break
-    if consecutive_wrong >= 2:
+
+    if not is_correct:
+        # Always show normal explanation and offer a simpler version immediately
+        support_features.append("explanation")
         support_features.append("explain_simpler")
-    if consecutive_wrong >= 3:
-        support_features.append("one_more_like_this")
+
+        # If the learner is struggling repeatedly, offer reinforcement
+        if consecutive_wrong >= 2:
+            support_features.append("one_more_like_this")
+
+    session_complete = False
+    session_summary = {}
+
+    if req.session_id:
+        question_entry = {
+            "question_id": req.question_id,
+            "topic": req.topic,
+            "difficulty": req.difficulty,
+            "selected_answer": req.selected_answer,
+            "correct_answer": req.correct_answer,
+            "is_correct": is_correct,
+            "time_spent_ms": req.time_spent_ms,
+            "support_features_shown": support_features,
+        }
+
+        await _append_question_log(
+            session_id=req.session_id,
+            question_entry=question_entry,
+            is_correct=is_correct,
+            time_spent_ms=req.time_spent_ms,
+            question_difficulty=req.difficulty,
+            end_difficulty=next_difficulty,
+        )
+
+        db = get_db()
+        session_doc = await db.student_session_history.find_one({"session_id": req.session_id})
+        if session_doc:
+            answered = session_doc.get("questions_answered", 0)
+            target = session_doc.get("target_questions", 10)
+            session_complete = answered >= target
+
+            if session_complete:
+                topic_mastery_after = {
+                    topic: state["topic_mastery"].get(topic, 0.5)
+                    for topic in allowed_topics
+                }
+                session_summary = await _finalize_session_history(req.session_id, topic_mastery_after)
 
     return SubmitResponse(
         is_correct=is_correct,
@@ -165,7 +372,12 @@ async def submit(req: SubmitRequest):
         next_topic=next_topic,
         next_mode=next_mode,
         support_features=support_features,
-        session_complete=False
+        session_complete=session_complete,
+        session_recommendation=session_summary.get("recommendation"),
+        weakest_topic_this_session=session_summary.get("weakest_topic_this_session"),
+        strongest_topic_this_session=session_summary.get("strongest_topic_this_session"),
+        session_accuracy=session_summary.get("accuracy"),
+        avg_time_spent_ms=session_summary.get("avg_time_spent_ms"),
     )
 
 
@@ -238,7 +450,6 @@ async def session_start(req: GenerateRequest):
                 detail="No active content found for the selected items."
             )
     else:
-        # Fallback — use topic/source_text from request directly
         resolved_topics = [t.strip() for t in req.topic.split(",") if t.strip()]
         resolved_source_text = req.source_text
 
@@ -257,6 +468,21 @@ async def session_start(req: GenerateRequest):
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
+    mastery_before = {
+        topic: state["topic_mastery"].get(topic, 0.5)
+        for topic in resolved_topics
+    }
+
+    session_id = await _create_session_history(
+        student_id=req.student_id,
+        course_id=req.course_id,
+        session_topics=resolved_topics,
+        mastery_before=mastery_before,
+        start_difficulty=state["current_difficulty"],
+        target_questions=req.question_count,
+        selected_content_ids=req.content_ids or [],
+    )
+
     # Fire background cache fill for all resolved topics
     for topic in resolved_topics:
         asyncio.create_task(
@@ -272,6 +498,7 @@ async def session_start(req: GenerateRequest):
     return {
         "student_id": req.student_id,
         "course_id": req.course_id,
+        "session_id": session_id,
         "topics": resolved_topics,
         "resolved_source_text": resolved_source_text,
         "session_count": state["session_count"],
@@ -359,3 +586,18 @@ async def list_courses():
 
     courses = sorted(seen.values(), key=lambda x: x["course_id"])
     return {"courses": courses}
+
+@router.get("/sessions/{student_id}/{course_id}")
+async def get_session_history(student_id: str, course_id: str, limit: int = 5):
+    """Return recent completed sessions for dashboard/history view."""
+    db = get_db()
+    docs = await db.student_session_history.find(
+        {
+            "student_id": student_id,
+            "course_id": course_id,
+            "ended_at": {"$ne": None},
+        }
+    ).sort("started_at", -1).to_list(limit)
+
+    sessions = [_serialize_session(doc) for doc in docs]
+    return {"sessions": sessions}
