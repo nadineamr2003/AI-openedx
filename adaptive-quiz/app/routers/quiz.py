@@ -21,6 +21,17 @@ router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 def _state_key(student_id: str, course_id: str) -> dict:
     return {"student_id": student_id, "course_id": course_id}
 
+def _mastery_label(mastery: float) -> str:
+    if mastery < 0.30:
+        return "Struggling"
+    if mastery < 0.50:
+        return "Emerging"
+    if mastery < 0.65:
+        return "Developing"
+    if mastery < 0.80:
+        return "Proficient"
+    return "Mastered"
+
 
 async def _get_state(student_id: str, course_id: str, topics: list[str]) -> dict:
     db = get_db()
@@ -405,14 +416,27 @@ async def get_mastery(student_id: str, course_id: str):
     if not state:
         raise HTTPException(status_code=404, detail="Student state not found")
 
-    mastery       = state["topic_mastery"]
-    weak_topics   = [t for t, m in mastery.items() if m < 0.4]
-    strong_topics = [t for t, m in mastery.items() if m >= 0.7]
+    mastery = state["topic_mastery"]
+    topic_labels = {
+        topic: _mastery_label(value)
+        for topic, value in mastery.items()
+    }
+
+    weak_topics = [
+    t for t, lbl in topic_labels.items()
+    if lbl in {"Struggling", "Emerging"}
+    ]
+
+    strong_topics = [
+        t for t, lbl in topic_labels.items()
+        if lbl in {"Proficient", "Mastered"}
+    ]
 
     return MasteryResponse(
         student_id=student_id,
         course_id=course_id,
         topic_mastery=mastery,
+        topic_labels=topic_labels,
         weak_topics=weak_topics,
         strong_topics=strong_topics
     )

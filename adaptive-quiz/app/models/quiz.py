@@ -45,6 +45,7 @@ class MasteryResponse(BaseModel):
     student_id: str
     course_id: str
     topic_mastery: dict[str, float]
+    topic_labels: dict[str, str]
     weak_topics: list[str]
     strong_topics: list[str]
 

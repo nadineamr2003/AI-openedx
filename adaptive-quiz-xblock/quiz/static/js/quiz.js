@@ -295,7 +295,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (fillEl) fillEl.style.width = pct + '%';
     if (pctEl) pctEl.textContent = pct + '%';
 
-        var supportRow = $('#aq-support-row');
+    var supportRow = $('#aq-support-row');
     if (supportRow) {
       supportRow.innerHTML = '';
       var features = data.support_features || [];
@@ -357,6 +357,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return mins + 'm ' + rem + 's';
   }
 
+  function masteryStageClass(label) {
+    switch (label) {
+      case 'Struggling': return 'struggling';
+      case 'Emerging': return 'emerging';
+      case 'Developing': return 'developing';
+      case 'Proficient': return 'proficient';
+      case 'Mastered': return 'mastered';
+      default: return 'developing';
+    }
+  }
+
   function handleExplainSimpler() {
     jQuery.ajax({
       type: 'POST', url: urlExplain,
@@ -370,7 +381,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
-    function handleSimilarQuestion() {
+  function handleSimilarQuestion() {
     if (state.questionsSeenSoFar >= state.maxQuestionsCurrent) {
       return;
     }
@@ -512,17 +523,18 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     if (topicsWrap) {
       var mastery = data.topic_mastery || {};
-      var weakTopics = data.weak_topics || [];
-      var strongTopics = data.strong_topics || [];
+      var topicLabels = data.topic_labels || {};
 
-      Object.keys(mastery).forEach(function (topic) {
+      var sortedTopics = Object.keys(mastery).sort(function (a, b) {
+        return (mastery[a] || 0) - (mastery[b] || 0);
+      });
+
+      sortedTopics.forEach(function (topic) {
         var pct = Math.round((mastery[topic] || 0) * 100);
-        var cls = weakTopics.indexOf(topic) !== -1 ? 'weak'
-          : strongTopics.indexOf(topic) !== -1 ? 'strong'
-            : 'normal';
-        var badgeText = cls === 'weak' ? pct + '% · Needs review'
-          : cls === 'strong' ? pct + '% · Strong'
-            : pct + '%';
+        var label = topicLabels[topic] || 'Developing';
+        var cls = masteryStageClass(label);
+        var badgeText = pct + '% · ' + label;
+
         var block = document.createElement('div');
         block.className = 'aq-dash-topic';
         block.innerHTML =
