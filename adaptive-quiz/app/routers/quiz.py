@@ -121,6 +121,35 @@ async def _append_question_log(
         }
     )
 
+def _build_session_recommendation(
+    accuracy: float,
+    weakest_topic: str | None,
+    strongest_topic: str | None,
+) -> str | None:
+    if not weakest_topic:
+        return None
+
+    if accuracy >= 0.8:
+        if strongest_topic and strongest_topic != weakest_topic:
+            return (
+                f"Strong session overall. You performed best on {strongest_topic}. "
+                f"To push this session even further, focus next on {weakest_topic} and try a harder follow-up set."
+            )
+        return (
+            f"Strong session overall. Your next best move is to strengthen {weakest_topic} "
+            f"so it catches up with the rest of your practiced topics."
+        )
+
+    if accuracy >= 0.60:
+        return (
+            f"Good progress. Among the topics you practiced, {weakest_topic} still needs more review. "
+            f"A focused follow-up session on it would help consolidate your understanding."
+        )
+
+    return (
+        f"This session was challenging, which is completely normal. "
+        f"For your next attempt, start with {weakest_topic} and work through it step by step."
+    )
 
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
     db = get_db()
@@ -164,12 +193,11 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         weakest_topic = min(topic_mastery_after, key=topic_mastery_after.get)
         strongest_topic = max(topic_mastery_after, key=topic_mastery_after.get)
 
-    recommendation = None
-    if weakest_topic:
-        recommendation = (
-            f"Among the topics you practiced, {weakest_topic} needs the most review. "
-            f"Revisit it before your next session."
-        )
+    recommendation = _build_session_recommendation(
+        accuracy=accuracy,
+        weakest_topic=weakest_topic,
+        strongest_topic=strongest_topic,
+    )
 
     ended_at = datetime.now(timezone.utc).isoformat()
 
