@@ -214,7 +214,7 @@ def _serialize_session(doc: dict) -> dict:
         "weakest_topic_this_session": doc.get("weakest_topic_this_session"),
         "strongest_topic_this_session": doc.get("strongest_topic_this_session"),
         "recommendation": doc.get("recommendation"),
-        "end_difficulty": doc.get("end_difficulty", 2),
+        "end_difficulty": doc.get("end_difficulty", 3),
     }
 
 async def _get_cached_question(topic: str, difficulty: int, course_id: str) -> dict | None:

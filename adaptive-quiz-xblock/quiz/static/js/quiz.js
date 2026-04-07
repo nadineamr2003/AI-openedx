@@ -22,7 +22,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     sessionScore: initArgs.session_score || 0,
     lastTopic: '—',
     lastMasteryPct: 50,
-    lastDifficulty: 2,
+    lastDifficulty: 3,
     maxQuestionsCurrent: initArgs.max_questions || 10,
     dashboardOrigin: 'start',
   };
@@ -44,8 +44,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (msgEl) msgEl.textContent = msg || 'Loading…';
   }
 
-  var DIFF_LABEL = { 1: 'Easy', 2: 'Medium', 3: 'Hard' };
-  var DIFF_CLASS = { 1: 'diff-easy', 2: '', 3: 'diff-hard' };
+  var DIFF_LABEL = {
+    1: 'Very Easy',
+    2: 'Easy',
+    3: 'Medium',
+    4: 'Hard',
+    5: 'Very Hard'
+  };
+
+  var DIFF_CLASS = {
+    1: 'diff-very-easy',
+    2: 'diff-easy',
+    3: 'diff-medium',
+    4: 'diff-hard',
+    5: 'diff-very-hard'
+  };
 
   // ── Pill selector ──────────────────────────────────────────────────
   var pillSelector = $('#aq-pill-selector');
@@ -192,7 +205,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (topicBadge) topicBadge.textContent = question.topic || 'General';
     if (counter) counter.textContent = (seenNow + 1) + ' / ' + state.maxQuestionsCurrent;
     if (diffBadge) {
-      var d = question.difficulty || 2;
+      var d = question.difficulty || 3;
       diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
       diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
     }
@@ -266,7 +279,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     state.lastTopic = (state.currentQuestion && state.currentQuestion.topic) || 'General';
     state.lastMasteryPct = Math.round((data.updated_mastery || 0.5) * 100);
-    state.lastDifficulty = data.next_difficulty || 2;
+    state.lastDifficulty = data.next_difficulty || 3;
 
     var correct = data.correct_answer;
     ['A', 'B', 'C', 'D'].forEach(function (k) {
@@ -514,7 +527,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       '#aq-dash-sessions': data.session_count || 0,
       '#aq-dash-total-answers': data.total_answers || 0,
       '#aq-dash-irt': data.irt_active ? 'Active' : 'Warming up',
-      '#aq-dash-difficulty': DIFF_LABEL[data.current_difficulty || 2] || 'Medium'
+      '#aq-dash-difficulty': DIFF_LABEL[data.current_difficulty || 3] || 'Medium'
     };
     Object.keys(fields).forEach(function (sel) {
       var el = element.querySelector(sel);
@@ -653,7 +666,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.sessionScore = 0;
     state.lastTopic = '—';
     state.lastMasteryPct = 50;
-    state.lastDifficulty = 2;
+    state.lastDifficulty = 3;
     setLoading('Preparing your adaptive quiz…');
     jQuery.ajax({
       type: 'POST', url: urlStart,

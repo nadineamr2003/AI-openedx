@@ -620,19 +620,29 @@
   text-overflow: ellipsis;
 }
 
-.aq-tag-diff {
-  background: #FEF3C7;
-  color: #D97706;
-}
-
-.aq-tag-diff.diff-easy {
+.aq-tag-diff.diff-very-easy {
   background: #ECFDF5;
   color: #059669;
 }
 
+.aq-tag-diff.diff-easy {
+  background: #F0FDF4;
+  color: #16A34A;
+}
+
+.aq-tag-diff.diff-medium {
+  background: #FEF3C7;
+  color: #D97706;
+}
+
 .aq-tag-diff.diff-hard {
-  background: var(--aq-danger-bg);
-  color: var(--aq-danger);
+  background: #FEF2F2;
+  color: #DC2626;
+}
+
+.aq-tag-diff.diff-very-hard {
+  background: #F3E8FF;
+  color: #7C3AED;
 }
 
 .aq-q-counter {

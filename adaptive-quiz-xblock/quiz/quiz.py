@@ -81,7 +81,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     session_score = Integer(default=0, scope=Scope.user_state)
     session_active = Boolean(default=False, scope=Scope.user_state)
     current_topic = String(default="", scope=Scope.user_state)
-    current_difficulty = Integer(default=2, scope=Scope.user_state)
+    current_difficulty = Integer(default=3, scope=Scope.user_state)
     current_question_json = String(default="", scope=Scope.user_state)
     session_topics_json = String(default="", scope=Scope.user_state)
     session_source_text = String(default="", scope=Scope.user_state)
@@ -262,7 +262,7 @@ help="Default fallback course identifier used if no learner-selected course is a
         self.active_session_id = start_resp.get("session_id", "")
         self.session_topics_json = json.dumps(start_resp.get("topics", []))
         self.session_source_text = start_resp.get("resolved_source_text", "")
-        self.current_difficulty = start_resp.get("current_difficulty", 2)
+        self.current_difficulty = start_resp.get("current_difficulty", 3)
         self.current_topic = start_resp.get("topics", [""])[0] if start_resp.get("topics") else ""
 
         return self._fetch_and_store_question()
@@ -405,7 +405,7 @@ help="Default fallback course identifier used if no learner-selected course is a
                 "session_count": 0,
                 "total_answers": 0,
                 "irt_active": False,
-                "current_difficulty": 2,
+                "current_difficulty": 3,
             }
 
         if not mastery_resp:
@@ -426,7 +426,7 @@ help="Default fallback course identifier used if no learner-selected course is a
             "session_count": state_resp.get("session_count", 0),
             "total_answers": state_resp.get("total_answers", 0),
             "irt_active": state_resp.get("irt_active", False),
-            "current_difficulty": state_resp.get("current_difficulty", 2),
+            "current_difficulty": state_resp.get("current_difficulty", 3),
         }
 
     @XBlock.json_handler

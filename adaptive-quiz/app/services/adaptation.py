@@ -1,9 +1,22 @@
 import math
 
 EMA_ALPHA = 0.15
-DIFFICULTY_B = {1: -1.5, 2: 0.0, 3: 1.5}
+DIFFICULTY_B = {
+    1: -2.0,   # Very Easy
+    2: -1.0,   # Easy
+    3:  0.0,   # Medium
+    4:  1.0,   # Hard
+    5:  2.0    # Very Hard
+}
 TARGET_BAND = (0.70, 0.85)
 MIN_ANSWERS_FOR_IRT = 5
+DIFFICULTY_LABELS = {
+    1: "Very Easy",
+    2: "Easy",
+    3: "Medium",
+    4: "Hard",
+    5: "Very Hard",
+}
 
 
 def compute_time_weight(time_ms: int) -> float:
@@ -22,7 +35,7 @@ def update_mastery(current_mastery: float, correct: bool, time_ms: int) -> float
 
 
 def mastery_to_theta(mastery: float) -> float:
-    return (mastery - 0.5) * 4.0
+    return (mastery - 0.5) * 8.0
 
 
 def p_correct(theta: float, b: float) -> float:
@@ -71,7 +84,7 @@ def get_initial_student_state(student_id: str, course_id: str, topics: list) -> 
         "student_id": student_id,
         "course_id": course_id,
         "topic_mastery": {t: 0.5 for t in topics},
-        "current_difficulty": 2,
+        "current_difficulty": 3,
         "total_answers": 0,
         "irt_active": False,
         "recent_answers": [],

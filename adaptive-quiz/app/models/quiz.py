@@ -1,16 +1,14 @@
-from pydantic import BaseModel
-
+from pydantic import BaseModel, Field
 
 class GenerateRequest(BaseModel):
     student_id: str
     course_id: str
     topic: str
-    difficulty: int = 2       # 1=easy 2=medium 3=hard
+    difficulty: int = Field(default=3, ge=1, le=5)
     source_text: str
-    mode: str = "auto"        # auto | weakness_review | challenge
+    mode: str = "auto"
     content_ids: list[str] = []
     question_count: int = 10
-
 
 class SubmitRequest(BaseModel):
     student_id: str
@@ -19,7 +17,7 @@ class SubmitRequest(BaseModel):
     selected_answer: str
     correct_answer: str
     topic: str
-    difficulty: int
+    difficulty: int = Field(ge=1, le=5)
     time_spent_ms: int
     session_id: str | None = None
 

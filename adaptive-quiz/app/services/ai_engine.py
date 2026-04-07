@@ -87,7 +87,7 @@ Requirements:
 - Be creative with the question angle — avoid repeating common phrasings
 - Question angle: {variation}
 - Topic: {topic}
-- Difficulty: {difficulty_label} (easy=recall, medium=application, hard=analysis)
+- Difficulty: {difficulty_label} (very easy = very basic recognition / obvious recall, easy = straightforward recall, medium = normal application, hard = multi-step reasoning or comparison, very hard = deeper analysis, nuanced distinction, or trickier application)
 - Exactly 4 answer choices labeled A, B, C, D
 - Exactly 1 correct answer
 - A short explanation (2-3 sentences) for why the correct answer is right
@@ -263,7 +263,13 @@ async def _call_model(
 
 
 async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
-    difficulty_label = {1: "easy", 2: "medium", 3: "hard"}[difficulty]
+    difficulty_label = {
+    1: "very easy",
+    2: "easy",
+    3: "medium",
+    4: "hard",
+    5: "very hard",
+    }[difficulty]
     variation = random.choice(VARIATION_ANGLES)
 
     prompt = PROMPT_TEMPLATE.format(
