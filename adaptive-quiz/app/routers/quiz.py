@@ -32,6 +32,50 @@ def _mastery_label(mastery: float) -> str:
         return "Proficient"
     return "Mastered"
 
+async def _compute_overall_stats(student_id: str, course_id: str) -> dict:
+    db = get_db()
+
+    pipeline = [
+        {
+            "$match": {
+                "student_id": student_id,
+                "course_id": course_id,
+                "ended_at": {"$ne": None},
+            }
+        },
+        {
+            "$group": {
+                "_id": None,
+                "completed_sessions": {"$sum": 1},
+                "completed_questions_answered": {"$sum": "$questions_answered"},
+                "completed_correct_answers": {"$sum": "$correct_answers"},
+            }
+        }
+    ]
+
+    stats = await db.student_session_history.aggregate(pipeline).to_list(1)
+    if not stats:
+        return {
+            "completed_sessions": 0,
+            "completed_questions_answered": 0,
+            "completed_correct_answers": 0,
+            "overall_accuracy": None,
+        }
+
+    row = stats[0]
+    total_answered = row.get("completed_questions_answered", 0)
+    total_correct = row.get("completed_correct_answers", 0)
+
+    overall_accuracy = None
+    if total_answered > 0:
+        overall_accuracy = round(total_correct / total_answered, 4)
+
+    return {
+        "completed_sessions": row.get("completed_sessions", 0),
+        "completed_questions_answered": total_answered,
+        "completed_correct_answers": total_correct,
+        "overall_accuracy": overall_accuracy,
+    }
 
 async def _get_state(student_id: str, course_id: str, topics: list[str]) -> dict:
     db = get_db()
@@ -430,6 +474,13 @@ async def get_state(student_id: str, course_id: str):
     )
     if not state:
         raise HTTPException(status_code=404, detail="Student state not found")
+
+    stats = await _compute_overall_stats(student_id, course_id)
+    state["completed_sessions"] = stats["completed_sessions"]
+    state["completed_questions_answered"] = stats["completed_questions_answered"]
+    state["completed_correct_answers"] = stats["completed_correct_answers"]
+    state["overall_accuracy"] = stats["overall_accuracy"]
+
     return state
 
 

@@ -375,7 +375,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     
     @XBlock.json_handler
     def get_progress(self, data, suffix=""):
-        """Return all-time dashboard data by combining mastery + full state."""
+        """Return dashboard data by combining mastery + state + course content."""
         student_id = self._student_id()
         active_course = data.get("selected_course_id") or self._active_course_id()
 
@@ -390,6 +390,12 @@ help="Default fallback course identifier used if no learner-selected course is a
             f"/api/quiz/state/{student_id}/{active_course}",
             method="GET"
         )
+        content_resp = self._api(
+            f"/api/quiz/content/{active_course}",
+            method="GET"
+        )
+
+        content_items = content_resp.get("items", []) if content_resp else []
 
         # No progress yet → return empty dashboard instead of error
         if not mastery_resp and not state_resp:
@@ -404,8 +410,9 @@ help="Default fallback course identifier used if no learner-selected course is a
                 "strong_topics": [],
                 "session_count": 0,
                 "total_answers": 0,
-                "irt_active": False,
+                "overall_accuracy": None,
                 "current_difficulty": 3,
+                "content_items": content_items,
             }
 
         if not mastery_resp:
@@ -423,10 +430,11 @@ help="Default fallback course identifier used if no learner-selected course is a
             "topic_labels": mastery_resp.get("topic_labels", {}),
             "weak_topics": mastery_resp.get("weak_topics", []),
             "strong_topics": mastery_resp.get("strong_topics", []),
-            "session_count": state_resp.get("session_count", 0),
-            "total_answers": state_resp.get("total_answers", 0),
-            "irt_active": state_resp.get("irt_active", False),
+            "session_count": state_resp.get("completed_sessions", state_resp.get("session_count", 0)),
+            "total_answers": state_resp.get("completed_questions_answered", state_resp.get("total_answers", 0)),
+            "overall_accuracy": state_resp.get("overall_accuracy"),
             "current_difficulty": state_resp.get("current_difficulty", 3),
+            "content_items": content_items,
         }
 
     @XBlock.json_handler

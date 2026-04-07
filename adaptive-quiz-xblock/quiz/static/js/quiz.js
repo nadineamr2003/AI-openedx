@@ -381,6 +381,193 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
   }
 
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function contentTypeLabel(type) {
+    var t = String(type || '').toLowerCase();
+    if (t === 'lecture') return 'Lectures';
+    if (t === 'tutorial') return 'Tutorials';
+    if (t === 'lab') return 'Labs';
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) + 's' : 'Other Content';
+  }
+
+  function contentTypeOrder(type) {
+    var t = String(type || '').toLowerCase();
+    if (t === 'lecture') return 1;
+    if (t === 'tutorial') return 2;
+    if (t === 'lab') return 3;
+    return 99;
+  }
+
+  function renderGroupedMastery(topicsWrap, mastery, topicLabels, contentItems) {
+    topicsWrap.innerHTML = '';
+
+    if (!contentItems || contentItems.length === 0) {
+      renderFlatMastery(topicsWrap, mastery, topicLabels);
+      return;
+    }
+
+    var grouped = {};
+
+    contentItems.forEach(function (item) {
+      var type = (item.content_type || 'other').toLowerCase();
+      var itemTopics = (item.topics || []).filter(function (topic) {
+        return Object.prototype.hasOwnProperty.call(mastery, topic);
+      });
+
+      if (itemTopics.length === 0) return;
+
+      if (!grouped[type]) grouped[type] = [];
+
+      var topicEntries = itemTopics.map(function (topic) {
+        var pct = Math.round((mastery[topic] || 0) * 100);
+        var label = topicLabels[topic] || 'Developing';
+        var cls = masteryStageClass(label);
+        return {
+          topic: topic,
+          pct: pct,
+          label: label,
+          cls: cls
+        };
+      });
+
+      var avgPct = Math.round(
+        topicEntries.reduce(function (sum, t) { return sum + t.pct; }, 0) / topicEntries.length
+      );
+
+      grouped[type].push({
+        title: item.title || 'Untitled Content',
+        week: item.week,
+        topics: topicEntries,
+        avgPct: avgPct
+      });
+    });
+
+    var typeKeys = Object.keys(grouped).sort(function (a, b) {
+      return contentTypeOrder(a) - contentTypeOrder(b);
+    });
+
+    if (typeKeys.length === 0) {
+      renderFlatMastery(topicsWrap, mastery, topicLabels);
+      return;
+    }
+
+    typeKeys.forEach(function (type, typeIndex) {
+      var items = grouped[type].sort(function (a, b) {
+        var aw = typeof a.week === 'number' ? a.week : 999;
+        var bw = typeof b.week === 'number' ? b.week : 999;
+        if (aw !== bw) return aw - bw;
+        return String(a.title).localeCompare(String(b.title));
+      });
+
+      var totalTopics = items.reduce(function (sum, item) {
+        return sum + item.topics.length;
+      }, 0);
+
+      var weightedSum = items.reduce(function (sum, item) {
+        return sum + (item.avgPct * item.topics.length);
+      }, 0);
+
+      var avgPct = totalTopics > 0 ? Math.round(weightedSum / totalTopics) : 0;
+
+      var typeDetails = document.createElement('details');
+      typeDetails.className = 'aq-accordion aq-accordion-type';
+      if (typeIndex === 0) typeDetails.open = true;
+
+      typeDetails.innerHTML =
+        '<summary class="aq-accordion-summary">' +
+        '<div class="aq-accordion-summary-main">' +
+        '<span class="aq-accordion-title">' + escapeHtml(contentTypeLabel(type)) + '</span>' +
+        '<span class="aq-accordion-meta">' + items.length + ' item' + (items.length === 1 ? '' : 's') + ' · ' + totalTopics + ' topic' + (totalTopics === 1 ? '' : 's') + '</span>' +
+        '</div>' +
+        '<div class="aq-accordion-summary-side">' +
+        '<span class="aq-accordion-score">' + avgPct + '% avg</span>' +
+        '<span class="aq-accordion-chevron">⌄</span>' +
+        '</div>' +
+        '</summary>';
+
+      var typeBody = document.createElement('div');
+      typeBody.className = 'aq-accordion-body';
+
+      items.forEach(function (item, itemIndex) {
+        var itemDetails = document.createElement('details');
+        itemDetails.className = 'aq-accordion aq-accordion-item';
+        if (typeIndex === 0 && itemIndex === 0) itemDetails.open = true;
+
+        var weekText = (typeof item.week === 'number') ? ('Week ' + item.week + ' · ') : '';
+
+        itemDetails.innerHTML =
+          '<summary class="aq-accordion-summary aq-accordion-summary-item">' +
+          '<div class="aq-accordion-summary-main">' +
+          '<span class="aq-accordion-title aq-accordion-title-item">' + escapeHtml(item.title) + '</span>' +
+          '<span class="aq-accordion-meta">' + weekText + item.topics.length + ' topic' + (item.topics.length === 1 ? '' : 's') + '</span>' +
+          '</div>' +
+          '<div class="aq-accordion-summary-side">' +
+          '<span class="aq-accordion-score">' + item.avgPct + '% avg</span>' +
+          '<span class="aq-accordion-chevron">⌄</span>' +
+          '</div>' +
+          '</summary>';
+
+        var itemBody = document.createElement('div');
+        itemBody.className = 'aq-accordion-body aq-accordion-body-item';
+
+        item.topics.forEach(function (entry) {
+          var topicBlock = document.createElement('div');
+          topicBlock.className = 'aq-dash-topic';
+          topicBlock.innerHTML =
+            '<div class="aq-dash-topic-row">' +
+            '<span class="aq-dash-topic-name">' + escapeHtml(entry.topic) + '</span>' +
+            '<span class="aq-dash-topic-badge ' + entry.cls + '">' + entry.pct + '% · ' + escapeHtml(entry.label) + '</span>' +
+            '</div>' +
+            '<div class="aq-dash-track">' +
+            '<div class="aq-dash-fill ' + entry.cls + '" style="width:' + entry.pct + '%"></div>' +
+            '</div>';
+
+          itemBody.appendChild(topicBlock);
+        });
+
+        itemDetails.appendChild(itemBody);
+        typeBody.appendChild(itemDetails);
+      });
+
+      typeDetails.appendChild(typeBody);
+      topicsWrap.appendChild(typeDetails);
+    });
+  }
+
+  function renderFlatMastery(topicsWrap, mastery, topicLabels) {
+    var sortedTopics = Object.keys(mastery).sort(function (a, b) {
+      return (mastery[a] || 0) - (mastery[b] || 0);
+    });
+
+    sortedTopics.forEach(function (topic) {
+      var pct = Math.round((mastery[topic] || 0) * 100);
+      var label = topicLabels[topic] || 'Developing';
+      var cls = masteryStageClass(label);
+      var badgeText = pct + '% · ' + label;
+
+      var block = document.createElement('div');
+      block.className = 'aq-dash-topic';
+      block.innerHTML =
+        '<div class="aq-dash-topic-row">' +
+        '<span class="aq-dash-topic-name">' + escapeHtml(topic) + '</span>' +
+        '<span class="aq-dash-topic-badge ' + cls + '">' + badgeText + '</span>' +
+        '</div>' +
+        '<div class="aq-dash-track">' +
+        '<div class="aq-dash-fill ' + cls + '" style="width:' + pct + '%"></div>' +
+        '</div>';
+
+      topicsWrap.appendChild(block);
+    });
+  }
+
   function handleExplainSimpler() {
     jQuery.ajax({
       type: 'POST', url: urlExplain,
@@ -523,10 +710,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
     if (emptyEl) emptyEl.classList.add('aq-hidden');
 
+    var overallAccuracy = '—';
+    if (typeof data.overall_accuracy === 'number') {
+      overallAccuracy = Math.round(data.overall_accuracy * 100) + '%';
+    }
+
     var fields = {
       '#aq-dash-sessions': data.session_count || 0,
       '#aq-dash-total-answers': data.total_answers || 0,
-      '#aq-dash-irt': data.irt_active ? 'Active' : 'Warming up',
+      '#aq-dash-overall-accuracy': overallAccuracy,
       '#aq-dash-difficulty': DIFF_LABEL[data.current_difficulty || 3] || 'Medium'
     };
     Object.keys(fields).forEach(function (sel) {
@@ -537,29 +729,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (topicsWrap) {
       var mastery = data.topic_mastery || {};
       var topicLabels = data.topic_labels || {};
+      var contentItems = data.content_items || [];
 
-      var sortedTopics = Object.keys(mastery).sort(function (a, b) {
-        return (mastery[a] || 0) - (mastery[b] || 0);
-      });
-
-      sortedTopics.forEach(function (topic) {
-        var pct = Math.round((mastery[topic] || 0) * 100);
-        var label = topicLabels[topic] || 'Developing';
-        var cls = masteryStageClass(label);
-        var badgeText = pct + '% · ' + label;
-
-        var block = document.createElement('div');
-        block.className = 'aq-dash-topic';
-        block.innerHTML =
-          '<div class="aq-dash-topic-row">' +
-          '<span class="aq-dash-topic-name">' + topic + '</span>' +
-          '<span class="aq-dash-topic-badge ' + cls + '">' + badgeText + '</span>' +
-          '</div>' +
-          '<div class="aq-dash-track">' +
-          '<div class="aq-dash-fill ' + cls + '" style="width:' + pct + '%"></div>' +
-          '</div>';
-        topicsWrap.appendChild(block);
-      });
+      renderGroupedMastery(topicsWrap, mastery, topicLabels, contentItems);
     }
 
     showScreen('dashboard');
