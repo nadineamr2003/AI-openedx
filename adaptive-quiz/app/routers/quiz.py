@@ -32,6 +32,66 @@ def _mastery_label(mastery: float) -> str:
         return "Proficient"
     return "Mastered"
 
+def _difficulty_label(diff: int) -> str:
+    return {
+        1: "very easy",
+        2: "easy",
+        3: "medium",
+        4: "hard",
+        5: "very hard",
+    }.get(diff, "medium")
+
+
+def _build_narrative_bridge(
+    is_correct: bool,
+    current_topic: str,
+    next_topic: str,
+    next_mode: str,
+    current_difficulty: int,
+    next_difficulty: int,
+    consecutive_wrong: int,
+) -> str:
+    current_diff_label = _difficulty_label(current_difficulty)
+    next_diff_label = _difficulty_label(next_difficulty)
+
+    if is_correct:
+        if next_topic != current_topic:
+            return (
+                f"You handled {current_topic} well, so the next question shifts to {next_topic} "
+                f"to keep your practice balanced at a {next_diff_label} level."
+            )
+        if next_difficulty > current_difficulty:
+            return (
+                f"You answered correctly, so the next question stays on {current_topic} "
+                f"but increases the challenge from {current_diff_label} to {next_diff_label}."
+            )
+        return (
+            f"You answered correctly, so the next question continues on {next_topic} "
+            f"at a {next_diff_label} level to strengthen this concept."
+        )
+
+    if consecutive_wrong >= 2:
+        return (
+            f"You have been struggling with {current_topic}, so the next step keeps the focus on reinforcement "
+            f"before moving you forward."
+        )
+
+    if next_topic != current_topic:
+        return (
+            f"This answer suggests that {next_topic} needs attention, so the next question redirects your practice there."
+        )
+
+    if next_difficulty < current_difficulty:
+        return (
+            f"This concept still needs support, so the next question stays on {current_topic} "
+            f"and lowers the difficulty from {current_diff_label} to {next_diff_label}."
+        )
+
+    return (
+        f"This concept still needs support, so the next question continues on {current_topic} "
+        f"at a {next_diff_label} level for more guided practice."
+    )
+
 async def _compute_overall_stats(student_id: str, course_id: str) -> dict:
     db = get_db()
 
@@ -400,6 +460,16 @@ async def submit(req: SubmitRequest):
         else:
             break
 
+    narrative_bridge = _build_narrative_bridge(
+        is_correct=is_correct,
+        current_topic=req.topic,
+        next_topic=next_topic,
+        next_mode=next_mode,
+        current_difficulty=req.difficulty,
+        next_difficulty=next_difficulty,
+        consecutive_wrong=consecutive_wrong,
+        )
+
     if not is_correct:
         # Always show normal explanation and offer a simpler version immediately
         support_features.append("explanation")
@@ -461,6 +531,7 @@ async def submit(req: SubmitRequest):
         strongest_topic_this_session=session_summary.get("strongest_topic_this_session"),
         session_accuracy=session_summary.get("accuracy"),
         avg_time_spent_ms=session_summary.get("avg_time_spent_ms"),
+        narrative_bridge=narrative_bridge,
     )
 
 

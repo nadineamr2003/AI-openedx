@@ -3,7 +3,7 @@
 function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var MAX_Q = initArgs.max_questions || 10;
-  var DISPLAY_NAME = initArgs.display_name || 'Adaptive Quiz';
+  var DISPLAY_NAME = initArgs.display_name || 'GUC StudyPath';
 
   var urlStart = runtime.handlerUrl(element, 'start_session');
   var urlSubmit = runtime.handlerUrl(element, 'submit_answer');
@@ -301,6 +301,25 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var expEl = $('#aq-explanation');
     if (expEl) expEl.textContent = data.explanation || '';
+
+    var bridgeWrap = $('#aq-narrative-bridge');
+var bridgeText = $('#aq-narrative-text');
+var bridgeLabel = $('#aq-narrative-label');
+
+if (bridgeWrap && bridgeText && bridgeLabel) {
+  if (data.session_complete) {
+    bridgeLabel.textContent = 'What happens next?';
+    bridgeText.textContent =
+      'You’ve finished this session. Open your results to see which topic to reinforce next and how your performance shaped the recommendation.';
+    bridgeWrap.classList.remove('aq-hidden');
+  } else if (data.narrative_bridge) {
+    bridgeLabel.textContent = 'Why and what is the next step?';
+    bridgeText.textContent = data.narrative_bridge;
+    bridgeWrap.classList.remove('aq-hidden');
+  } else {
+    bridgeWrap.classList.add('aq-hidden');
+  }
+}
 
     var pct = Math.round((data.updated_mastery || 0.5) * 100);
     var fillEl = $('#aq-mastery-fill');
@@ -839,7 +858,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.lastTopic = '—';
     state.lastMasteryPct = 50;
     state.lastDifficulty = 3;
-    setLoading('Preparing your adaptive quiz…');
+    setLoading('Preparing your quiz…');
     jQuery.ajax({
       type: 'POST', url: urlStart,
       data: JSON.stringify({ question_count: chosenCount, selected_course_id: courseId, content_ids: ids }),

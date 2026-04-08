@@ -37,6 +37,7 @@ class SubmitResponse(BaseModel):
     strongest_topic_this_session: str | None = None
     session_accuracy: float | None = None
     avg_time_spent_ms: int | None = None
+    narrative_bridge: str | None = None
 
 
 class MasteryResponse(BaseModel):

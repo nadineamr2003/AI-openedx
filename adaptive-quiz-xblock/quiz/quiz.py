@@ -343,6 +343,7 @@ help="Default fallback course identifier used if no learner-selected course is a
             "strongest_topic_this_session": submit_resp.get("strongest_topic_this_session"),
             "session_accuracy": submit_resp.get("session_accuracy"),
             "avg_time_spent_ms": submit_resp.get("avg_time_spent_ms"),
+            "narrative_bridge": submit_resp.get("narrative_bridge"),
         }
 
     @XBlock.json_handler
