@@ -192,7 +192,7 @@ def _build_session_recommendation(
 
     return (
         f"This session was challenging, which is completely normal. "
-        f"For your next attempt, start with {weakest_topic} and work through it step by step."
+        f"For your next attempt, consider reviewing {weakest_topic} and work through it step by step."
     )
 
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:

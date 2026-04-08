@@ -90,7 +90,9 @@ Requirements:
 - Difficulty: {difficulty_label} (very easy = very basic recognition / obvious recall, easy = straightforward recall, medium = normal application, hard = multi-step reasoning or comparison, very hard = deeper analysis, nuanced distinction, or trickier application)
 - Exactly 4 answer choices labeled A, B, C, D
 - Exactly 1 correct answer
+- Randomize which answer choice is correct. It must not systematically be A.
 - A short explanation (2-3 sentences) for why the correct answer is right
+- Do not mention answer letters in the explanation. Explain using the concept/content itself.
 - Stay grounded in the provided material — do NOT invent facts
 - All distractors must be plausible, not obviously wrong
 
@@ -131,6 +133,52 @@ def validate_question(q: dict) -> bool:
     if len(q["question"].strip()) < 10:
         return False
     return True
+
+def _remap_explanation_letter(explanation: str, old_letter: str, new_letter: str) -> str:
+    if not explanation or old_letter == new_letter:
+        return explanation
+
+    replacements = [
+        (f"Option {old_letter}", f"Option {new_letter}"),
+        (f"option {old_letter}", f"option {new_letter}"),
+        (f"Choice {old_letter}", f"Choice {new_letter}"),
+        (f"choice {old_letter}", f"choice {new_letter}"),
+        (f"Answer {old_letter}", f"Answer {new_letter}"),
+        (f"answer {old_letter}", f"answer {new_letter}"),
+        (f"({old_letter})", f"({new_letter})"),
+    ]
+
+    for src, dst in replacements:
+        explanation = explanation.replace(src, dst)
+
+    return explanation
+
+
+def _shuffle_question_options(q: dict) -> dict:
+    letters = ["A", "B", "C", "D"]
+    original_options = q["options"]
+    original_correct = q["correct_answer"]
+
+    pairs = list(original_options.items())
+    random.shuffle(pairs)
+
+    new_options = {}
+    new_correct = None
+
+    for new_letter, (old_letter, text) in zip(letters, pairs):
+        new_options[new_letter] = text
+        if old_letter == original_correct:
+            new_correct = new_letter
+
+    q["options"] = new_options
+    q["correct_answer"] = new_correct
+    q["explanation"] = _remap_explanation_letter(
+        q.get("explanation", ""),
+        original_correct,
+        new_correct
+    )
+
+    return q
 
 
 def _build_headers(provider_name: str, api_key: str) -> Dict[str, str]:
@@ -308,6 +356,7 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
                     q = json.loads(raw)
 
                     if validate_question(q):
+                        q = _shuffle_question_options(q)
                         logger.info(f"[LLM] SUCCESS provider={provider_name} model={model} topic={topic} difficulty={difficulty}")
                         return q
                     else:
