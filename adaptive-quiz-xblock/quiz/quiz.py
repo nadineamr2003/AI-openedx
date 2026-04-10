@@ -149,6 +149,9 @@ help="Default fallback course identifier used if no learner-selected course is a
         save_url = self.runtime.handler_url(self, "studio_submit")
         parse_url = self.runtime.handler_url(self, "parse_pdf")
         save_content_url = self.runtime.handler_url(self, "save_content_item")
+        update_content_url = self.runtime.handler_url(self, "update_content_item")
+        toggle_content_url = self.runtime.handler_url(self, "toggle_content_item")
+        get_content_item_url = self.runtime.handler_url(self, "get_content_item_studio")
         list_content_url = self.runtime.handler_url(self, "list_content_studio")
 
         html = f"""
@@ -545,6 +548,55 @@ help="Default fallback course identifier used if no learner-selected course is a
     text-align: right;
     margin-top: 4px;
     }}
+    
+    .aqs-btn-secondary {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    background: #fff;
+    color: #374151;
+    border: 1.5px solid #D1D5DB;
+    border-radius: 10px;
+    font-size: .9rem;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+    }}
+
+    .aqs-btn-secondary:hover {{
+    border-color: #9CA3AF;
+    background: #F9FAFB;
+    }}
+
+    .aqs-actions {{
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    }}
+
+    .aqs-status-chip {{
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: .72rem;
+    font-weight: 700;
+    white-space: nowrap;
+    }}
+
+    .aqs-status-active {{
+    background: #ECFDF5;
+    color: #065F46;
+    border: 1px solid #A7F3D0;
+    }}
+
+    .aqs-status-inactive {{
+    background: #FEF2F2;
+    color: #991B1B;
+    border: 1px solid #FECACA;
+    }}
 
     @media (max-width: 640px) {{
     .aqs-grid-2 {{
@@ -663,8 +715,11 @@ help="Default fallback course identifier used if no learner-selected course is a
         <textarea id="aqs-ext-summary" class="aqs-textarea" rows="3" readonly></textarea>
         </div>
 
-        <button class="aqs-btn-primary" id="aqs-btn-save" onclick="aqsSaveContent()">💾 Save Lecture</button>
-        <div id="aqs-save-status"></div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+  <button class="aqs-btn-primary" id="aqs-btn-save" onclick="aqsSaveContent()">💾 Save Lecture</button>
+  <button type="button" class="aqs-btn-secondary" id="aqs-btn-cancel-edit" onclick="aqsCancelEdit()" style="display:none;">Cancel Edit</button>
+</div>
+<div id="aqs-save-status"></div>
     </div>
 
     <div id="aqs-existing-section">
@@ -679,11 +734,16 @@ help="Default fallback course identifier used if no learner-selected course is a
     var SAVE_URL = "{save_url}";
     var PARSE_URL = "{parse_url}";
     var SAVE_CONTENT_URL = "{save_content_url}";
+    var UPDATE_CONTENT_URL = "{update_content_url}";
+    var TOGGLE_CONTENT_URL = "{toggle_content_url}";
+    var GET_CONTENT_ITEM_URL = "{get_content_item_url}";
     var LIST_CONTENT_URL = "{list_content_url}";
 
     var currentTopics = [];
     var currentMode = "pdf";
     var selectedFile = null;
+    var editingContentId = null;
+    var editingContentActive = true;
 
     window.aqsTab = function(name) {{
         ["settings", "content"].forEach(function(t) {{
@@ -826,25 +886,118 @@ help="Default fallback course identifier used if no learner-selected course is a
         }}
         }});
     }}
+    
+    function aqsFillEditor(item) {{
+    document.getElementById("aqs-ext-title").value = item.title || item.suggested_title || "";
+    document.getElementById("aqs-ext-week").value = item.week || item.suggested_week || 1;
+    document.getElementById("aqs-ext-course-id").value = item.course_id || "{self.course_id}";
+    document.getElementById("aqs-ext-course-name").value = item.course_name || "";
+    document.getElementById("aqs-ext-source").value = item.source_text || "";
+    document.getElementById("aqs-ext-summary").value = item.summary || "";
+
+    document.getElementById("aqs-source-char-count").textContent =
+        (item.source_text || "").length.toLocaleString() + " characters";
+
+    currentTopics = Array.isArray(item.topics) ? item.topics.slice() : [];
+    aqsRenderTopics();
+
+    editingContentId = item.id || null;
+    editingContentActive = item.active !== false;
+
+    var saveBtn = document.getElementById("aqs-btn-save");
+    var cancelBtn = document.getElementById("aqs-btn-cancel-edit");
+    if (saveBtn) saveBtn.innerHTML = editingContentId ? "💾 Update Lecture" : "💾 Save Lecture";
+    if (cancelBtn) cancelBtn.style.display = editingContentId ? "" : "none";
+
+    var section = document.getElementById("aqs-extracted-section");
+    section.style.display = "";
+    setTimeout(function() {{
+        section.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }}, 100);
+}}
+
+window.aqsCancelEdit = function() {{
+    editingContentId = null;
+    editingContentActive = true;
+
+    document.getElementById("aqs-ext-title").value = "";
+    document.getElementById("aqs-ext-week").value = 1;
+    document.getElementById("aqs-ext-course-name").value = "";
+    document.getElementById("aqs-ext-source").value = "";
+    document.getElementById("aqs-ext-summary").value = "";
+    document.getElementById("aqs-source-char-count").textContent = "0 characters";
+
+    currentTopics = [];
+    aqsRenderTopics();
+
+    var saveBtn = document.getElementById("aqs-btn-save");
+    var cancelBtn = document.getElementById("aqs-btn-cancel-edit");
+    if (saveBtn) saveBtn.innerHTML = "💾 Save Lecture";
+    if (cancelBtn) cancelBtn.style.display = "none";
+
+    document.getElementById("aqs-extracted-section").style.display = "none";
+    aqsStatus("aqs-save-status", "", "");
+}};
+
+window.aqsEditContent = function(contentId) {{
+    aqsStatus("aqs-save-status", "loading", "Loading lecture for editing…");
+
+    jQuery.ajax({{
+        type: "POST",
+        url: GET_CONTENT_ITEM_URL,
+        data: JSON.stringify({{
+            content_id: contentId
+        }}),
+        contentType: "application/json",
+        success: function(data) {{
+            if (data.success && data.item) {{
+                aqsStatus("aqs-save-status", "", "");
+                aqsFillEditor(data.item);
+            }} else {{
+                aqsStatus("aqs-save-status", "error", data.error || "Could not load lecture.");
+            }}
+        }},
+        error: function() {{
+            aqsStatus("aqs-save-status", "error", "Could not load lecture.");
+        }}
+    }});
+}};
+
+window.aqsToggleActive = function(contentId, nextActive) {{
+    jQuery.ajax({{
+        type: "POST",
+        url: TOGGLE_CONTENT_URL,
+        data: JSON.stringify({{
+            content_id: contentId,
+            active: nextActive
+        }}),
+        contentType: "application/json",
+        success: function(data) {{
+            if (data.success) {{
+                aqsLoadExisting();
+            }} else {{
+                alert(data.error || "Could not update lecture status.");
+            }}
+        }},
+        error: function() {{
+            alert("Could not update lecture status.");
+        }}
+    }});
+}};
 
     function aqsPopulateExtracted(ext) {{
-        document.getElementById("aqs-ext-title").value = ext.suggested_title || "";
-        document.getElementById("aqs-ext-week").value = ext.suggested_week || 1;
-        document.getElementById("aqs-ext-source").value = ext.source_text || "";
-        document.getElementById("aqs-ext-summary").value = ext.summary || "";
-
-        document.getElementById("aqs-source-char-count").textContent =
-        (ext.source_text || "").length.toLocaleString() + " characters";
-
-        currentTopics = Array.isArray(ext.topics) ? ext.topics.slice() : [];
-        aqsRenderTopics();
-
-        var section = document.getElementById("aqs-extracted-section");
-        section.style.display = "";
-        setTimeout(function() {{
-        section.scrollIntoView({{ behavior: "smooth", block: "start" }});
-        }}, 100);
-    }}
+    aqsFillEditor({{
+        id: null,
+        course_id: document.getElementById("aqs-ext-course-id").value || "{self.course_id}",
+        course_name: document.getElementById("aqs-ext-course-name").value || "",
+        title: ext.suggested_title || "",
+        week: ext.suggested_week || 1,
+        topics: Array.isArray(ext.topics) ? ext.topics.slice() : [],
+        source_text: ext.source_text || "",
+        summary: ext.summary || "",
+        active: true
+    }});
+}}
 
     function aqsRenderTopics() {{
         var editor = document.getElementById("aqs-topics-editor");
@@ -885,78 +1038,79 @@ help="Default fallback course identifier used if no learner-selected course is a
     }});
 
     window.aqsSaveContent = function() {{
-        var title = document.getElementById("aqs-ext-title").value.trim();
-        var week = parseInt(document.getElementById("aqs-ext-week").value || "1", 10);
-        var courseId = document.getElementById("aqs-ext-course-id").value.trim();
-        var courseName = document.getElementById("aqs-ext-course-name").value.trim();
-        var sourceText = document.getElementById("aqs-ext-source").value.trim();
-        var ctype = "lecture";
+    var title = document.getElementById("aqs-ext-title").value.trim();
+    var week = parseInt(document.getElementById("aqs-ext-week").value || "1", 10);
+    var courseId = document.getElementById("aqs-ext-course-id").value.trim();
+    var courseName = document.getElementById("aqs-ext-course-name").value.trim();
+    var sourceText = document.getElementById("aqs-ext-source").value.trim();
 
-        if (!title) {{
+    if (!title) {{
         aqsStatus("aqs-save-status", "error", "Please enter a lecture title.");
         return;
-        }}
-        if (!courseId) {{
+    }}
+    if (!courseId) {{
         aqsStatus("aqs-save-status", "error", "Please enter a Course ID.");
         return;
-        }}
-        if (currentTopics.length === 0) {{
+    }}
+    if (currentTopics.length === 0) {{
         aqsStatus("aqs-save-status", "error", "Please add at least one topic.");
         return;
-        }}
-        if (sourceText.length < 50) {{
+    }}
+    if (sourceText.length < 50) {{
         aqsStatus("aqs-save-status", "error", "Source text is too short.");
         return;
-        }}
+    }}
 
-        var saveBtn = document.getElementById("aqs-btn-save");
-        saveBtn.disabled = true;
-        saveBtn.innerHTML = '<span class="aqs-spinner"></span> Saving…';
+    var isEdit = !!editingContentId;
+    var targetUrl = isEdit ? UPDATE_CONTENT_URL : SAVE_CONTENT_URL;
 
-        jQuery.ajax({{
+    var payload = {{
+        course_id: courseId,
+        course_name: courseName || null,
+        title: title,
+        week: week,
+        topics: currentTopics,
+        source_text: sourceText,
+        active: editingContentActive
+    }};
+
+    if (isEdit) {{
+        payload.content_id = editingContentId;
+    }}
+
+    var saveBtn = document.getElementById("aqs-btn-save");
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="aqs-spinner"></span> ' + (isEdit ? 'Updating…' : 'Saving…');
+
+    jQuery.ajax({{
         type: "POST",
-        url: SAVE_CONTENT_URL,
-        data: JSON.stringify({{
-            course_id: courseId,
-            course_name: courseName || null,
-            title: title,
-            week: week,
-            content_type: ctype,
-            topics: currentTopics,
-            source_text: sourceText,
-            active: true
-        }}),
+        url: targetUrl,
+        data: JSON.stringify(payload),
         contentType: "application/json",
         success: function(data) {{
             saveBtn.disabled = false;
-            saveBtn.innerHTML = "💾 Save Lecture";
+            saveBtn.innerHTML = isEdit ? "💾 Update Lecture" : "💾 Save Lecture";
 
             if (data.success) {{
-    var settingsCourseField = document.querySelector('#aqs-settings-form input[name="course_id"]');
-    if (settingsCourseField) {{
-        settingsCourseField.value = courseId;
-    }}
+                var settingsCourseField = document.querySelector('#aqs-settings-form input[name="course_id"]');
+                if (settingsCourseField) {{
+                    settingsCourseField.value = courseId;
+                }}
 
-    var extractedCourseField = document.getElementById("aqs-ext-course-id");
-    if (extractedCourseField) {{
-        extractedCourseField.value = courseId;
-    }}
-
-    aqsStatus("aqs-save-status", "success", "Lecture saved successfully.");
-    document.getElementById("aqs-extracted-section").style.display = "none";
-    aqsResetInput();
-    aqsLoadExisting();
-}} else {{
-            aqsStatus("aqs-save-status", "error", data.error || "Save failed.");
+                aqsStatus("aqs-save-status", "success", isEdit ? "Lecture updated successfully." : "Lecture saved successfully.");
+                aqsCancelEdit();
+                aqsLoadExisting();
+            }} else {{
+                aqsStatus("aqs-save-status", "error", data.error || "Save failed.");
             }}
         }},
         error: function() {{
             saveBtn.disabled = false;
-            saveBtn.innerHTML = "💾 Save Lecture";
+            saveBtn.innerHTML = isEdit ? "💾 Update Lecture" : "💾 Save Lecture";
             aqsStatus("aqs-save-status", "error", "Network error — could not save lecture.");
         }}
-        }});
-    }};
+    }});
+}};
 
     function aqsLoadExisting() {{
     var list = document.getElementById("aqs-existing-list");
@@ -982,6 +1136,10 @@ help="Default fallback course identifier used if no learner-selected course is a
 
             var html = "";
             data.items.forEach(function(item) {{
+                var statusClass = item.active ? "aqs-status-active" : "aqs-status-inactive";
+                var statusText = item.active ? "Active" : "Inactive";
+                var toggleLabel = item.active ? "Deactivate" : "Activate";
+
                 html +=
                     '<div class="aqs-content-item">' +
                         '<div>' +
@@ -989,6 +1147,13 @@ help="Default fallback course identifier used if no learner-selected course is a
                             '<div class="aqs-content-item-meta">' +
                                 'Week ' + (item.week || "?") + ' · ' +
                                 ((item.topics || []).length) + ' topic' + (((item.topics || []).length) === 1 ? '' : 's') +
+                            '</div>' +
+                            '<div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">' +
+                                '<span class="aqs-status-chip ' + statusClass + '">' + statusText + '</span>' +
+                                '<div class="aqs-actions">' +
+                                    '<button type="button" class="aqs-btn-secondary" onclick="aqsEditContent(\\'' + item.id + '\\')">Edit</button>' +
+                                    '<button type="button" class="aqs-btn-secondary" onclick="aqsToggleActive(\\'' + item.id + '\\', ' + (!item.active) + ')">' + toggleLabel + '</button>' +
+                                '</div>' +
                             '</div>' +
                         '</div>' +
                         '<span class="aqs-type-badge aqs-type-lecture">Lecture</span>' +
@@ -1300,22 +1465,20 @@ help="Default fallback course identifier used if no learner-selected course is a
     
     @XBlock.json_handler
     def parse_pdf(self, data, suffix=""):
-            """
-            Proxy PDF/text to backend parser for Studio content ingestion.
-            """
-            payload = {}
-            if data.get("pdf_base64"):
-                payload["pdf_base64"] = data["pdf_base64"]
-            elif data.get("raw_text"):
-                payload["raw_text"] = data["raw_text"]
-            else:
-                return {"success": False, "error": "No content provided."}
-
-            resp = self._api("/api/quiz/content/parse", payload=payload, timeout=90)
-
-            if resp and resp.get("success"):
-                return {"success": True, "extracted": resp.get("extracted", {})}
-            return {"success": False, "error": "Content extraction failed. Check backend logs."}
+        """
+        Proxy PDF/text to backend parser for Studio content ingestion.
+        """
+        payload = {}
+        if data.get("pdf_base64"):
+            payload["pdf_base64"] = data["pdf_base64"]
+        elif data.get("raw_text"):
+            payload["raw_text"] = data["raw_text"]
+        else:
+            return {"success": False, "error": "No content provided."}
+        resp = self._api("/api/quiz/content/parse", payload=payload, timeout=90)
+        if resp and resp.get("success"):
+            return {"success": True, "extracted": resp.get("extracted", {})}
+        return {"success": False, "error": "Content extraction failed. Check backend logs."}
 
     @XBlock.json_handler
     def save_content_item(self, data, suffix=""):
@@ -1342,14 +1505,63 @@ help="Default fallback course identifier used if no learner-selected course is a
         if resp and resp.get("success"):
             return {"success": True, "message": resp.get("message", "Content saved.")}
         return {"success": False, "error": "Failed to save content item."}
+    
+    @XBlock.json_handler
+    def update_content_item(self, data, suffix=""):
+        required = ["content_id", "course_id", "title", "week", "topics", "source_text"]
+        for field in required:
+            if not data.get(field):
+                return {"success": False, "error": f"Missing required field: {field}"}
+
+        payload = {
+            "content_id": data["content_id"],
+            "course_id": data["course_id"],
+            "course_name": data.get("course_name"),
+            "week": int(data["week"]),
+            "title": data["title"],
+            "topics": data["topics"],
+            "source_text": data["source_text"],
+            "active": bool(data.get("active", True)),
+        }
+
+        resp = self._api("/api/quiz/content/update", payload=payload)
+        if resp and resp.get("success"):
+            return {"success": True, "message": resp.get("message", "Content updated.")}
+        return {"success": False, "error": "Failed to update content item."}
+
+
+    @XBlock.json_handler
+    def toggle_content_item(self, data, suffix=""):
+        content_id = data.get("content_id")
+        if not content_id:
+            return {"success": False, "error": "Missing content_id."}
+
+        payload = {
+            "content_id": content_id,
+            "active": bool(data.get("active", True)),
+        }
+
+        resp = self._api("/api/quiz/content/toggle", payload=payload)
+        if resp and resp.get("success"):
+            return {"success": True, "message": resp.get("message", "Status updated.")}
+        return {"success": False, "error": "Failed to update active status."}
+
+
+    @XBlock.json_handler
+    def get_content_item_studio(self, data, suffix=""):
+        content_id = data.get("content_id")
+        if not content_id:
+            return {"success": False, "error": "Missing content_id."}
+
+        resp = self._api(f"/api/quiz/content/item/{content_id}", method="GET")
+        if resp and resp.get("success"):
+            return {"success": True, "item": resp.get("item", {})}
+        return {"success": False, "error": "Could not load content item."}
 
     @XBlock.json_handler
     def list_content_studio(self, data, suffix=""):
-        """
-        Return saved lecture items for Studio content manager.
-        """
         course_id = data.get("course_id") or self.course_id
-        resp = self._api(f"/api/quiz/content/{course_id}", method="GET")
+        resp = self._api(f"/api/quiz/content/{course_id}?include_inactive=true", method="GET")
         if resp:
             return {"success": True, "items": resp.get("items", [])}
         return {"success": True, "items": []}

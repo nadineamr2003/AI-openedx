@@ -1,12 +1,16 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 from uuid import uuid4
+from bson import ObjectId
 from app.models.quiz import (
     GenerateRequest,
     SubmitRequest,
     SubmitResponse,
     MasteryResponse,
     ContentItem,
+    ContentListResponse,
+    ContentUpdateRequest,
+    ContentToggleRequest,
 )
 from app.services.ai_engine import (
     generate_question,
@@ -392,6 +396,28 @@ async def _replenish_cache(topic: str, difficulty: int,
             await db.questions_cache.insert_one(q)
         except Exception:
             break
+        
+def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dict:
+    item = {
+        "id": str(doc["_id"]),
+        "course_id": doc.get("course_id"),
+        "course_name": doc.get("course_name"),
+        "week": doc.get("week"),
+        "content_type": doc.get("content_type"),
+        "title": doc.get("title"),
+        "topics": doc.get("topics", []),
+        "active": doc.get("active", True),
+    }
+    if include_source_text:
+        item["source_text"] = doc.get("source_text", "")
+    return item
+
+
+def _parse_object_id(content_id: str) -> ObjectId:
+    try:
+        return ObjectId(content_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid content ID.")
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -797,15 +823,81 @@ async def add_content(item: ContentItem):
     await db.course_content.insert_one(doc)
     return {"success": True, "message": f"Content '{item.title}' added."}
 
-@router.get("/content/{course_id}")
-async def list_content(course_id: str):
-    """Student fetches available content items for this course."""
+@router.post("/content/update")
+async def update_content_item(req: ContentUpdateRequest):
     db = get_db()
-    items = await db.course_content.find(
-        {"course_id": course_id, "active": True},
-        {"_id": 0}
-    ).to_list(100)
-    return {"course_id": course_id, "items": items}
+    oid = _parse_object_id(req.content_id)
+
+    result = await db.course_content.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "course_id": req.course_id,
+                "course_name": req.course_name,
+                "week": req.week,
+                "content_type": "lecture",
+                "title": req.title,
+                "topics": req.topics,
+                "source_text": req.source_text,
+                "active": req.active,
+            }
+        }
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Content item not found.")
+
+    return {"success": True, "message": "Content item updated successfully."}
+
+@router.post("/content/toggle")
+async def toggle_content_item(req: ContentToggleRequest):
+    db = get_db()
+    oid = _parse_object_id(req.content_id)
+
+    result = await db.course_content.update_one(
+        {"_id": oid},
+        {"$set": {"active": req.active}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Content item not found.")
+
+    return {
+        "success": True,
+        "message": "Content item activated." if req.active else "Content item deactivated."
+    }
+
+@router.get("/content/item/{content_id}")
+async def get_content_item(content_id: str):
+    db = get_db()
+    oid = _parse_object_id(content_id)
+
+    doc = await db.course_content.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Content item not found.")
+
+    return {
+        "success": True,
+        "item": _serialize_content_item(doc, include_source_text=True)
+    }
+
+@router.get("/content/{course_id}")
+async def get_content(course_id: str, include_inactive: bool = False):
+    db = get_db()
+
+    query = {"course_id": course_id}
+    if not include_inactive:
+        query["active"] = True
+
+    docs = await db.course_content.find(query).sort([
+        ("week", 1),
+        ("title", 1),
+    ]).to_list(length=None)
+
+    return {
+        "course_id": course_id,
+        "items": [_serialize_content_item(doc) for doc in docs]
+    }
 
 @router.get("/courses")
 async def list_courses():

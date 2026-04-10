@@ -63,3 +63,18 @@ class ContentItem(BaseModel):
 class ContentListResponse(BaseModel):
     course_id: str
     items: list[dict]
+    
+class ContentUpdateRequest(BaseModel):
+    content_id: str
+    course_id: str
+    course_name: str | None = None
+    week: int
+    title: str
+    topics: list[str]
+    source_text: str
+    active: bool = True
+
+
+class ContentToggleRequest(BaseModel):
+    content_id: str
+    active: bool
