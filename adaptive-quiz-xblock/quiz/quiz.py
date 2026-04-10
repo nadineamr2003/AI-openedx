@@ -97,14 +97,14 @@ help="Default fallback course identifier used if no learner-selected course is a
         """Return a stable anonymous student ID from the Open edX runtime."""
         return self.runtime.anonymous_student_id
 
-    def _api(self, path, method="POST", payload=None):
+    def _api(self, path, method="POST", payload=None, timeout=30):
         """Make a synchronous call to the FastAPI backend."""
         url = f"{self.backend_url}{path}"
         try:
             if method == "GET":
-                resp = requests.get(url, timeout=30)
+                resp = requests.get(url, timeout=timeout)
             else:
-                resp = requests.post(url, json=payload, timeout=30)
+                resp = requests.post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as exc:
@@ -147,78 +147,929 @@ help="Default fallback course identifier used if no learner-selected course is a
 
     def studio_view(self, context=None):
         save_url = self.runtime.handler_url(self, "studio_submit")
+        parse_url = self.runtime.handler_url(self, "parse_pdf")
+        save_content_url = self.runtime.handler_url(self, "save_content_item")
+        list_content_url = self.runtime.handler_url(self, "list_content_studio")
 
         html = f"""
-        <div class="aq-studio-editor">
-        <h2>Adaptive Quiz Settings</h2>
-        <form id="aq-studio-form">
+    <div class="aqs-root">
+    <style>
+    .aqs-root {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 760px;
+    color: #111827;
+    font-size: 14px;
+    line-height: 1.5;
+    }}
 
-            <label>Display Name
-            <input type="text" name="display_name" value="{self.display_name}" />
-            </label>
+    .aqs-tabs {{
+    display: flex;
+    border-bottom: 2px solid #E5E7EB;
+    margin-bottom: 24px;
+    gap: 2px;
+    }}
 
-            <label>Default Course ID
-            <input type="text" name="course_id" value="{self.course_id}" />
-            <small>Optional fallback course if no learner-selected course is active.</small>
-            </label>
+    .aqs-tab {{
+    padding: 10px 20px;
+    border: none;
+    background: none;
+    font-size: .875rem;
+    font-weight: 700;
+    color: #6B7280;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color .15s, border-color .15s;
+    }}
 
-            <label>Backend URL
-            <input type="text" name="backend_url" value="{self.backend_url}" />
-            <small>Base URL of the FastAPI server (e.g. http://host.docker.internal:8100).</small>
-            </label>
+    .aqs-tab:hover {{
+    color: #374151;
+    }}
 
-            <label>Questions Per Session
-            <input type="number" name="max_questions" value="{self.max_questions}" min="1" max="50" />
-            </label>
+    .aqs-tab.active {{
+    color: #2B4EDE;
+    border-bottom-color: #2B4EDE;
+    }}
 
-            <button type="submit" class="button action-primary">Save</button>
-        </form>
+    .aqs-field {{
+    margin-bottom: 18px;
+    }}
+
+    .aqs-label {{
+    display: block;
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #6B7280;
+    margin-bottom: 6px;
+    }}
+
+    .aqs-label-hint {{
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #9CA3AF;
+    font-size: .72rem;
+    }}
+
+    .aqs-input,
+    .aqs-textarea,
+    .aqs-select {{
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    border: 1.5px solid #E5E7EB;
+    border-radius: 10px;
+    font-size: .9rem;
+    font-family: inherit;
+    color: #111827;
+    background: #fff;
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+    }}
+
+    .aqs-input:focus,
+    .aqs-textarea:focus,
+    .aqs-select:focus {{
+    border-color: #2B4EDE;
+    box-shadow: 0 0 0 3px rgba(43,78,222,.10);
+    }}
+
+    .aqs-textarea {{
+    resize: vertical;
+    line-height: 1.6;
+    }}
+
+    .aqs-textarea[readonly] {{
+    background: #F9FAFB;
+    color: #6B7280;
+    }}
+
+    .aqs-hint {{
+    display: block;
+    margin-top: 5px;
+    font-size: .78rem;
+    color: #9CA3AF;
+    }}
+
+    .aqs-grid-2 {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    }}
+
+    .aqs-col-full {{
+    grid-column: 1 / -1;
+    }}
+
+    .aqs-btn-primary {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 22px;
+    background: #2B4EDE;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-size: .9rem;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background .15s, transform .1s, box-shadow .15s;
+    box-shadow: 0 2px 10px rgba(43,78,222,.22);
+    }}
+
+    .aqs-btn-primary:hover {{
+    background: #1A3AB8;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(43,78,222,.30);
+    }}
+
+    .aqs-btn-primary:disabled {{
+    background: #9CA3AF;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+    }}
+
+    .aqs-toggle {{
+    display: inline-flex;
+    background: #F3F4F6;
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+    margin-bottom: 16px;
+    }}
+
+    .aqs-toggle-btn {{
+    padding: 7px 18px;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    font-size: .83rem;
+    font-weight: 700;
+    color: #6B7280;
+    cursor: pointer;
+    transition: background .15s, color .15s, box-shadow .15s;
+    }}
+
+    .aqs-toggle-btn.active {{
+    background: #fff;
+    color: #2B4EDE;
+    box-shadow: 0 1px 4px rgba(0,0,0,.12);
+    }}
+
+    .aqs-drop-zone {{
+    border: 2px dashed #CBD5E1;
+    border-radius: 14px;
+    padding: 32px 20px;
+    text-align: center;
+    cursor: pointer;
+    background: #F8FAFC;
+    transition: border-color .15s, background .15s;
+    margin-bottom: 14px;
+    user-select: none;
+    }}
+
+    .aqs-drop-zone:hover,
+    .aqs-drop-zone.drag-over {{
+    border-color: #2B4EDE;
+    background: #EEF2FF;
+    }}
+
+    .aqs-drop-zone.has-file {{
+    border-color: #059669;
+    background: #ECFDF5;
+    border-style: solid;
+    }}
+
+    .aqs-drop-icon {{
+    font-size: 2rem;
+    margin-bottom: 8px;
+    }}
+
+    .aqs-drop-title {{
+    font-size: .92rem;
+    font-weight: 700;
+    color: #374151;
+    margin-bottom: 3px;
+    }}
+
+    .aqs-drop-sub {{
+    font-size: .78rem;
+    color: #9CA3AF;
+    }}
+
+    .aqs-topics-editor {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 9px 10px;
+    border: 1.5px solid #E5E7EB;
+    border-radius: 10px;
+    background: #fff;
+    min-height: 46px;
+    cursor: text;
+    transition: border-color .15s, box-shadow .15s;
+    }}
+
+    .aqs-topics-editor:focus-within {{
+    border-color: #2B4EDE;
+    box-shadow: 0 0 0 3px rgba(43,78,222,.10);
+    }}
+
+    .aqs-topic-tag {{
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #EEF2FF;
+    color: #2B4EDE;
+    border: 1px solid rgba(43,78,222,.18);
+    border-radius: 999px;
+    padding: 3px 10px 3px 12px;
+    font-size: .78rem;
+    font-weight: 700;
+    white-space: nowrap;
+    }}
+
+    .aqs-topic-remove {{
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #93C5FD;
+    font-size: .9rem;
+    line-height: 1;
+    padding: 0;
+    }}
+
+    .aqs-topic-remove:hover {{
+    color: #DC2626;
+    }}
+
+    .aqs-topic-input {{
+    border: none;
+    outline: none;
+    font-size: .85rem;
+    font-family: inherit;
+    color: #374151;
+    flex: 1;
+    min-width: 150px;
+    padding: 2px 4px;
+    background: transparent;
+    }}
+
+    .aqs-divider {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 28px 0 20px;
+    color: #9CA3AF;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    }}
+
+    .aqs-divider::before,
+    .aqs-divider::after {{
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: #E5E7EB;
+    }}
+
+    .aqs-content-item {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid #E5E7EB;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: #fff;
+    }}
+
+    .aqs-content-item-title {{
+    font-size: .9rem;
+    font-weight: 700;
+    color: #111827;
+    }}
+
+    .aqs-content-item-meta {{
+    font-size: .76rem;
+    color: #6B7280;
+    margin-top: 2px;
+    }}
+
+    .aqs-type-badge {{
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: .7rem;
+    font-weight: 700;
+    white-space: nowrap;
+    }}
+
+    .aqs-type-lecture {{
+    background: #EEF2FF;
+    color: #2B4EDE;
+    }}
+
+    .aqs-status-success {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: #ECFDF5;
+    color: #065F46;
+    font-size: .875rem;
+    font-weight: 600;
+    margin-top: 12px;
+    border: 1px solid #A7F3D0;
+    }}
+
+    .aqs-status-error {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: #FEF2F2;
+    color: #991B1B;
+    font-size: .875rem;
+    font-weight: 600;
+    margin-top: 12px;
+    border: 1px solid #FECACA;
+    }}
+
+    .aqs-loading-inline {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: .875rem;
+    color: #6B7280;
+    font-weight: 500;
+    margin-top: 12px;
+    }}
+
+    .aqs-spinner {{
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid #E5E7EB;
+    border-top-color: #2B4EDE;
+    border-radius: 50%;
+    animation: aqs-spin .7s linear infinite;
+    flex-shrink: 0;
+    }}
+
+    @keyframes aqs-spin {{
+    to {{ transform: rotate(360deg); }}
+    }}
+
+    .aqs-empty {{
+    font-size: .875rem;
+    color: #9CA3AF;
+    padding: 12px 0;
+    }}
+
+    .aqs-char-count {{
+    font-size: .75rem;
+    color: #9CA3AF;
+    text-align: right;
+    margin-top: 4px;
+    }}
+
+    @media (max-width: 640px) {{
+    .aqs-grid-2 {{
+        grid-template-columns: 1fr;
+    }}
+    }}
+    </style>
+
+    <div class="aqs-tabs">
+    <button class="aqs-tab active" id="aqs-tab-settings" onclick="aqsTab('settings')">⚙️ Settings</button>
+    <button class="aqs-tab" id="aqs-tab-content" onclick="aqsTab('content')">📚 Content Manager</button>
+    </div>
+
+    <div id="aqs-panel-settings">
+    <form id="aqs-settings-form">
+        <div class="aqs-field">
+        <label class="aqs-label">Display Name</label>
+        <input type="text" name="display_name" class="aqs-input" value="{self.display_name}">
         </div>
 
-        <style>
-        .aq-studio-editor {{ font-family: sans-serif; padding: 20px; }}
-        .aq-studio-editor label {{ display: block; margin-bottom: 14px; font-weight: bold; }}
-        .aq-studio-editor input {{ display: block; width: 100%; max-width: 480px;
-            padding: 6px 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; }}
-        .aq-studio-editor small {{ display: block; color: #666; font-weight: normal; margin-top: 2px; }}
-        .aq-studio-note {{ background: #fff8e1; border-left: 4px solid #ffc107;
-            padding: 10px 14px; margin: 16px 0; border-radius: 4px; font-weight: normal; }}
-        .aq-studio-editor button {{ margin-top: 12px; padding: 8px 20px; }}
-        </style>
+        <div class="aqs-field">
+        <label class="aqs-label">Default Course ID</label>
+        <input type="text" name="course_id" class="aqs-input" value="{self.course_id}">
+        <span class="aqs-hint">Fallback course if no learner-selected course is active.</span>
+        </div>
 
-        <script>
-        (function() {{
-            var form = document.getElementById('aq-studio-form');
-            if (!form) return;
+        <div class="aqs-field">
+        <label class="aqs-label">Backend URL</label>
+        <input type="text" name="backend_url" class="aqs-input" value="{self.backend_url}">
+        <span class="aqs-hint">Example: http://host.docker.internal:8100</span>
+        </div>
 
-            form.addEventListener('submit', function(e) {{
-            e.preventDefault();
+        <div class="aqs-field">
+        <label class="aqs-label">Questions Per Session</label>
+        <input type="number" name="max_questions" class="aqs-input" value="{self.max_questions}" min="1" max="50" style="max-width:110px">
+        </div>
 
-            var data = {{}};
-            new FormData(form).forEach(function(v, k) {{
-                data[k] = v;
+        <button type="submit" class="aqs-btn-primary">Save Settings</button>
+        <div id="aqs-settings-status"></div>
+    </form>
+    </div>
+
+    <div id="aqs-panel-content" style="display:none">
+    <div class="aqs-toggle">
+        <button class="aqs-toggle-btn active" id="aqs-toggle-pdf" onclick="aqsInputMode('pdf')">📄 Upload PDF</button>
+        <button class="aqs-toggle-btn" id="aqs-toggle-text" onclick="aqsInputMode('text')">✏️ Paste Text</button>
+    </div>
+
+    <div id="aqs-pdf-section">
+        <div class="aqs-drop-zone" id="aqs-drop-zone">
+        <input type="file" id="aqs-file-input" accept=".pdf" style="display:none">
+        <div class="aqs-drop-icon" id="aqs-drop-icon">📄</div>
+        <div class="aqs-drop-title" id="aqs-drop-title">Drop a lecture PDF here, or click to browse</div>
+        <div class="aqs-drop-sub" id="aqs-drop-sub">Lecture slides or notes only for this phase</div>
+        </div>
+    </div>
+
+    <div id="aqs-text-section" style="display:none">
+        <textarea id="aqs-raw-text" class="aqs-textarea" rows="11" placeholder="Paste lecture text here..."></textarea>
+        <div class="aqs-char-count" id="aqs-char-count">0 characters</div>
+    </div>
+
+    <div style="margin-top:14px">
+        <button class="aqs-btn-primary" id="aqs-btn-parse" onclick="aqsParse()">✨ Parse with AI</button>
+    </div>
+    <div id="aqs-parse-status"></div>
+
+    <div id="aqs-extracted-section" style="display:none">
+        <div class="aqs-divider"><span>Review and Edit Extracted Lecture</span></div>
+
+        <div class="aqs-grid-2">
+        <div class="aqs-col-full aqs-field">
+            <label class="aqs-label">Lecture Title</label>
+            <input type="text" id="aqs-ext-title" class="aqs-input" placeholder="e.g. Relational Schema Mapping">
+        </div>
+
+        <div class="aqs-field">
+            <label class="aqs-label">Week</label>
+            <input type="number" id="aqs-ext-week" class="aqs-input" min="1" max="52" value="1">
+        </div>
+
+        <div class="aqs-field">
+            <label class="aqs-label">Content Type</label>
+            <div style="padding:9px 12px; background:#EEF2FF; border:1.5px solid #C7D2FE; border-radius:10px; font-size:.9rem; font-weight:700; color:#2B4EDE; display:inline-block;">
+            📖 Lecture
+            </div>
+            <span class="aqs-hint">Tutorial and lab support can be added later.</span>
+        </div>
+
+        <div class="aqs-col-full aqs-field">
+            <label class="aqs-label">Course ID</label>
+            <input type="text" id="aqs-ext-course-id" class="aqs-input" value="{self.course_id}">
+        </div>
+
+        <div class="aqs-col-full aqs-field">
+            <label class="aqs-label">Course Name <span class="aqs-label-hint">— optional</span></label>
+            <input type="text" id="aqs-ext-course-name" class="aqs-input" placeholder="e.g. Database Systems">
+        </div>
+        </div>
+
+        <div class="aqs-field">
+        <label class="aqs-label">Topics <span class="aqs-label-hint">— press Enter to add · keep them broad</span></label>
+        <div class="aqs-topics-editor" id="aqs-topics-editor" onclick="document.getElementById('aqs-topic-input').focus()">
+            <input type="text" id="aqs-topic-input" class="aqs-topic-input" placeholder="Type a topic and press Enter…">
+        </div>
+        </div>
+
+        <div class="aqs-field">
+        <label class="aqs-label">Source Text <span class="aqs-label-hint">— quiz questions will be generated from this</span></label>
+        <textarea id="aqs-ext-source" class="aqs-textarea" rows="10" placeholder="Extracted lecture text will appear here..."></textarea>
+        <div class="aqs-char-count" id="aqs-source-char-count">0 characters</div>
+        </div>
+
+        <div class="aqs-field">
+        <label class="aqs-label">AI Summary <span class="aqs-label-hint">— reference only</span></label>
+        <textarea id="aqs-ext-summary" class="aqs-textarea" rows="3" readonly></textarea>
+        </div>
+
+        <button class="aqs-btn-primary" id="aqs-btn-save" onclick="aqsSaveContent()">💾 Save Lecture</button>
+        <div id="aqs-save-status"></div>
+    </div>
+
+    <div id="aqs-existing-section">
+        <div class="aqs-divider"><span>Saved Lectures</span></div>
+        <div id="aqs-existing-list"><p class="aqs-empty">Loading…</p></div>
+    </div>
+    </div>
+
+    <script>
+    (function() {{
+
+    var SAVE_URL = "{save_url}";
+    var PARSE_URL = "{parse_url}";
+    var SAVE_CONTENT_URL = "{save_content_url}";
+    var LIST_CONTENT_URL = "{list_content_url}";
+
+    var currentTopics = [];
+    var currentMode = "pdf";
+    var selectedFile = null;
+
+    window.aqsTab = function(name) {{
+        ["settings", "content"].forEach(function(t) {{
+        document.getElementById("aqs-tab-" + t).classList.toggle("active", t === name);
+        document.getElementById("aqs-panel-" + t).style.display = t === name ? "" : "none";
+        }});
+        if (name === "content") aqsLoadExisting();
+    }};
+
+    window.aqsInputMode = function(mode) {{
+        currentMode = mode;
+        document.getElementById("aqs-toggle-pdf").classList.toggle("active", mode === "pdf");
+        document.getElementById("aqs-toggle-text").classList.toggle("active", mode === "text");
+        document.getElementById("aqs-pdf-section").style.display = mode === "pdf" ? "" : "none";
+        document.getElementById("aqs-text-section").style.display = mode === "text" ? "" : "none";
+    }};
+
+    var dropZone = document.getElementById("aqs-drop-zone");
+    var fileInput = document.getElementById("aqs-file-input");
+
+    dropZone.addEventListener("click", function() {{
+        fileInput.click();
+    }});
+
+    dropZone.addEventListener("dragover", function(e) {{
+        e.preventDefault();
+        dropZone.classList.add("drag-over");
+    }});
+
+    dropZone.addEventListener("dragleave", function() {{
+        dropZone.classList.remove("drag-over");
+    }});
+
+    dropZone.addEventListener("drop", function(e) {{
+        e.preventDefault();
+        dropZone.classList.remove("drag-over");
+        var files = e.dataTransfer.files;
+        if (files.length > 0 && files[0].type === "application/pdf") {{
+        aqsSetFile(files[0]);
+        }} else {{
+        aqsStatus("aqs-parse-status", "error", "Please drop a valid PDF file.");
+        }}
+    }});
+
+    fileInput.addEventListener("change", function() {{
+        if (fileInput.files.length > 0) aqsSetFile(fileInput.files[0]);
+    }});
+
+    function aqsSetFile(file) {{
+        selectedFile = file;
+        dropZone.classList.add("has-file");
+        document.getElementById("aqs-drop-icon").textContent = "✅";
+        document.getElementById("aqs-drop-title").textContent = file.name;
+        document.getElementById("aqs-drop-sub").textContent = Math.round(file.size / 1024) + " KB — ready to parse";
+        aqsStatus("aqs-parse-status", "", "");
+    }}
+
+    var rawTextArea = document.getElementById("aqs-raw-text");
+    if (rawTextArea) {{
+        rawTextArea.addEventListener("input", function() {{
+        document.getElementById("aqs-char-count").textContent = rawTextArea.value.length.toLocaleString() + " characters";
+        }});
+    }}
+
+    var sourceTextArea = document.getElementById("aqs-ext-source");
+    if (sourceTextArea) {{
+        sourceTextArea.addEventListener("input", function() {{
+        document.getElementById("aqs-source-char-count").textContent = sourceTextArea.value.length.toLocaleString() + " characters";
+        }});
+    }}
+
+    window.aqsParse = function() {{
+        var btn = document.getElementById("aqs-btn-parse");
+
+        if (currentMode === "pdf") {{
+        if (!selectedFile) {{
+            aqsStatus("aqs-parse-status", "error", "Please select a lecture PDF first.");
+            return;
+        }}
+
+        btn.disabled = true;
+        btn.innerHTML = '<span class="aqs-spinner"></span> Reading PDF…';
+
+        var reader = new FileReader();
+        reader.onload = function(e) {{
+            var base64 = e.target.result.split(",")[1];
+            aqsCallParse({{ pdf_base64: base64 }}, btn);
+        }};
+        reader.onerror = function() {{
+            btn.disabled = false;
+            btn.innerHTML = "✨ Parse with AI";
+            aqsStatus("aqs-parse-status", "error", "Could not read the PDF file.");
+        }};
+        reader.readAsDataURL(selectedFile);
+
+        }} else {{
+        var text = rawTextArea ? rawTextArea.value.trim() : "";
+        if (text.length < 50) {{
+            aqsStatus("aqs-parse-status", "error", "Please paste more lecture text first.");
+            return;
+        }}
+
+        btn.disabled = true;
+        btn.innerHTML = '<span class="aqs-spinner"></span> Analysing with AI…';
+        aqsCallParse({{ raw_text: text }}, btn);
+        }}
+    }};
+
+    function aqsCallParse(payload, btn) {{
+        aqsStatus("aqs-parse-status", "loading", "Extracting lecture structure and topics — this may take a moment…");
+
+        jQuery.ajax({{
+        type: "POST",
+        url: PARSE_URL,
+        data: JSON.stringify(payload),
+        contentType: "application/json",
+        timeout: 90000,
+        success: function(data) {{
+            btn.disabled = false;
+            btn.innerHTML = "✨ Parse with AI";
+
+            if (data.success && data.extracted) {{
+            aqsPopulateExtracted(data.extracted);
+            aqsStatus("aqs-parse-status", "success", "Lecture extracted successfully. Review and edit below.");
+            }} else {{
+            aqsStatus("aqs-parse-status", "error", data.error || "Extraction failed.");
+            }}
+        }},
+        error: function(xhr) {{
+            btn.disabled = false;
+            btn.innerHTML = "✨ Parse with AI";
+
+            var detail = "Extraction failed.";
+            try {{
+            var parsed = JSON.parse(xhr.responseText);
+            detail = parsed.detail || detail;
+            }} catch (e) {{}}
+
+            aqsStatus("aqs-parse-status", "error", detail);
+        }}
+        }});
+    }}
+
+    function aqsPopulateExtracted(ext) {{
+        document.getElementById("aqs-ext-title").value = ext.suggested_title || "";
+        document.getElementById("aqs-ext-week").value = ext.suggested_week || 1;
+        document.getElementById("aqs-ext-source").value = ext.source_text || "";
+        document.getElementById("aqs-ext-summary").value = ext.summary || "";
+
+        document.getElementById("aqs-source-char-count").textContent =
+        (ext.source_text || "").length.toLocaleString() + " characters";
+
+        currentTopics = Array.isArray(ext.topics) ? ext.topics.slice() : [];
+        aqsRenderTopics();
+
+        var section = document.getElementById("aqs-extracted-section");
+        section.style.display = "";
+        setTimeout(function() {{
+        section.scrollIntoView({{ behavior: "smooth", block: "start" }});
+        }}, 100);
+    }}
+
+    function aqsRenderTopics() {{
+        var editor = document.getElementById("aqs-topics-editor");
+        var topicInput = document.getElementById("aqs-topic-input");
+
+        editor.innerHTML = "";
+
+        currentTopics.forEach(function(topic, i) {{
+        var tag = document.createElement("span");
+        tag.className = "aqs-topic-tag";
+        tag.innerHTML = aqsEscape(topic) +
+            '<button class="aqs-topic-remove" title="Remove" onclick="aqsRemoveTopic(' + i + ')">×</button>';
+        editor.appendChild(tag);
+        }});
+
+        editor.appendChild(topicInput);
+        topicInput.focus();
+    }}
+
+    window.aqsRemoveTopic = function(i) {{
+        currentTopics.splice(i, 1);
+        aqsRenderTopics();
+    }};
+
+    document.addEventListener("keydown", function(e) {{
+        var topicInput = document.getElementById("aqs-topic-input");
+        if (!topicInput || document.activeElement !== topicInput) return;
+
+        if (e.key === "Enter") {{
+        e.preventDefault();
+        var val = topicInput.value.trim();
+        if (val && currentTopics.indexOf(val) === -1) {{
+            currentTopics.push(val);
+            topicInput.value = "";
+            aqsRenderTopics();
+        }}
+        }}
+    }});
+
+    window.aqsSaveContent = function() {{
+        var title = document.getElementById("aqs-ext-title").value.trim();
+        var week = parseInt(document.getElementById("aqs-ext-week").value || "1", 10);
+        var courseId = document.getElementById("aqs-ext-course-id").value.trim();
+        var courseName = document.getElementById("aqs-ext-course-name").value.trim();
+        var sourceText = document.getElementById("aqs-ext-source").value.trim();
+        var ctype = "lecture";
+
+        if (!title) {{
+        aqsStatus("aqs-save-status", "error", "Please enter a lecture title.");
+        return;
+        }}
+        if (!courseId) {{
+        aqsStatus("aqs-save-status", "error", "Please enter a Course ID.");
+        return;
+        }}
+        if (currentTopics.length === 0) {{
+        aqsStatus("aqs-save-status", "error", "Please add at least one topic.");
+        return;
+        }}
+        if (sourceText.length < 50) {{
+        aqsStatus("aqs-save-status", "error", "Source text is too short.");
+        return;
+        }}
+
+        var saveBtn = document.getElementById("aqs-btn-save");
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<span class="aqs-spinner"></span> Saving…';
+
+        jQuery.ajax({{
+        type: "POST",
+        url: SAVE_CONTENT_URL,
+        data: JSON.stringify({{
+            course_id: courseId,
+            course_name: courseName || null,
+            title: title,
+            week: week,
+            content_type: ctype,
+            topics: currentTopics,
+            source_text: sourceText,
+            active: true
+        }}),
+        contentType: "application/json",
+        success: function(data) {{
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = "💾 Save Lecture";
+
+            if (data.success) {{
+    var settingsCourseField = document.querySelector('#aqs-settings-form input[name="course_id"]');
+    if (settingsCourseField) {{
+        settingsCourseField.value = courseId;
+    }}
+
+    var extractedCourseField = document.getElementById("aqs-ext-course-id");
+    if (extractedCourseField) {{
+        extractedCourseField.value = courseId;
+    }}
+
+    aqsStatus("aqs-save-status", "success", "Lecture saved successfully.");
+    document.getElementById("aqs-extracted-section").style.display = "none";
+    aqsResetInput();
+    aqsLoadExisting();
+}} else {{
+            aqsStatus("aqs-save-status", "error", data.error || "Save failed.");
+            }}
+        }},
+        error: function() {{
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = "💾 Save Lecture";
+            aqsStatus("aqs-save-status", "error", "Network error — could not save lecture.");
+        }}
+        }});
+    }};
+
+    function aqsLoadExisting() {{
+    var list = document.getElementById("aqs-existing-list");
+    list.innerHTML = '<p class="aqs-empty"><span class="aqs-spinner"></span> Loading…</p>';
+
+    var currentCourseId =
+        (document.getElementById("aqs-ext-course-id") && document.getElementById("aqs-ext-course-id").value.trim()) ||
+        (document.querySelector('#aqs-settings-form input[name="course_id"]') && document.querySelector('#aqs-settings-form input[name="course_id"]').value.trim()) ||
+        "{self.course_id}";
+
+    jQuery.ajax({{
+        type: "POST",
+        url: LIST_CONTENT_URL,
+        data: JSON.stringify({{
+            course_id: currentCourseId
+        }}),
+        contentType: "application/json",
+        success: function(data) {{
+            if (!data.success || !data.items || data.items.length === 0) {{
+                list.innerHTML = '<p class="aqs-empty">No saved lectures yet for course ' + aqsEscape(currentCourseId) + '.</p>';
+                return;
+            }}
+
+            var html = "";
+            data.items.forEach(function(item) {{
+                html +=
+                    '<div class="aqs-content-item">' +
+                        '<div>' +
+                            '<div class="aqs-content-item-title">' + aqsEscape(item.title) + '</div>' +
+                            '<div class="aqs-content-item-meta">' +
+                                'Week ' + (item.week || "?") + ' · ' +
+                                ((item.topics || []).length) + ' topic' + (((item.topics || []).length) === 1 ? '' : 's') +
+                            '</div>' +
+                        '</div>' +
+                        '<span class="aqs-type-badge aqs-type-lecture">Lecture</span>' +
+                    '</div>';
             }});
 
-            data.max_questions = parseInt(data.max_questions, 10);
+            list.innerHTML = html;
+        }},
+        error: function() {{
+            list.innerHTML = '<p class="aqs-empty">Could not load saved lectures.</p>';
+        }}
+    }});
+}}
 
-            jQuery.ajax({{
-                type: 'POST',
-                url: '{save_url}',
-                data: JSON.stringify(data),
-                contentType: 'application/json',
-                success: function() {{
-                alert('Adaptive Quiz settings saved successfully.');
-                window.location.reload();
-                }},
-                error: function(xhr) {{
-                console.error('studio_submit failed', xhr);
-                alert('Failed to save Adaptive Quiz settings.');
-                }}
-            }});
-            }});
-        }})();
-        </script>
-        """
+    document.getElementById("aqs-settings-form").addEventListener("submit", function(e) {{
+        e.preventDefault();
+
+        var data = {{}};
+        new FormData(this).forEach(function(v, k) {{
+        data[k] = v;
+        }});
+        data.max_questions = parseInt(data.max_questions, 10);
+
+        jQuery.ajax({{
+        type: "POST",
+        url: SAVE_URL,
+        data: JSON.stringify(data),
+        contentType: "application/json",
+        success: function() {{
+            aqsStatus("aqs-settings-status", "success", "Settings saved.");
+        }},
+        error: function() {{
+            aqsStatus("aqs-settings-status", "error", "Failed to save settings.");
+        }}
+        }});
+    }});
+
+    function aqsResetInput() {{
+        selectedFile = null;
+        dropZone.classList.remove("has-file");
+        document.getElementById("aqs-drop-icon").textContent = "📄";
+        document.getElementById("aqs-drop-title").textContent = "Drop a lecture PDF here, or click to browse";
+        document.getElementById("aqs-drop-sub").textContent = "Lecture slides or notes only for this phase";
+        if (rawTextArea) rawTextArea.value = "";
+        document.getElementById("aqs-char-count").textContent = "0 characters";
+        currentTopics = [];
+        aqsStatus("aqs-parse-status", "", "");
+        aqsStatus("aqs-save-status", "", "");
+    }}
+
+    function aqsStatus(id, type, msg) {{
+        var el = document.getElementById(id);
+        if (!el) return;
+
+        if (!type || !msg) {{
+        el.innerHTML = "";
+        return;
+        }}
+
+        if (type === "loading") {{
+        el.innerHTML = '<div class="aqs-loading-inline"><span class="aqs-spinner"></span>' + aqsEscape(msg) + '</div>';
+        }} else {{
+        var cls = type === "success" ? "aqs-status-success" : "aqs-status-error";
+        el.innerHTML = '<div class="' + cls + '">' + aqsEscape(msg) + '</div>';
+        }}
+    }}
+
+    function aqsEscape(s) {{
+        return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }}
+
+    aqsLoadExisting();
+
+    }})();
+    </script>
+    </div>
+    """
         return Fragment(html)
 
     # ------------------------------------------------------------------ #
@@ -446,6 +1297,62 @@ help="Default fallback course identifier used if no learner-selected course is a
         self.backend_url = data.get("backend_url", self.backend_url)
         self.max_questions = int(data.get("max_questions", self.max_questions))
         return {"success": True}
+    
+    @XBlock.json_handler
+    def parse_pdf(self, data, suffix=""):
+            """
+            Proxy PDF/text to backend parser for Studio content ingestion.
+            """
+            payload = {}
+            if data.get("pdf_base64"):
+                payload["pdf_base64"] = data["pdf_base64"]
+            elif data.get("raw_text"):
+                payload["raw_text"] = data["raw_text"]
+            else:
+                return {"success": False, "error": "No content provided."}
+
+            resp = self._api("/api/quiz/content/parse", payload=payload, timeout=90)
+
+            if resp and resp.get("success"):
+                return {"success": True, "extracted": resp.get("extracted", {})}
+            return {"success": False, "error": "Content extraction failed. Check backend logs."}
+
+    @XBlock.json_handler
+    def save_content_item(self, data, suffix=""):
+        """
+        Save reviewed lecture content to MongoDB.
+        """
+        required = ["course_id", "title", "week", "topics", "source_text"]
+        for field in required:
+            if not data.get(field):
+                return {"success": False, "error": f"Missing required field: {field}"}
+
+        payload = {
+            "course_id": data["course_id"],
+            "course_name": data.get("course_name"),
+            "week": int(data["week"]),
+            "content_type": "lecture",
+            "title": data["title"],
+            "topics": data["topics"],
+            "source_text": data["source_text"],
+            "active": True,
+        }
+
+        resp = self._api("/api/quiz/content/add", payload=payload)
+        if resp and resp.get("success"):
+            return {"success": True, "message": resp.get("message", "Content saved.")}
+        return {"success": False, "error": "Failed to save content item."}
+
+    @XBlock.json_handler
+    def list_content_studio(self, data, suffix=""):
+        """
+        Return saved lecture items for Studio content manager.
+        """
+        course_id = data.get("course_id") or self.course_id
+        resp = self._api(f"/api/quiz/content/{course_id}", method="GET")
+        if resp:
+            return {"success": True, "items": resp.get("items", [])}
+        return {"success": True, "items": []}
     
     @XBlock.json_handler
     def get_content(self, data, suffix=""):

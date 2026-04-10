@@ -8,7 +8,12 @@ from app.models.quiz import (
     MasteryResponse,
     ContentItem,
 )
-from app.services.ai_engine import generate_question, generate_simple_explanation
+from app.services.ai_engine import (
+    generate_question,
+    generate_simple_explanation,
+    extract_content_metadata,
+)
+from app.services.pdf_parser import extract_text_from_pdf_base64
 from app.services.adaptation import (
     get_initial_student_state, process_answer, select_next_topic
 )
@@ -715,6 +720,73 @@ async def support_similar(req: GenerateRequest):
         return question
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    
+@router.post("/content/parse")
+async def parse_content(data: dict):
+    """
+    Parse a PDF (base64) or pasted lecture text and extract structured metadata.
+
+    Phase 1 rules:
+    - lecture only
+    - source_text comes from deterministic extraction, not the LLM
+    - LLM only suggests title, week, topics, summary
+    """
+    pdf_base64 = data.get("pdf_base64", "")
+    raw_text_input = data.get("raw_text", "")
+
+    raw_text = ""
+    sample_text = ""
+    page_count = 0
+
+    if pdf_base64:
+        try:
+            result = extract_text_from_pdf_base64(pdf_base64)
+        except RuntimeError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        if result["is_empty"]:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This PDF appears to be image-based or scanned — no extractable text was found. "
+                    "OCR is not supported yet. Please upload a text-based PDF or paste the lecture text directly."
+                )
+            )
+
+        raw_text = result["raw_text"]
+        sample_text = result["sample_text"]
+        page_count = result["page_count"]
+
+    elif raw_text_input:
+        raw_text = raw_text_input.strip()
+        sample_text = raw_text[:12000]
+        page_count = 0
+
+    if not raw_text or len(raw_text.strip()) < 50:
+        raise HTTPException(
+            status_code=422,
+            detail="Not enough text content to work with. The PDF may be image-only or the pasted text is too short."
+        )
+
+    try:
+        metadata = await extract_content_metadata(sample_text)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    return {
+        "success": True,
+        "extracted": {
+            "suggested_title": metadata.get("suggested_title", ""),
+            "suggested_week": metadata.get("suggested_week", 1),
+            "suggested_content_type": "lecture",
+            "topics": metadata.get("topics", []),
+            "summary": metadata.get("summary", ""),
+            "source_text": raw_text,
+        },
+        "page_count": page_count,
+        "char_count": len(raw_text),
+        "sample_used": len(sample_text),
+    }
     
 @router.post("/content/add")
 async def add_content(item: ContentItem):

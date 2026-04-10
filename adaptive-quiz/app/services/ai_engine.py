@@ -2,6 +2,7 @@ import httpx
 import os
 import json
 import logging
+import re
 from dotenv import load_dotenv
 import random
 from typing import Any, Dict, List, Optional
@@ -95,6 +96,8 @@ Requirements:
 - Do not mention answer letters in the explanation. Explain using the concept/content itself.
 - Stay grounded in the provided material — do NOT invent facts
 - All distractors must be plausible, not obviously wrong
+- Ignore instructor names, staff names, office hours, course logistics, grades, contact details, URLs, and administrative information
+- Never ask about who teaches the course, staff members, email addresses, office hours, access codes, or grade distribution
 
 Source text:
 {source_text}
@@ -110,6 +113,56 @@ Respond ONLY with this JSON. No preamble, no markdown fences, no extra text:
 }}
 """
 
+CONTENT_EXTRACTION_PROMPT = """
+You are helping an instructor organize university lecture material for a quiz system.
+
+You will receive extracted lecture text from a lecture PDF.
+Your job is to return METADATA ONLY.
+
+Return ONLY this JSON:
+{{
+  "suggested_title": "...",
+  "suggested_week": 1,
+  "topics": ["topic1", "topic2", "topic3", "topic4"],
+  "summary": "..."
+}}
+
+Rules:
+- suggested_title:
+  - must be formal, descriptive, and course-appropriate
+  - do NOT abbreviate casually
+  - do NOT use vague titles like "Introduction", "Week 1", or "Overview"
+  - if the lecture clearly has two major themes, include both in the title
+  - bad: "Intro to SW Eng"
+  - good: "Introduction to Software Engineering and Requirements Engineering"
+
+- suggested_week:
+  - integer
+  - infer from lecture headers if possible
+  - otherwise return 1
+
+- topics:
+  - extract 4 to 6 BROAD lecture concepts
+  - topics must reflect the MAIN LEARNING CONTENT across the FULL sampled lecture, not just the opening slides
+  - prefer concept-level topics, not keywords, commands, names, or slide labels
+  - ignore instructor names, staff names, emails, logistics, office hours, grades, resources, memes, and self-study/admin material
+  - bad: "Software Types", "Intro", "Dr. Mervat", "Course Resources"
+  - good: "Software Engineering Foundations", "Requirements Engineering Fundamentals", "Requirements Types", "Requirements Engineering Process"
+
+- summary:
+  - 2 to 3 factual sentences
+  - summarize the main learning content across the full lecture
+  - do not focus only on the first section if later sections are substantial
+  - ignore instructor/staff/admin/logistics material
+
+Important:
+- Do NOT return source_text
+- Do NOT paraphrase the lecture text itself
+- Do NOT invent topics not clearly supported by the text
+
+Lecture text:
+{text}
+"""
 
 class ProviderHTTPError(Exception):
     def __init__(self, provider: str, model: str, status_code: int, message: str):
@@ -131,6 +184,8 @@ def validate_question(q: dict) -> bool:
     if len(q["options"]) != 4:
         return False
     if len(q["question"].strip()) < 10:
+        return False
+    if _looks_like_admin_question(q):
         return False
     return True
 
@@ -309,6 +364,85 @@ async def _call_model(
     logger.info(f"[LLM] Response OK <- provider={provider_name} model={model}")
     return content
 
+ADMIN_MARKERS = [
+    "communication rules",
+    "office hours",
+    "piazza",
+    "access code",
+    "course resources",
+    "course grade distribution",
+    "final exam",
+    "midterm exam",
+    "thank you",
+    "weekly dilbert",
+    "self study",
+    "exercise",
+]
+
+FORBIDDEN_QUESTION_MARKERS = [
+    "office hours",
+    "piazza",
+    "access code",
+    "email",
+    "course grade",
+    "final exam",
+    "midterm exam",
+    "project",
+    "thank you",
+]
+
+
+def _sanitize_source_text_for_questions(source_text: str) -> str:
+    """
+    Remove administrative and non-learning content before sending text to the LLM.
+    """
+    if not source_text:
+        return ""
+
+    blocks = re.split(r"\n\s*\n", source_text)
+    kept = []
+
+    for block in blocks:
+        low = block.lower()
+
+        if any(marker in low for marker in ADMIN_MARKERS):
+            continue
+
+        # strip emails / urls / obvious instructor roster lines
+        lines = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            lowered = stripped.lower()
+
+            if not stripped:
+                continue
+            if "@" in stripped:
+                continue
+            if lowered.startswith("http://") or lowered.startswith("https://"):
+                continue
+            if lowered.startswith("dr."):
+                continue
+            if re.match(r"^(Dr\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}$", stripped):
+                continue
+
+            lines.append(stripped)
+
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            kept.append(cleaned)
+
+    return "\n\n".join(kept).strip()
+
+
+def _looks_like_admin_question(q: dict) -> bool:
+    combined = " ".join([
+        str(q.get("question", "")),
+        str(q.get("explanation", "")),
+        " ".join(str(v) for v in q.get("options", {}).values()),
+    ]).lower()
+
+    return any(marker in combined for marker in FORBIDDEN_QUESTION_MARKERS)
+
 
 async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
     difficulty_label = {
@@ -320,12 +454,14 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
     }[difficulty]
     variation = random.choice(VARIATION_ANGLES)
 
+    clean_source_text = _sanitize_source_text_for_questions(source_text) or source_text
+
     prompt = PROMPT_TEMPLATE.format(
         variation=variation,
         topic=topic,
         difficulty_label=difficulty_label,
         difficulty=difficulty,
-        source_text=source_text[:3000]
+        source_text=clean_source_text[:4000]
     )
 
     all_failures = []
@@ -455,3 +591,86 @@ Respond with ONLY the simpler explanation text, no preamble.
                     continue
 
     raise ValueError("All providers/models failed to produce a simpler explanation.\n" + "\n".join(all_failures))
+
+async def extract_content_metadata(sample_text: str) -> dict:
+    """
+    Use the LLM fallback chain to extract metadata only from lecture text.
+    Returns:
+      suggested_title, suggested_week, topics, summary
+    """
+    prompt = CONTENT_EXTRACTION_PROMPT.format(text=sample_text)
+
+    all_failures = []
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        for provider_name in PROVIDER_ORDER:
+            provider_cfg = PROVIDERS.get(provider_name)
+            if not provider_cfg or not provider_cfg["api_key"]:
+                logger.info(f"[LLM] Skipping provider={provider_name} for content metadata")
+                continue
+
+            models = PROVIDER_MODELS.get(provider_name, [])
+            for model in models:
+                try:
+                    raw = await _call_model(client, provider_name, model, prompt)
+                    raw = _strip_markdown_fences(raw).strip()
+
+                    result = json.loads(raw)
+
+                    required = ["suggested_title", "suggested_week", "topics", "summary"]
+                    if not all(k in result for k in required):
+                        msg = f"[LLM] Metadata extraction missing fields provider={provider_name} model={model}"
+                        logger.warning(msg)
+                        all_failures.append(msg)
+                        continue
+
+                    if not isinstance(result["topics"], list) or len(result["topics"]) == 0:
+                        msg = f"[LLM] Metadata extraction returned empty topics provider={provider_name} model={model}"
+                        logger.warning(msg)
+                        all_failures.append(msg)
+                        continue
+
+                    try:
+                        result["suggested_week"] = int(result["suggested_week"])
+                    except (TypeError, ValueError):
+                        result["suggested_week"] = 1
+
+                    result["topics"] = [str(t).strip() for t in result["topics"] if str(t).strip()]
+                    result["topics"] = result["topics"][:6]
+
+                    # Safety: discard anything extra the model may hallucinate
+                    result.pop("source_text", None)
+                    result.pop("suggested_content_type", None)
+
+                    logger.info(
+                        f"[LLM] SUCCESS metadata_extraction provider={provider_name} "
+                        f"model={model} topics={len(result['topics'])}"
+                    )
+                    return result
+
+                except json.JSONDecodeError as e:
+                    msg = f"[LLM] JSON parse failed metadata_extraction provider={provider_name} model={model} error={_safe_exception_text(e)}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+                except ProviderHTTPError as e:
+                    msg = f"[LLM] HTTP failure metadata_extraction provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+
+                    if e.status_code == 400:
+                        raise ValueError(
+                            f"Bad request sent to {e.provider}/{e.model}. Details: {e.message}"
+                        )
+                    continue
+
+                except Exception as e:
+                    msg = f"[LLM] Unexpected metadata_extraction error provider={provider_name} model={model} error={_safe_exception_text(e)}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+    raise ValueError(
+        "All providers/models failed to extract content metadata.\n" + "\n".join(all_failures)
+    )
