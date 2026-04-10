@@ -25,11 +25,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     lastDifficulty: 3,
     maxQuestionsCurrent: initArgs.max_questions || 10,
     dashboardOrigin: 'start',
+    historySessions: [],
+    historyPage: 0,
+    historyPageSize: 3,
+  };
+
+  var reviewState = {
+    session: null,
+    questionIndex: 0
   };
 
   function $(sel) { return element.querySelector(sel); }
 
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'course', 'content'];
+  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content'];
 
   function showScreen(name) {
     SCREENS.forEach(function (s) {
@@ -303,23 +311,23 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (expEl) expEl.textContent = data.explanation || '';
 
     var bridgeWrap = $('#aq-narrative-bridge');
-var bridgeText = $('#aq-narrative-text');
-var bridgeLabel = $('#aq-narrative-label');
+    var bridgeText = $('#aq-narrative-text');
+    var bridgeLabel = $('#aq-narrative-label');
 
-if (bridgeWrap && bridgeText && bridgeLabel) {
-  if (data.session_complete) {
-    bridgeLabel.textContent = 'What happens next?';
-    bridgeText.textContent =
-      'You’ve finished this session. Open your results to see which topic to reinforce next and how your performance shaped the recommendation.';
-    bridgeWrap.classList.remove('aq-hidden');
-  } else if (data.narrative_bridge) {
-    bridgeLabel.textContent = 'Why and what is the next step?';
-    bridgeText.textContent = data.narrative_bridge;
-    bridgeWrap.classList.remove('aq-hidden');
-  } else {
-    bridgeWrap.classList.add('aq-hidden');
-  }
-}
+    if (bridgeWrap && bridgeText && bridgeLabel) {
+      if (data.session_complete) {
+        bridgeLabel.textContent = 'What happens next?';
+        bridgeText.textContent =
+          'You’ve finished this session. Open your results to see which topic to reinforce next and how your performance shaped the recommendation.';
+        bridgeWrap.classList.remove('aq-hidden');
+      } else if (data.narrative_bridge) {
+        bridgeLabel.textContent = 'Why and what is the next step?';
+        bridgeText.textContent = data.narrative_bridge;
+        bridgeWrap.classList.remove('aq-hidden');
+      } else {
+        bridgeWrap.classList.add('aq-hidden');
+      }
+    }
 
     var pct = Math.round((data.updated_mastery || 0.5) * 100);
     var fillEl = $('#aq-mastery-fill');
@@ -756,11 +764,13 @@ if (bridgeWrap && bridgeText && bridgeLabel) {
     showScreen('dashboard');
   }
 
-  function renderSessionHistory(sessions) {
-    var wrap = $('#aq-session-history-list');
-    var empty = $('#aq-session-history-empty');
-    if (!wrap) return;
+  function renderSessionHistory(sessions, options) {
+    options = options || {};
+    var wrap = options.wrap || $('#aq-session-history-list');
+    var empty = options.empty || $('#aq-session-history-empty');
+    var showReviewButton = !!options.showReviewButton;
 
+    if (!wrap) return;
     wrap.innerHTML = '';
 
     if (!sessions || sessions.length === 0) {
@@ -770,9 +780,17 @@ if (bridgeWrap && bridgeText && bridgeLabel) {
 
     if (empty) empty.classList.add('aq-hidden');
 
-    sessions.forEach(function (session) {
+    sessions.forEach(function (session, idx) {
       var score = (session.correct_answers || 0) + ' / ' + (session.target_questions || 0);
       var pct = Math.round((session.accuracy || 0) * 100);
+
+      var actionsHtml = '';
+      if (showReviewButton && session.question_log && session.question_log.length) {
+        actionsHtml =
+          '<div class="aq-session-actions">' +
+          '<button class="aq-btn-session" type="button" data-session-index="' + idx + '">Review Session</button>' +
+          '</div>';
+      }
 
       var card = document.createElement('div');
       card.className = 'aq-session-card';
@@ -788,11 +806,11 @@ if (bridgeWrap && bridgeText && bridgeLabel) {
         '<div class="aq-session-card-grid">' +
         '<div class="aq-session-mini">' +
         '<span class="aq-session-mini-label">Strongest Topic</span>' +
-        '<span class="aq-session-mini-value">' + (session.strongest_topic_this_session || '—') + '</span>' +
+        '<span class="aq-session-mini-value">' + escapeHtml(session.strongest_topic_this_session || '—') + '</span>' +
         '</div>' +
         '<div class="aq-session-mini">' +
         '<span class="aq-session-mini-label">Needs Review</span>' +
-        '<span class="aq-session-mini-value">' + (session.weakest_topic_this_session || '—') + '</span>' +
+        '<span class="aq-session-mini-value">' + escapeHtml(session.weakest_topic_this_session || '—') + '</span>' +
         '</div>' +
         '<div class="aq-session-mini">' +
         '<span class="aq-session-mini-label">Avg Response Time</span>' +
@@ -801,25 +819,227 @@ if (bridgeWrap && bridgeText && bridgeLabel) {
         '</div>' +
 
         '<div class="aq-session-recommendation">' +
-        '<strong>Recommendation:</strong> ' + (session.recommendation || 'Keep building mastery through regular practice.') +
-        '</div>';
+        '<strong>Recommendation:</strong> ' + escapeHtml(session.recommendation || 'Keep building mastery through regular practice.') +
+        '</div>' +
+
+        actionsHtml;
 
       wrap.appendChild(card);
     });
+
+    if (showReviewButton) {
+      wrap.querySelectorAll('.aq-btn-session').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var idx = parseInt(btn.getAttribute('data-session-index'), 10);
+          openSessionReview(sessions[idx]);
+        });
+      });
+    }
+  }
+
+  function updateHistoryPager() {
+    var pagerWrap = $('#aq-history-pager-wrap');
+    var pageInfo = $('#aq-history-page-info');
+    var prevBtn = $('#aq-btn-history-prev');
+    var nextBtn = $('#aq-btn-history-next');
+
+    var total = state.historySessions.length;
+    var pageSize = state.historyPageSize;
+    var totalPages = total > 0 ? Math.ceil(total / pageSize) : 1;
+    var currentPage = state.historyPage + 1;
+
+    if (pagerWrap) {
+      pagerWrap.classList.toggle('aq-hidden', total === 0);
+    }
+
+    if (pageInfo) {
+      pageInfo.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+    }
+
+    if (prevBtn) prevBtn.disabled = state.historyPage <= 0;
+    if (nextBtn) nextBtn.disabled = state.historyPage >= totalPages - 1;
+  }
+
+  function renderHistoryPage() {
+    var start = state.historyPage * state.historyPageSize;
+    var end = start + state.historyPageSize;
+    var pageSessions = state.historySessions.slice(start, end);
+
+    renderSessionHistory(pageSessions, {
+      wrap: $('#aq-history-list'),
+      empty: $('#aq-history-empty'),
+      showReviewButton: true
+    });
+
+    updateHistoryPager();
+  }
+
+  function answerDisplay(question, key) {
+    if (!key) return '—';
+    var options = question.options || {};
+    var text = options[key] || '';
+    return text ? (key + ' — ' + text) : key;
+  }
+
+  function renderReviewQuestion() {
+    var session = reviewState.session;
+    if (!session || !session.question_log || !session.question_log.length) return;
+
+    var q = session.question_log[reviewState.questionIndex];
+    var total = session.question_log.length;
+
+    $('#aq-review-session-title').textContent = 'Session Review';
+    $('#aq-review-session-sub').textContent =
+      formatDateTime(session.ended_at || session.started_at) +
+      ' · Score: ' + (session.correct_answers || 0) + '/' + (session.target_questions || 0);
+
+    $('#aq-review-topic').textContent = q.topic || 'General';
+    $('#aq-review-counter').textContent = (reviewState.questionIndex + 1) + ' / ' + total;
+
+    var diff = q.difficulty || 3;
+    var diffEl = $('#aq-review-difficulty');
+    diffEl.textContent = DIFF_LABEL[diff] || 'Medium';
+    diffEl.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[diff] || '');
+
+    $('#aq-review-question-text').textContent = q.question_text || q.question_id || 'Question unavailable';
+
+    var optionsWrap = $('#aq-review-options');
+    optionsWrap.innerHTML = '';
+
+    ['A', 'B', 'C', 'D'].forEach(function (key) {
+      if (!q.options || !q.options[key]) return;
+
+      var option = document.createElement('button');
+      option.type = 'button';
+      option.disabled = true;
+      option.className = 'aq-opt';
+
+      if (key === q.selected_answer && key === q.correct_answer) {
+        option.classList.add('selected', 'correct');
+      } else if (key === q.selected_answer && key !== q.correct_answer) {
+        option.classList.add('selected', 'incorrect');
+      } else if (key === q.correct_answer) {
+        option.classList.add('correct');
+      }
+
+      option.innerHTML =
+        '<span class="aq-opt-key">' + key + '</span>' +
+        '<span class="aq-opt-text">' + escapeHtml(q.options[key]) + '</span>';
+
+      optionsWrap.appendChild(option);
+    });
+
+    var banner = $('#aq-review-banner');
+    var icon = $('#aq-review-icon');
+    var label = $('#aq-review-label');
+
+    if (q.is_correct) {
+      banner.className = 'aq-feedback-banner correct';
+      icon.textContent = '✓';
+      label.textContent = 'Correct';
+    } else {
+      banner.className = 'aq-feedback-banner incorrect';
+      icon.textContent = '✕';
+      label.textContent = 'Incorrect';
+    }
+
+    $('#aq-review-time-chip').textContent = 'Time: ' + formatMs(q.time_spent_ms || 0);
+    $('#aq-review-explanation').textContent = q.explanation || 'No explanation stored for this question.';
+
+    var prevBtn = $('#aq-btn-review-prev');
+    var nextBtn = $('#aq-btn-review-next');
+
+    if (prevBtn) {
+      prevBtn.disabled = reviewState.questionIndex === 0;
+      prevBtn.textContent = '←';
+    }
+
+    if (nextBtn) {
+      nextBtn.disabled = reviewState.questionIndex === total - 1;
+      nextBtn.textContent = '→';
+    }
+  }
+
+  function openSessionReview(session) {
+    reviewState.session = session;
+    reviewState.questionIndex = 0;
+    renderReviewQuestion();
+
+    $('#aq-review-modal').classList.remove('aq-hidden');
+    document.body.classList.add('aq-modal-open');
+  }
+
+  function closeSessionReview() {
+    $('#aq-review-modal').classList.add('aq-hidden');
+    document.body.classList.remove('aq-modal-open');
+    reviewState.session = null;
+    reviewState.questionIndex = 0;
   }
 
   function loadSessionHistory(courseId) {
     jQuery.ajax({
       type: 'POST',
       url: urlSessionHistory,
-      data: JSON.stringify({ selected_course_id: courseId }),
+      data: JSON.stringify({
+        selected_course_id: courseId,
+        limit: 1,
+        include_questions: false
+      }),
       contentType: 'application/json',
       success: function (data) {
-        if (data && data.success) renderSessionHistory(data.sessions || []);
-        else renderSessionHistory([]);
+        if (data && data.success) {
+          renderSessionHistory(data.sessions || [], {
+            wrap: $('#aq-session-history-list'),
+            empty: $('#aq-session-history-empty'),
+            showReviewButton: false
+          });
+        } else {
+          renderSessionHistory([], {
+            wrap: $('#aq-session-history-list'),
+            empty: $('#aq-session-history-empty'),
+            showReviewButton: false
+          });
+        }
       },
       error: function () {
-        renderSessionHistory([]);
+        renderSessionHistory([], {
+          wrap: $('#aq-session-history-list'),
+          empty: $('#aq-session-history-empty'),
+          showReviewButton: false
+        });
+      }
+    });
+  }
+
+  function loadFullSessionHistory(courseId) {
+    setLoading('Loading session history…');
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlSessionHistory,
+      data: JSON.stringify({
+        selected_course_id: courseId,
+        limit: 50,
+        include_questions: true
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        var labelEl = $('#aq-history-course-label');
+        if (labelEl) {
+          labelEl.textContent = 'Course: ' + (selectedCourseName || courseId || '—');
+        }
+
+        state.historySessions = (data && data.success) ? (data.sessions || []) : [];
+        state.historyPage = 0;
+
+        renderHistoryPage();
+        showScreen('history');
+      },
+      error: function () {
+        state.historySessions = [];
+        state.historyPage = 0;
+        renderHistoryPage();
+        showScreen('history');
       }
     });
   }
@@ -919,6 +1139,97 @@ if (bridgeWrap && bridgeText && bridgeLabel) {
       startSessionWithIds(selectedContentIds, selectedCourseId);
     };
   }
+
+  var viewAllSessionsBtn = $('#aq-btn-view-all-sessions');
+  if (viewAllSessionsBtn) {
+    viewAllSessionsBtn.onclick = function () {
+      loadFullSessionHistory(selectedCourseId);
+    };
+  }
+
+  var historyBackBtn = $('#aq-btn-history-back');
+  if (historyBackBtn) {
+    historyBackBtn.onclick = function () {
+      showScreen('dashboard');
+    };
+  }
+
+  var historyRetryBtn = $('#aq-btn-history-retry');
+  if (historyRetryBtn) {
+    historyRetryBtn.onclick = function () {
+      pickerMode = 'quiz';
+      loadCoursePicker();
+    };
+  }
+
+  var reviewCloseBtn = $('#aq-btn-review-close');
+  if (reviewCloseBtn) {
+    reviewCloseBtn.onclick = closeSessionReview;
+  }
+
+  var reviewPrevBtn = $('#aq-btn-review-prev');
+  if (reviewPrevBtn) {
+    reviewPrevBtn.onclick = function () {
+      if (!reviewState.session) return;
+      if (reviewState.questionIndex > 0) {
+        reviewState.questionIndex -= 1;
+        renderReviewQuestion();
+      }
+    };
+  }
+
+  var reviewNextBtn = $('#aq-btn-review-next');
+  if (reviewNextBtn) {
+    reviewNextBtn.onclick = function () {
+      if (!reviewState.session || !reviewState.session.question_log) return;
+      if (reviewState.questionIndex < reviewState.session.question_log.length - 1) {
+        reviewState.questionIndex += 1;
+        renderReviewQuestion();
+      }
+    };
+  }
+
+  var historyPrevBtn = $('#aq-btn-history-prev');
+  if (historyPrevBtn) {
+    historyPrevBtn.onclick = function () {
+      if (state.historyPage > 0) {
+        state.historyPage -= 1;
+        renderHistoryPage();
+      }
+    };
+  }
+
+  var historyNextBtn = $('#aq-btn-history-next');
+  if (historyNextBtn) {
+    historyNextBtn.onclick = function () {
+      var totalPages = Math.ceil(state.historySessions.length / state.historyPageSize);
+      if (state.historyPage < totalPages - 1) {
+        state.historyPage += 1;
+        renderHistoryPage();
+      }
+    };
+  }
+
+  document.addEventListener('keydown', function (e) {
+    var modal = $('#aq-review-modal');
+    if (!modal || modal.classList.contains('aq-hidden')) return;
+
+    if (e.key === 'Escape') {
+      closeSessionReview();
+    } else if (e.key === 'ArrowLeft') {
+      if (reviewState.questionIndex > 0) {
+        reviewState.questionIndex -= 1;
+        renderReviewQuestion();
+      }
+    } else if (e.key === 'ArrowRight') {
+      if (reviewState.session &&
+        reviewState.session.question_log &&
+        reviewState.questionIndex < reviewState.session.question_log.length - 1) {
+        reviewState.questionIndex += 1;
+        renderReviewQuestion();
+      }
+    }
+  });
 
   // ── Init ────────────────────────────────────────────────────────────
   showScreen('start');

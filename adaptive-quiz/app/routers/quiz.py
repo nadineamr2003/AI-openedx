@@ -341,8 +341,8 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
     }
 
 
-def _serialize_session(doc: dict) -> dict:
-    return {
+def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
+    item = {
         "session_id": doc.get("session_id"),
         "started_at": doc.get("started_at"),
         "ended_at": doc.get("ended_at"),
@@ -356,7 +356,13 @@ def _serialize_session(doc: dict) -> dict:
         "strongest_topic_this_session": doc.get("strongest_topic_this_session"),
         "recommendation": doc.get("recommendation"),
         "end_difficulty": doc.get("end_difficulty", 3),
+        "practiced_topics": doc.get("practiced_topics", []),
     }
+
+    if include_questions:
+        item["question_log"] = doc.get("question_log", [])
+
+    return item
 
 async def _get_cached_question(topic: str, difficulty: int, course_id: str) -> dict | None:
     db = get_db()
@@ -515,14 +521,17 @@ async def submit(req: SubmitRequest):
 
     if req.session_id:
         question_entry = {
-            "question_id": req.question_id,
-            "topic": req.topic,
-            "difficulty": req.difficulty,
-            "selected_answer": req.selected_answer,
-            "correct_answer": req.correct_answer,
-            "is_correct": is_correct,
-            "time_spent_ms": req.time_spent_ms,
-            "support_features_shown": support_features,
+        "question_id": req.question_id,
+        "question_text": req.question_text or req.question_id,
+        "options": req.options or {},
+        "explanation": req.explanation or "",
+        "topic": req.topic,
+        "difficulty": req.difficulty,
+        "selected_answer": req.selected_answer,
+        "correct_answer": req.correct_answer,
+        "is_correct": is_correct,
+        "time_spent_ms": req.time_spent_ms,
+        "support_features_shown": support_features,
         }
 
         await _append_question_log(
@@ -926,16 +935,29 @@ async def list_courses():
     return {"courses": courses}
 
 @router.get("/sessions/{student_id}/{course_id}")
-async def get_session_history(student_id: str, course_id: str, limit: int = 5):
-    """Return recent completed sessions for dashboard/history view."""
+async def get_session_history(
+    student_id: str,
+    course_id: str,
+    limit: int = 5,
+    include_questions: bool = False,
+):
+    """Return completed sessions for dashboard preview or full history view."""
     db = get_db()
-    docs = await db.student_session_history.find(
+
+    limit = max(1, min(limit, 100))
+
+    cursor = db.student_session_history.find(
         {
             "student_id": student_id,
             "course_id": course_id,
             "ended_at": {"$ne": None},
         }
-    ).sort("started_at", -1).to_list(limit)
+    ).sort("started_at", -1)
 
-    sessions = [_serialize_session(doc) for doc in docs]
+    docs = await cursor.to_list(limit)
+
+    sessions = [
+        _serialize_session(doc, include_questions=include_questions)
+        for doc in docs
+    ]
     return {"sessions": sessions}

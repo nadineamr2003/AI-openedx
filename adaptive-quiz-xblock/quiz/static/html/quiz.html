@@ -280,7 +280,7 @@
       </div>
 
       <div class="aq-session-history-section">
-        <h3 class="aq-section-title">Recent Sessions</h3>
+        <h3 class="aq-section-title">Latest Sessions</h3>
         <p class="aq-empty-state aq-hidden" id="aq-session-history-empty">
           Finish a quiz session to see recent results, topic insights, and recommendations here.
         </p>
@@ -289,7 +289,81 @@
 
       <div class="aq-panel-actions">
         <button class="aq-btn aq-btn-ghost" id="aq-btn-back-results">← Back</button>
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-view-all-sessions">View All Sessions</button>
         <button class="aq-btn aq-btn-primary" id="aq-btn-dashboard-retry">New Session</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="aq-screen aq-hidden" id="aq-screen-history">
+    <div class="aq-panel">
+      <div class="aq-panel-header">
+        <div class="aq-step-badge">History</div>
+        <h2 class="aq-panel-title">Session History</h2>
+        <p class="aq-panel-sub" id="aq-history-course-label">Course: —</p>
+      </div>
+
+      <div class="aq-history-pager" id="aq-history-pager-wrap">
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-prev">← Previous</button>
+        <span class="aq-history-page-info" id="aq-history-page-info">Page 1 of 1</span>
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-next">Next →</button>
+      </div>
+
+      <p class="aq-empty-state aq-hidden" id="aq-history-empty">
+        No completed sessions yet for this course.
+      </p>
+
+      <div id="aq-history-list" class="aq-session-history-list"></div>
+
+      <div class="aq-panel-actions">
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-back">← Back to Dashboard</button>
+        <button class="aq-btn aq-btn-primary" id="aq-btn-history-retry">New Session</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="aq-hidden aq-modal-backdrop" id="aq-review-modal">
+    <div class="aq-modal">
+      <div class="aq-modal-header">
+        <div class="aq-modal-header-main">
+          <div class="aq-step-badge">Session Review</div>
+          <h3 class="aq-panel-title" id="aq-review-session-title">Session Review</h3>
+          <p class="aq-panel-sub" id="aq-review-session-sub">—</p>
+        </div>
+
+        <div class="aq-modal-header-actions">
+          <button class="aq-btn aq-btn-ghost aq-btn-review-nav" id="aq-btn-review-prev">←</button>
+          <button class="aq-btn aq-btn-ghost aq-btn-review-nav" id="aq-btn-review-next">→</button>
+          <button class="aq-btn aq-btn-ghost" id="aq-btn-review-close">Close</button>
+        </div>
+      </div>
+
+      <div class="aq-q-meta">
+        <span class="aq-tag aq-tag-topic" id="aq-review-topic">Topic</span>
+        <span class="aq-q-counter" id="aq-review-counter">1 / 10</span>
+        <span class="aq-tag aq-tag-diff" id="aq-review-difficulty">Medium</span>
+      </div>
+
+      <div class="aq-q-card aq-review-card">
+        <p class="aq-q-text" id="aq-review-question-text">Question text</p>
+
+        <div class="aq-options" id="aq-review-options"></div>
+
+        <div class="aq-feedback" style="display:block; margin-top:18px; padding-top:18px;">
+          <div class="aq-feedback-banner" id="aq-review-banner">
+            <span class="aq-feedback-icon" id="aq-review-icon">✓</span>
+            <span class="aq-feedback-label" id="aq-review-label">Correct</span>
+          </div>
+
+          <div class="aq-session-question-meta" style="margin-bottom:12px;">
+            <span class="aq-session-meta-chip" id="aq-review-time-chip">Time: —</span>
+          </div>
+
+          <div class="aq-review-explanation-wrap">
+            <span class="aq-review-explanation-title">Explanation</span>
+            <div class="aq-session-explanation" id="aq-review-explanation">Explanation</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

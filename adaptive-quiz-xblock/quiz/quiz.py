@@ -1306,15 +1306,18 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         time_spent_ms = int(data.get("time_spent_ms", 15000))
 
         submit_resp = self._api("/api/quiz/submit", payload={
-            "student_id": student_id,
-            "course_id": self._active_course_id(),
-            "question_id": question.get("question", "")[:80],
-            "selected_answer": selected,
-            "correct_answer": question.get("correct_answer", ""),
-            "topic": self.current_topic,
-            "difficulty": self.current_difficulty,
-            "time_spent_ms": time_spent_ms,
-            "session_id": self.active_session_id or None,
+        "student_id": student_id,
+        "course_id": self._active_course_id(),
+        "question_id": question.get("question", "")[:80],
+        "question_text": question.get("question", ""),
+        "options": question.get("options", {}),
+        "explanation": question.get("explanation", ""),
+        "selected_answer": selected,
+        "correct_answer": question.get("correct_answer", ""),
+        "topic": self.current_topic,
+        "difficulty": self.current_difficulty,
+        "time_spent_ms": time_spent_ms,
+        "session_id": self.active_session_id or None,
         })
 
         if not submit_resp:
@@ -1587,15 +1590,18 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     
     @XBlock.json_handler
     def get_session_history(self, data, suffix=""):
-        """Return recent completed session history for the selected course."""
+        """Return session history for dashboard preview or full history screen."""
         student_id = self._student_id()
         active_course = data.get("selected_course_id") or self._active_course_id()
 
         if active_course:
             self.selected_course_id = active_course
 
+        limit = int(data.get("limit", 5))
+        include_questions = bool(data.get("include_questions", False))
+
         resp = self._api(
-            f"/api/quiz/sessions/{student_id}/{active_course}?limit=5",
+            f"/api/quiz/sessions/{student_id}/{active_course}?limit={limit}&include_questions={'true' if include_questions else 'false'}",
             method="GET"
         )
 

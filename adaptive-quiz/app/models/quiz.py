@@ -14,10 +14,13 @@ class SubmitRequest(BaseModel):
     student_id: str
     course_id: str
     question_id: str
+    question_text: str | None = None
+    options: dict[str, str] | None = None
+    explanation: str | None = None
     selected_answer: str
     correct_answer: str
     topic: str
-    difficulty: int = Field(ge=1, le=5)
+    difficulty: int
     time_spent_ms: int
     session_id: str | None = None
 
@@ -38,6 +41,9 @@ class SubmitResponse(BaseModel):
     session_accuracy: float | None = None
     avg_time_spent_ms: int | None = None
     narrative_bridge: str | None = None
+    question_text: str | None = None
+    options: dict[str, str] | None = None
+    explanation: str | None = None
 
 
 class MasteryResponse(BaseModel):
