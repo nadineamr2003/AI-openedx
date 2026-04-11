@@ -13,6 +13,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
   var urlGetCourses = runtime.handlerUrl(element, 'get_courses');
   var urlSessionHistory = runtime.handlerUrl(element, 'get_session_history');
+  var urlGetDiagQ = runtime.handlerUrl(element, 'get_diagnostic_question');
+  var urlSubmitDiagA = runtime.handlerUrl(element, 'submit_diagnostic_answer');
+  var urlCompleteDiag = runtime.handlerUrl(element, 'complete_diagnostic_item');
+  var urlFinalizeSession = runtime.handlerUrl(element, 'finalize_session');
 
   var state = {
     currentQuestion: null,
@@ -35,9 +39,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     questionIndex: 0
   };
 
+  var diagState = {
+    items: [],    // [{content_id, title, topics, source_version, ...}]
+    totalItems: 0,
+    itemIndex: 0,
+    questionIndex: 0,
+    totalQuestions: 3,
+    answered: false,
+    questionStart: null,
+    summaryPerItem: {},    // content_id → {title, correct, total, baseline, label, topicMasteries}
+  };
+
   function $(sel) { return element.querySelector(sel); }
 
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content'];
+  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content', 'diagnostic', 'diagnostic-results'];
 
   function showScreen(name) {
     SCREENS.forEach(function (s) {
@@ -157,7 +172,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     items.forEach(function (item) {
       var label = document.createElement('label');
       label.innerHTML =
-        '<input type="checkbox" value="' + item.title + '">' +
+        '<input type="checkbox" value="' + item.id + '" data-title="' + item.title + '">' +
         '<span>' +
         '<strong style="font-size:.9rem;">' + item.title + '</strong>' +
         '<span class="aq-content-meta"> Week ' + item.week + ' · ' + item.content_type + '</span>' +
@@ -1084,10 +1099,306 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({ question_count: chosenCount, selected_course_id: courseId, content_ids: ids }),
       contentType: 'application/json',
       success: function (data) {
-        state.maxQuestionsCurrent = (data && data.max_questions) ? data.max_questions : chosenCount;
-        renderQuestion(data);
+        if (data && data.diagnostic_needed) {
+          state.maxQuestionsCurrent = chosenCount;
+          startDiagnosticFlow(data);
+        } else {
+          state.maxQuestionsCurrent = (data && data.max_questions) ? data.max_questions : chosenCount;
+          renderQuestion(data);
+        }
       },
       error: function () { alert('Could not connect to the quiz backend.'); showScreen('start'); }
+    });
+  }
+
+  function startDiagnosticFlow(data) {
+    diagState.items = data.diagnostic_items || [];
+    diagState.totalItems = diagState.items.length;
+    diagState.itemIndex = 0;
+    diagState.questionIndex = 0;
+    diagState.totalQuestions = data.diagnostic_questions_per_item || 3;
+    diagState.answered = false;
+    diagState.summaryPerItem = {};
+
+    loadDiagnosticQuestion();
+  }
+
+  function loadDiagnosticQuestion() {
+    setLoading('Preparing assessment question…');
+    jQuery.ajax({
+      type: 'POST', url: urlGetDiagQ,
+      data: JSON.stringify({}), contentType: 'application/json',
+      success: function (data) {
+        if (!data.success) {
+          // Diagnostic question failed — skip to finalize gracefully
+          finalizeDiagnosticSession();
+          return;
+        }
+        renderDiagnosticQuestion(data);
+      },
+      error: function () { finalizeDiagnosticSession(); }
+    });
+  }
+
+  function renderDiagnosticQuestion(data) {
+    var q = data.question;
+    diagState.answered = false;
+    diagState.questionStart = Date.now();
+    diagState.itemIndex = data.item_index || 0;
+    diagState.questionIndex = data.question_index || 0;
+
+    // Header
+    var titleEl = $('#aq-diag-title');
+    var subEl = $('#aq-diag-sub');
+    var itemLbl = $('#aq-diag-item-label');
+
+    if (titleEl) {
+      titleEl.textContent = diagState.totalItems > 1
+        ? 'Assessment · Lecture ' + (data.item_index + 1) + ' of ' + data.total_items
+        : 'Quick Placement Assessment';
+    }
+    if (subEl) {
+      subEl.textContent = 'Answer ' + diagState.totalQuestions +
+        ' questions so we can calibrate your starting level for "' +
+        escapeHtml(data.content_title || 'this lecture') + '".';
+    }
+    if (itemLbl) {
+      itemLbl.textContent = data.total_items > 1
+        ? 'Lecture ' + (data.item_index + 1) + ' / ' + data.total_items
+        : '';
+    }
+
+    // Progress bar — overall across all items
+    var overallQ = diagState.itemIndex * diagState.totalQuestions + diagState.questionIndex;
+    var totalQ = diagState.totalItems * diagState.totalQuestions;
+    var pct = totalQ > 0 ? Math.round((overallQ / totalQ) * 100) : 0;
+    var fillEl = $('#aq-diag-progress-fill');
+    var labelEl = $('#aq-diag-progress-label');
+    if (fillEl) fillEl.style.width = pct + '%';
+    if (labelEl) labelEl.textContent = 'Question ' + (data.question_index + 1) +
+      ' of ' + data.total_questions;
+
+    // Badges
+    var topicBadge = $('#aq-diag-badge-topic');
+    var diffBadge = $('#aq-diag-badge-diff');
+    if (topicBadge) topicBadge.textContent = q.topic || 'General';
+    if (diffBadge) {
+      var d = q.difficulty || 3;
+      diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
+      diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
+    }
+
+    // Question text
+    var qtEl = $('#aq-diag-question-text');
+    if (qtEl) qtEl.textContent = q.question;
+
+    // Options
+    ['A', 'B', 'C', 'D'].forEach(function (key) {
+      var btn = $('#aq-diag-opt-' + key);
+      if (!btn) return;
+      var textEl = btn.querySelector('.aq-opt-text');
+      if (textEl) textEl.textContent = q.options[key] || '';
+      btn.className = 'aq-opt';
+      btn.disabled = false;
+      btn.onclick = function () { handleDiagnosticOption(key); };
+    });
+
+    var fb = $('#aq-diag-feedback');
+    if (fb) fb.classList.add('aq-hidden');
+
+    showScreen('diagnostic');
+  }
+
+  function handleDiagnosticOption(selectedKey) {
+    if (diagState.answered) return;
+    diagState.answered = true;
+
+    var timeSpentMs = Date.now() - (diagState.questionStart || Date.now());
+
+    $('#aq-diag-opt-' + selectedKey).classList.add('selected');
+    ['A', 'B', 'C', 'D'].forEach(function (k) {
+      var b = $('#aq-diag-opt-' + k);
+      if (b) b.disabled = true;
+    });
+
+    jQuery.ajax({
+      type: 'POST', url: urlSubmitDiagA,
+      data: JSON.stringify({ selected_answer: selectedKey, time_spent_ms: timeSpentMs }),
+      contentType: 'application/json',
+      success: function (data) { renderDiagnosticFeedback(data, selectedKey); },
+      error: function () {
+        // Best-effort advance
+        diagState.questionIndex += 1;
+        loadDiagnosticQuestion();
+      }
+    });
+  }
+
+  function renderDiagnosticFeedback(data, selectedKey) {
+    // Colour the options
+    var correct = data.correct_answer;
+    ['A', 'B', 'C', 'D'].forEach(function (k) {
+      var b = $('#aq-diag-opt-' + k);
+      if (!b) return;
+      if (k === correct) b.classList.add('correct');
+      if (k === selectedKey && k !== correct) b.classList.add('incorrect');
+    });
+
+    var banner = $('#aq-diag-feedback-banner');
+    var icon = $('#aq-diag-feedback-icon');
+    var lbl = $('#aq-diag-feedback-label');
+    if (banner) banner.className = 'aq-feedback-banner ' + (data.is_correct ? 'correct' : 'incorrect');
+    if (icon) icon.textContent = data.is_correct ? '✓' : '✕';
+    if (lbl) lbl.textContent = data.is_correct ? 'Correct!' : 'Incorrect';
+
+    var expEl = $('#aq-diag-explanation');
+    if (expEl) expEl.textContent = data.explanation || '';
+
+    var isLastItem = data.last_item;
+    var isLastQ = data.last_question_for_item;
+    var nextBtn = $('#aq-diag-btn-next');
+    if (nextBtn) {
+      if (isLastQ && isLastItem) nextBtn.textContent = 'Finish Assessment →';
+      else if (isLastQ) nextBtn.textContent = 'Next Lecture →';
+      else nextBtn.textContent = 'Next Question →';
+
+      nextBtn.onclick = function () { advanceDiagnostic(data); };
+    }
+
+    var fb = $('#aq-diag-feedback');
+    if (fb) fb.classList.remove('aq-hidden');
+  }
+
+  function advanceDiagnostic(data) {
+    if (data.last_question_for_item) {
+      setLoading('Analysing your responses…');
+      jQuery.ajax({
+        type: 'POST', url: urlCompleteDiag,
+        data: JSON.stringify({}), contentType: 'application/json',
+        success: function (result) {
+          if (!result.success) { finalizeDiagnosticSession(); return; }
+
+          // Store for summary screen
+          var cid = result.content_id;
+          diagState.summaryPerItem[cid] = {
+            title: result.content_title || cid,
+            correct: result.correct_answers,
+            total: result.total_questions,
+            baseline: result.lecture_baseline,
+            label: result.lecture_label,
+            topicMasteries: result.topic_masteries || {},
+          };
+
+          if (result.all_done) {
+            showDiagnosticSummary();
+          } else {
+            // XBlock already advanced item_index — just load next question
+            diagState.itemIndex = (diagState.itemIndex + 1);
+            diagState.questionIndex = 0;
+            loadDiagnosticQuestion();
+          }
+        },
+        error: function () { finalizeDiagnosticSession(); }
+      });
+
+    } else {
+      // Next question within same item
+      diagState.questionIndex += 1;
+      loadDiagnosticQuestion();
+    }
+  }
+
+  function showDiagnosticSummary() {
+    var listEl = $('#aq-diag-results-list');
+    if (listEl) {
+      listEl.innerHTML = '';
+      Object.keys(diagState.summaryPerItem).forEach(function (cid) {
+        var r = diagState.summaryPerItem[cid];
+        var pct = Math.round((r.baseline || 0.5) * 100);
+        var cls = masteryStageClass(r.label || 'Developing');
+
+        // Topic chips
+        var topicHtml = '';
+        var tm = r.topicMasteries || {};
+        Object.keys(tm).forEach(function (topic) {
+          var tpct = Math.round((tm[topic] || 0) * 100);
+          topicHtml +=
+            '<span class="aq-diag-topic-chip">' +
+            escapeHtml(topic) + ' · ' + tpct + '%' +
+            '</span>';
+        });
+
+        var card = document.createElement('div');
+        card.className = 'aq-diag-result-card';
+        card.innerHTML =
+          '<div class="aq-diag-result-info">' +
+          '<div class="aq-diag-result-title">' + escapeHtml(r.title || cid) + '</div>' +
+          '<div class="aq-diag-result-detail">' +
+          r.correct + ' / ' + r.total + ' correct · ' +
+          'Lecture baseline: <strong>' + pct + '%</strong>' +
+          '</div>' +
+          (topicHtml
+            ? '<div class="aq-diag-topics-grid">' + topicHtml + '</div>'
+            : '') +
+          '</div>' +
+          '<span class="aq-diag-result-mastery aq-dash-topic-badge ' + cls + '">' +
+          pct + '% · ' + escapeHtml(r.label) +
+          '</span>';
+
+        listEl.appendChild(card);
+      });
+    }
+
+    showScreen('diagnostic-results');
+
+    var startBtn = $('#aq-btn-diag-start');
+var homeBtn = $('#aq-btn-diag-home');
+
+if (startBtn) {
+  startBtn.onclick = function () {
+    finalizeDiagnosticSession();
+  };
+}
+
+if (homeBtn) {
+  homeBtn.onclick = function () {
+    showScreen('start');
+  };
+}
+  }
+
+  function finalizeDiagnosticSession() {
+    setLoading('Starting your personalised quiz…');
+    jQuery.ajax({
+      type: 'POST', url: urlFinalizeSession,
+      data: JSON.stringify({}), contentType: 'application/json',
+      success: function (data) {
+        if (!data.success) {
+          alert('Could not start quiz. Please try again.');
+          showScreen('start');
+          return;
+        }
+        if (data.question) {
+          // finalize returned first question directly
+          renderQuestion({
+            success: true,
+            question: data.question,
+            questions_seen: 0,
+            max_questions: data.max_questions || state.maxQuestionsCurrent,
+          });
+        } else {
+          // fallback: fetch first question
+          setLoading('Generating your first question…');
+          jQuery.ajax({
+            type: 'POST',
+            url: runtime.handlerUrl(element, 'get_question'),
+            data: JSON.stringify({}), contentType: 'application/json',
+            success: function (qData) { renderQuestion(qData); },
+            error: function () { alert('Could not load question.'); showScreen('start'); }
+          });
+        }
+      },
+      error: function () { alert('Could not start quiz.'); showScreen('start'); }
     });
   }
 

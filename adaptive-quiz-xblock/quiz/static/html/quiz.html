@@ -110,6 +110,80 @@
     </div>
   </div>
 
+  <!-- ── DIAGNOSTIC SCREEN ──────────────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-diagnostic">
+    <div class="aq-diagnostic-wrap">
+
+      <div class="aq-diagnostic-header">
+        <div class="aq-diag-badge">Quick Assessment</div>
+        <h2 class="aq-diagnostic-title" id="aq-diag-title">Let's see where you stand</h2>
+        <p class="aq-diagnostic-sub" id="aq-diag-sub">
+          A few questions to calibrate your starting level — no pressure, no grade.
+        </p>
+
+        <div class="aq-diag-progress-row">
+          <div class="aq-diag-progress-track">
+            <div class="aq-diag-progress-fill" id="aq-diag-progress-fill" style="width:0%"></div>
+          </div>
+          <span class="aq-diag-progress-label" id="aq-diag-progress-label">Question 1 of 3</span>
+        </div>
+      </div>
+
+      <div class="aq-q-card aq-diag-card">
+        <div class="aq-diag-meta-row">
+          <span class="aq-tag aq-tag-topic" id="aq-diag-badge-topic">Topic</span>
+          <span class="aq-tag aq-tag-diff" id="aq-diag-badge-diff">Medium</span>
+          <span class="aq-diag-item-label" id="aq-diag-item-label"></span>
+        </div>
+
+        <p class="aq-q-text" id="aq-diag-question-text">Loading…</p>
+
+        <div class="aq-options" id="aq-diag-options">
+          <button class="aq-opt" id="aq-diag-opt-A">
+            <span class="aq-opt-key">A</span><span class="aq-opt-text">…</span>
+          </button>
+          <button class="aq-opt" id="aq-diag-opt-B">
+            <span class="aq-opt-key">B</span><span class="aq-opt-text">…</span>
+          </button>
+          <button class="aq-opt" id="aq-diag-opt-C">
+            <span class="aq-opt-key">C</span><span class="aq-opt-text">…</span>
+          </button>
+          <button class="aq-opt" id="aq-diag-opt-D">
+            <span class="aq-opt-key">D</span><span class="aq-opt-text">…</span>
+          </button>
+        </div>
+
+        <div class="aq-feedback aq-hidden" id="aq-diag-feedback">
+          <div class="aq-feedback-banner" id="aq-diag-feedback-banner">
+            <span class="aq-feedback-icon" id="aq-diag-feedback-icon">✓</span>
+            <span class="aq-feedback-label" id="aq-diag-feedback-label">Correct!</span>
+          </div>
+          <p class="aq-explanation" id="aq-diag-explanation"></p>
+          <button class="aq-btn aq-btn-amber" id="aq-diag-btn-next">Next →</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── DIAGNOSTIC RESULTS SCREEN ─────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-diagnostic-results">
+    <div class="aq-diagnostic-results-wrap">
+      <div class="aq-diag-badge">Calibration Complete</div>
+      <h2 class="aq-diagnostic-title">Baseline established</h2>
+      <p class="aq-diagnostic-sub">
+        Your quiz is now personalised to your level. Starting in a moment…
+      </p>
+
+      <div id="aq-diag-results-list" class="aq-diag-results-list"></div>
+
+      <div class="aq-results-actions">
+  <button class="aq-btn aq-btn-primary" id="aq-btn-diag-start">Start Quiz</button>
+  <button class="aq-btn aq-btn-ghost" id="aq-btn-diag-home">Back to Home</button>
+</div>
+    </div>
+  </div>
+
   <!-- ── QUESTION ───────────────────────────────────────────────────── -->
   <div class="aq-screen aq-hidden" id="aq-screen-question">
     <!-- Top progress strip -->

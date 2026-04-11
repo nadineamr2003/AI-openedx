@@ -88,6 +88,15 @@ help="Default fallback course identifier used if no learner-selected course is a
     session_target_questions = Integer(default=0, scope=Scope.user_state)
     selected_course_id = String(default="", scope=Scope.user_state)
     active_session_id = String(default="", scope=Scope.user_state)
+    # Diagnostic placement fields
+    diagnostic_pending          = Boolean(default=False,  scope=Scope.user_state)
+    diagnostic_items_json       = String(default="",      scope=Scope.user_state)
+    diagnostic_item_index       = Integer(default=0,      scope=Scope.user_state)
+    diagnostic_question_index   = Integer(default=0,      scope=Scope.user_state)
+    diagnostic_results_json     = String(default="",      scope=Scope.user_state)
+    diagnostic_all_content_ids_json = String(default="",  scope=Scope.user_state)
+    diagnostic_question_count   = Integer(default=10,     scope=Scope.user_state)
+    diagnostic_resolved_source_text = String(default="",  scope=Scope.user_state)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -1243,43 +1252,62 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
     @XBlock.json_handler
     def start_session(self, data, suffix=""):
-        requested_q = int(data.get("question_count", self.max_questions))
-        requested_q = max(1, min(50, requested_q))
-        self.session_target_questions = requested_q
-
-        student_id = self._student_id()
+        requested_q    = max(1, min(50, int(data.get("question_count", self.max_questions))))
         selected_course = data.get("selected_course_id") or self._active_course_id()
-        content_ids = data.get("content_ids", [])
+        content_ids     = data.get("content_ids", [])
 
-        # Persist selected learner course for the rest of the session
-        self.selected_course_id = selected_course
-
-        self.questions_seen = 0
-        self.session_score = 0
-        self.session_active = True
-        self.session_source_text = ""
-        self.session_topics_json = json.dumps([])
+        self.selected_course_id       = selected_course
+        self.questions_seen           = 0
+        self.session_score            = 0
+        self.session_active           = True
+        self.session_source_text      = ""
+        self.session_topics_json      = json.dumps([])
+        self.session_target_questions = requested_q
 
         if not content_ids:
             return {"success": False, "error": "Please select at least one content item."}
 
         start_resp = self._api("/api/quiz/session/start", payload={
-            "student_id": student_id,
-            "course_id": selected_course,
-            "topic": "",
-            "source_text": "",
-            "content_ids": content_ids,
+            "student_id":   self._student_id(),
+            "course_id":    selected_course,
+            "topic":        "",
+            "source_text":  "",
+            "content_ids":  content_ids,
             "question_count": requested_q,
         })
 
         if not start_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
-        
-        self.active_session_id = start_resp.get("session_id", "")
-        self.session_topics_json = json.dumps(start_resp.get("topics", []))
-        self.session_source_text = start_resp.get("resolved_source_text", "")
-        self.current_difficulty = start_resp.get("current_difficulty", 3)
-        self.current_topic = start_resp.get("topics", [""])[0] if start_resp.get("topics") else ""
+
+        # ── Diagnostic branch ──────────────────────────────────────────
+        if start_resp.get("diagnostic_needed"):
+            items = start_resp.get("diagnostic_items", [])
+            self.diagnostic_pending             = True
+            self.diagnostic_items_json          = json.dumps(items)
+            self.diagnostic_item_index          = 0
+            self.diagnostic_question_index      = 0
+            self.diagnostic_results_json        = json.dumps({})
+            self.diagnostic_all_content_ids_json = json.dumps(
+                start_resp.get("all_content_ids", content_ids)
+            )
+            self.diagnostic_question_count      = requested_q
+            self.diagnostic_resolved_source_text = start_resp.get("resolved_source_text", "")
+
+            return {
+                "success":                        True,
+                "diagnostic_needed":              True,
+                "diagnostic_items":               items,
+                "diagnostic_questions_per_item":  start_resp.get("diagnostic_questions_per_item", 3),
+                "topics":                         start_resp.get("topics", []),
+            }
+
+        # ── No diagnostic needed — regular path ───────────────────────
+        self.diagnostic_pending       = False
+        self.active_session_id        = start_resp.get("session_id", "")
+        self.session_topics_json      = json.dumps(start_resp.get("topics", []))
+        self.session_source_text      = start_resp.get("resolved_source_text", "")
+        self.current_difficulty       = start_resp.get("current_difficulty", 3)
+        self.current_topic            = (start_resp.get("topics") or [""])[0]
 
         return self._fetch_and_store_question()
 
@@ -1287,6 +1315,207 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     def get_question(self, data, suffix=""):
         """Fetch a new question (called after submitting an answer)."""
         return self._fetch_and_store_question()
+    
+    @XBlock.json_handler
+    def get_diagnostic_question(self, data, suffix=""):
+        """Fetch the current diagnostic question from the backend."""
+        items      = json.loads(self.diagnostic_items_json or "[]")
+        item_index = self.diagnostic_item_index
+        q_index    = self.diagnostic_question_index
+
+        if item_index >= len(items):
+            return {"success": False, "error": "Diagnostic already complete."}
+
+        item   = items[item_index]
+        topics = item.get("topics", [])
+        if not topics:
+            return {"success": False, "error": "No topics for this content item."}
+
+        # Rotate topic across questions so each covers a different concept
+        topic = topics[q_index % len(topics)]
+
+        resp = self._api("/api/quiz/diagnostic/generate", payload={
+            "student_id":     self._student_id(),
+            "course_id":      self._active_course_id(),
+            "topic":          topic,
+            "question_index": q_index,
+            "source_text":    item.get("source_text", ""),
+        }, timeout=45)
+
+        if not resp or not resp.get("success"):
+            return {"success": False, "error": "Could not generate diagnostic question."}
+
+        self.current_question_json = json.dumps(resp["question"])
+        self.current_topic         = topic
+
+        return {
+            "success":          True,
+            "question":         resp["question"],
+            "question_index":   q_index,
+            "total_questions":  resp.get("total_questions", 3),
+            "item_index":       item_index,
+            "total_items":      len(items),
+            "content_id":       item.get("content_id", ""),
+            "content_title":    item.get("title", ""),
+            "difficulty":       resp.get("difficulty", 3),
+        }
+
+
+    @XBlock.json_handler
+    def submit_diagnostic_answer(self, data, suffix=""):
+        """
+        Record a diagnostic answer locally.
+        No mastery update here — results are batched and sent in complete_diagnostic_item.
+        """
+        selected  = data.get("selected_answer", "")
+        question  = json.loads(self.current_question_json) if self.current_question_json else {}
+        if not question:
+            return {"success": False, "error": "No active diagnostic question."}
+
+        is_correct    = selected == question.get("correct_answer", "")
+        time_spent_ms = int(data.get("time_spent_ms", 15000))
+        difficulty    = question.get("difficulty", 3)
+        items         = json.loads(self.diagnostic_items_json or "[]")
+        item_index    = self.diagnostic_item_index
+        q_index       = self.diagnostic_question_index
+        total_q       = 3
+
+        content_id = items[item_index]["content_id"] if item_index < len(items) else ""
+
+        all_results = json.loads(self.diagnostic_results_json or "{}")
+        if content_id not in all_results:
+            all_results[content_id] = []
+
+        all_results[content_id].append({
+            "difficulty": difficulty,
+            "correct":    is_correct,
+            "time_ms":    time_spent_ms,
+            "topic":      self.current_topic,
+        })
+        self.diagnostic_results_json = json.dumps(all_results)
+
+        last_q_for_item = (q_index + 1) >= total_q
+        last_item       = (item_index + 1) >= len(items)
+        
+        if not last_q_for_item:
+            self.diagnostic_question_index += 1
+
+        return {
+            "success":                True,
+            "is_correct":             is_correct,
+            "correct_answer":         question.get("correct_answer", ""),
+            "explanation":            question.get("explanation", ""),
+            "question_index":         q_index,
+            "total_questions":        total_q,
+            "item_index":             item_index,
+            "total_items":            len(items),
+            "last_question_for_item": last_q_for_item,
+            "last_item":              last_item,
+        }
+
+
+    @XBlock.json_handler
+    def complete_diagnostic_item(self, data, suffix=""):
+        """
+        Send one content item's results to the backend.
+        If all items are done, advance to finalize_session.
+        """
+        items       = json.loads(self.diagnostic_items_json or "[]")
+        all_results = json.loads(self.diagnostic_results_json or "{}")
+        item_index  = self.diagnostic_item_index
+
+        if item_index >= len(items):
+            return {"success": False, "error": "No more items to complete."}
+
+        item        = items[item_index]
+        content_id  = item["content_id"]
+        source_ver  = item.get("source_version", "")
+        topics      = item.get("topics", [])
+        results     = all_results.get(content_id, [])
+
+        resp = self._api("/api/quiz/diagnostic/complete", payload={
+            "student_id":     self._student_id(),
+            "course_id":      self._active_course_id(),
+            "content_id":     content_id,
+            "source_version": source_ver,
+            "topics":         topics,
+            "results":        results,
+        }, timeout=30)
+
+        if not resp or not resp.get("success"):
+            return {"success": False, "error": "Failed to process diagnostic results."}
+
+        next_item_index = item_index + 1
+        all_done        = next_item_index >= len(items)
+
+        if not all_done:
+            self.diagnostic_item_index    = next_item_index
+            self.diagnostic_question_index = 0
+
+        return {
+            "success":           True,
+            "item_complete":     True,
+            "all_done":          all_done,
+            "lecture_baseline":  resp.get("lecture_baseline", 0.5),
+            "lecture_label":     resp.get("lecture_label", "Developing"),
+            "topic_masteries":   resp.get("topic_masteries", {}),
+            "topics_calibrated": resp.get("topics_calibrated", []),
+            "correct_answers":   resp.get("correct_answers", 0),
+            "total_questions":   resp.get("total_questions", 3),
+            "content_id":        content_id,
+            "content_title":     item.get("title", ""),
+        }
+
+
+    @XBlock.json_handler
+    def finalize_session(self, data, suffix=""):
+        """
+        Called once all diagnostic items are complete.
+        Creates session doc, increments session_count, fires cache, returns first question.
+        """
+        all_content_ids = json.loads(self.diagnostic_all_content_ids_json or "[]")
+
+        resp = self._api("/api/quiz/session/finalize", payload={
+            "student_id":    self._student_id(),
+            "course_id":     self._active_course_id(),
+            "content_ids":   all_content_ids,
+            "question_count": self.diagnostic_question_count or self.max_questions,
+        }, timeout=45)
+
+        if not resp or not resp.get("success"):
+            return {"success": False, "error": "Could not finalize session."}
+
+        # Clear diagnostic state
+        self.diagnostic_pending              = False
+        self.diagnostic_items_json           = ""
+        self.diagnostic_results_json         = ""
+        self.diagnostic_all_content_ids_json = ""
+        self.diagnostic_item_index           = 0
+        self.diagnostic_question_index       = 0
+
+        # Set regular session state
+        self.active_session_id   = resp.get("session_id", "")
+        self.session_topics_json = json.dumps(resp.get("topics", []))
+        self.session_source_text = resp.get("resolved_source_text", "")
+        self.current_difficulty  = resp.get("current_difficulty", 3)
+        topics                   = resp.get("topics", [])
+        self.current_topic       = topics[0] if topics else ""
+
+        first_q = resp.get("first_question", {})
+        if first_q and first_q.get("success") and first_q.get("question"):
+            self.current_question_json = json.dumps(first_q["question"])
+            self.current_topic         = first_q["question"].get("topic", self.current_topic)
+            self.current_difficulty    = first_q["question"].get("difficulty", self.current_difficulty)
+            return {
+                "success":          True,
+                "question":         first_q["question"],
+                "questions_seen":   0,
+                "max_questions":    self.session_target_questions or self.max_questions,
+                "current_difficulty": self.current_difficulty,
+            }
+
+        # Fallback: let JS call get_question
+        return {"success": True, "question": None}
 
     @XBlock.json_handler
     def submit_answer(self, data, suffix=""):

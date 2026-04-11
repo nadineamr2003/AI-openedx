@@ -26,6 +26,10 @@
   --aq-radius-lg: 20px;
   --aq-font: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --aq-ease: cubic-bezier(.4, 0, .2, 1);
+  --aq-amber: #D97706;
+  --aq-amber-dark: #B45309;
+  --aq-amber-light: #FEF3C7;
+  --aq-amber-bg: #FFFBEB;
 
   font-family: var(--aq-font);
   max-width: 660px;
@@ -1715,6 +1719,215 @@ body.aq-modal-open {
   opacity: .45;
   cursor: not-allowed;
   transform: none;
+}
+
+/* ── Diagnostic layout ───────────────────────────────────────────── */
+.aq-diagnostic-wrap,
+.aq-diagnostic-results-wrap {
+  background: var(--aq-surface);
+  border-radius: var(--aq-radius-lg);
+  padding: 36px 32px;
+  box-shadow: var(--aq-shadow-md);
+  text-align: center;
+}
+
+.aq-diagnostic-header {
+  margin-bottom: 24px;
+}
+
+.aq-diag-badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--aq-amber-light);
+  color: var(--aq-amber);
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 5px 14px;
+  border-radius: 999px;
+  margin-bottom: 16px;
+}
+
+.aq-diagnostic-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  margin: 0 0 8px;
+  color: var(--aq-text);
+}
+
+.aq-diagnostic-sub {
+  font-size: .9rem;
+  color: var(--aq-text-muted);
+  margin: 0 0 22px;
+  line-height: 1.6;
+}
+
+/* Progress row */
+.aq-diag-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.aq-diag-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--aq-amber-light);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.aq-diag-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #F59E0B, var(--aq-amber));
+  border-radius: 999px;
+  transition: width .5s var(--aq-ease);
+}
+
+.aq-diag-progress-label {
+  font-size: .78rem;
+  font-weight: 700;
+  color: var(--aq-amber);
+  white-space: nowrap;
+}
+
+/* Card */
+.aq-diag-card {
+  text-align: left;
+  margin-top: 0;
+}
+
+.aq-diag-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.aq-diag-item-label {
+  font-size: .72rem;
+  font-weight: 600;
+  color: var(--aq-text-muted);
+  margin-left: auto;
+}
+
+/* Amber CTA button */
+.aq-btn-amber {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 22px;
+  background: var(--aq-amber);
+  color: #fff;
+  border: none;
+  border-radius: var(--aq-radius-sm);
+  font-size: .9rem;
+  font-weight: 700;
+  font-family: var(--aq-font);
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(217, 119, 6, .28);
+  transition: background .15s, transform .12s var(--aq-ease), box-shadow .15s;
+}
+
+.aq-btn-amber:hover {
+  background: var(--aq-amber-dark);
+  box-shadow: 0 4px 18px rgba(217, 119, 6, .38);
+  transform: translateY(-1px);
+}
+
+/* Results list */
+.aq-diag-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 24px 0;
+  text-align: left;
+}
+
+.aq-diag-result-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--aq-bg);
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-sm);
+}
+
+.aq-diag-result-info {}
+
+.aq-diag-result-title {
+  font-size: .9rem;
+  font-weight: 700;
+  color: var(--aq-text);
+  margin-bottom: 3px;
+}
+
+.aq-diag-result-detail {
+  font-size: .76rem;
+  color: var(--aq-text-muted);
+}
+
+.aq-diag-result-mastery {
+  font-size: .78rem;
+  font-weight: 800;
+  padding: 5px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Topic breakdown inside result card */
+.aq-diag-topics-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.aq-diag-topic-chip {
+  font-size: .7rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--aq-border);
+  background: var(--aq-surface);
+  color: var(--aq-text-muted);
+}
+
+/* Countdown */
+.aq-diag-countdown-ring {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 3px solid var(--aq-amber-light);
+  margin-top: 8px;
+}
+
+.aq-diag-countdown-num {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--aq-amber);
+  animation: aq-pop .3s var(--aq-ease);
+}
+
+@media (max-width: 540px) {
+
+  .aq-diagnostic-wrap,
+  .aq-diagnostic-results-wrap {
+    padding: 24px 18px;
+  }
+
+  .aq-diag-result-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 @media (max-width: 540px) {

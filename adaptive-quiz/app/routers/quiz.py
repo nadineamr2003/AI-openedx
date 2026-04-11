@@ -3,14 +3,15 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from bson import ObjectId
 from app.models.quiz import (
-    GenerateRequest,
-    SubmitRequest,
-    SubmitResponse,
-    MasteryResponse,
-    ContentItem,
-    ContentListResponse,
-    ContentUpdateRequest,
-    ContentToggleRequest,
+    GenerateRequest, SubmitRequest, SubmitResponse, MasteryResponse,
+    ContentItem, ContentListResponse, ContentUpdateRequest, ContentToggleRequest,
+    DiagnosticGenerateRequest, DiagnosticCompleteRequest,
+    DiagnosticItem, SessionFinalizeRequest,
+)
+from app.services.adaptation import (
+    get_initial_student_state, process_answer, select_next_topic,
+    make_content_key, is_content_diagnosed, get_diagnostic_difficulty,
+    apply_diagnostic_results, DIAGNOSTIC_QUESTION_COUNT,select_session_start_difficulty
 )
 from app.services.ai_engine import (
     generate_question,
@@ -18,9 +19,6 @@ from app.services.ai_engine import (
     extract_content_metadata,
 )
 from app.services.pdf_parser import extract_text_from_pdf_base64
-from app.services.adaptation import (
-    get_initial_student_state, process_answer, select_next_topic
-)
 from app.db.mongodb import get_db
 import asyncio
 
@@ -413,6 +411,7 @@ def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dic
         "title": doc.get("title"),
         "topics": doc.get("topics", []),
         "active": doc.get("active", True),
+        "source_version": doc.get("updated_at") or doc.get("uploaded_at") or str(doc["_id"]),
     }
     if include_source_text:
         item["source_text"] = doc.get("source_text", "")
@@ -424,6 +423,39 @@ def _parse_object_id(content_id: str) -> ObjectId:
         return ObjectId(content_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid content ID.")
+    
+async def _generate_first_question(
+    student_id: str,
+    course_id: str,
+    topic: str,
+    difficulty: int,
+    source_text: str,
+    session_id: str,
+    max_questions: int,
+) -> dict:
+    """Generate (or pull from cache) the first question for a freshly created session."""
+    cached = await _get_cached_question(topic, difficulty, course_id)
+    if cached:
+        asyncio.create_task(
+            _replenish_cache(topic, difficulty, course_id, source_text)
+        )
+        question = cached
+    else:
+        try:
+            question = await generate_question(
+                topic=topic, difficulty=difficulty, source_text=source_text
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+    return {
+        "success":          True,
+        "question":         question,
+        "questions_seen":   0,
+        "max_questions":    max_questions,
+        "current_difficulty": difficulty,
+        "session_id":       session_id,
+    }
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -633,94 +665,331 @@ async def get_mastery(student_id: str, course_id: str):
 
 @router.post("/session/start")
 async def session_start(req: GenerateRequest):
+    """
+    Resolve content, check diagnostic status, and decide what happens next.
+
+    If all selected content items have already been diagnosed at their current
+    version → create session immediately and return first question (legacy path).
+
+    If any item is new or has been updated since last diagnostic →
+    do NOT create session_history yet. Return diagnostic metadata only.
+    The XBlock runs the diagnostic, then calls /session/finalize.
+    """
     db = get_db()
 
-    resolved_topics = []
-    resolved_source_text = ""
+    if not req.content_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Please select at least one content item.",
+        )
 
-    if req.content_ids:
-        # Resolve content items from MongoDB
-        for title in req.content_ids:
-            item = await db.course_content.find_one(
-                {"course_id": req.course_id, "title": title, "active": True},
-                {"_id": 0}
-            )
-            if item:
-                resolved_topics.extend(item.get("topics", [title]))
-                resolved_source_text += "\n\n" + item.get("source_text", "")
+    # ── Resolve content items by real Mongo _id ───────────────────
+    resolved_topics:      list[str]  = []
+    resolved_source_text: str        = ""
+    diagnostic_items:     list[dict] = []
 
-        # Deduplicate topics while preserving order
-        seen = set()
-        deduped = []
-        for t in resolved_topics:
-            if t not in seen:
-                seen.add(t)
-                deduped.append(t)
-        resolved_topics = deduped
+    for content_id in req.content_ids:
+        try:
+            oid = ObjectId(content_id)
+        except Exception:
+            continue
 
-        if not resolved_topics:
-            raise HTTPException(
-                status_code=404,
-                detail="No active content found for the selected items."
-            )
-    else:
-        resolved_topics = [t.strip() for t in req.topic.split(",") if t.strip()]
-        resolved_source_text = req.source_text
+        item = await db.course_content.find_one({
+        "_id": oid,
+        "course_id": req.course_id,
+        "active": True,
+        })
+        if not item:
+            continue
 
-    # Get or create student state
+        topics      = item.get("topics", [])
+        source_text = item.get("source_text", "")
+        version = item.get("updated_at") or item.get("uploaded_at") or str(item["_id"])
+
+        resolved_topics.extend(topics)
+        resolved_source_text += "\n\n" + source_text
+
+        diagnostic_items.append({
+            "content_id":     str(item["_id"]),
+            "title":          item.get("title", ""),
+            "topics":         topics,
+            "source_text":    source_text,
+            "source_version": version,
+        })
+
+    # Deduplicate topics
+    seen, deduped = set(), []
+    for t in resolved_topics:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    resolved_topics = deduped
+
+    if not resolved_topics:
+        raise HTTPException(
+            status_code=404,
+            detail="No active content found for the selected items.",
+        )
+
+    # ── Get/create student state ──────────────────────────────────
     state = await _get_state(req.student_id, req.course_id, resolved_topics)
 
-    # Add any new topics not yet in student state
+    for topic in resolved_topics:
+        if topic not in state["topic_mastery"]:
+            state["topic_mastery"][topic] = 0.5
+        if "topic_mastery_source" not in state:
+            state["topic_mastery_source"] = {}
+        if topic not in state["topic_mastery_source"]:
+            state["topic_mastery_source"][topic] = "default_prior"
+
+    state["session_topics"]  = resolved_topics
+    # DO NOT increment session_count here — deferred to finalize
+
+    state["current_difficulty"] = select_session_start_difficulty(
+    state.get("topic_mastery", {}),
+    resolved_topics,
+)
+    await _save_state(state)
+
+    # ── Check which items need diagnostic ────────────────────────
+    items_needing_diagnostic = [
+        item for item in diagnostic_items
+        if not is_content_diagnosed(
+            state,
+            make_content_key(item["content_id"], item["source_version"])
+        )
+    ]
+    diagnostic_needed = len(items_needing_diagnostic) > 0
+
+    if not diagnostic_needed:
+        # All items already diagnosed — go straight to session creation
+        session_id = await _create_session_history(
+            student_id           = req.student_id,
+            course_id            = req.course_id,
+            session_topics       = resolved_topics,
+            mastery_before       = {t: state["topic_mastery"].get(t, 0.5) for t in resolved_topics},
+            start_difficulty     = state["current_difficulty"],
+            target_questions     = req.question_count,
+            selected_content_ids = req.content_ids,
+        )
+        state["session_count"] = state.get("session_count", 0) + 1
+        await _save_state(state)
+
+        for topic in resolved_topics:
+            asyncio.create_task(
+                _replenish_cache(topic, state["current_difficulty"],
+                                 req.course_id, resolved_source_text, target=3)
+            )
+
+        return {
+            "diagnostic_needed":   False,
+            "session_id":          session_id,
+            "topics":              resolved_topics,
+            "resolved_source_text": resolved_source_text,
+            "current_difficulty":  state["current_difficulty"],
+            "topic_mastery":       state["topic_mastery"],
+            "irt_active":          state["irt_active"],
+            "cache_filling":       True,
+        }
+
+    # Diagnostic needed — return items, hold off session creation
+    return {
+        "diagnostic_needed":              True,
+        "diagnostic_items":               items_needing_diagnostic,
+        "diagnostic_questions_per_item":  DIAGNOSTIC_QUESTION_COUNT,
+        "all_content_ids":                req.content_ids,
+        "question_count":                 req.question_count,
+        "resolved_source_text":           resolved_source_text,
+        "topics":                         resolved_topics,
+    }
+    
+@router.post("/diagnostic/generate")
+async def diagnostic_generate(req: DiagnosticGenerateRequest):
+    """
+    Generate one diagnostic placement question.
+    Always freshly generated — bypasses cache entirely.
+    Difficulty is determined by question index: [2, 3, 4].
+    """
+    difficulty = get_diagnostic_difficulty(req.question_index)
+
+    try:
+        question = await generate_question(
+            topic=req.topic,
+            difficulty=difficulty,
+            source_text=req.source_text,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    return {
+        "success":        True,
+        "question":       question,
+        "question_index": req.question_index,
+        "difficulty":     difficulty,
+        "total_questions": DIAGNOSTIC_QUESTION_COUNT,
+    }
+
+
+@router.post("/diagnostic/complete")
+async def diagnostic_complete(req: DiagnosticCompleteRequest):
+    """
+    Finalise one content item's diagnostic.
+
+    - Computes lecture baseline from all results
+    - Applies topic-level offsets for directly-tested topics
+    - Untouched topics get baseline × shrink factor
+    - Stamps mastery_source = "diagnostic"
+    - Records diagnostic_status_by_content[content_key]
+    - Does NOT touch recent_answers or total_answers (separate evidence stream)
+    """
+    if not req.topics:
+        raise HTTPException(status_code=422, detail="No topics provided.")
+
+    state = await _get_state(req.student_id, req.course_id, req.topics)
+
+    results_as_dicts = [r.model_dump() for r in req.results]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    state = apply_diagnostic_results(
+        state          = state,
+        topics         = req.topics,
+        results        = results_as_dicts,
+        content_id     = req.content_id,
+        source_version = req.source_version,
+    )
+
+    # Stamp the timestamp (apply_diagnostic_results leaves it None)
+    content_key = make_content_key(req.content_id, req.source_version)
+    state["diagnostic_status_by_content"][content_key]["timestamp"] = now_iso
+
+    await _save_state(state)
+
+    topic_masteries = state["diagnostic_status_by_content"][content_key]["topic_masteries"]
+    baseline        = state["diagnostic_status_by_content"][content_key]["mastery"]
+
+    return {
+        "success":            True,
+        "content_id":         req.content_id,
+        "content_key":        content_key,
+        "lecture_baseline":   baseline,
+        "lecture_label":      _mastery_label(baseline),
+        "topic_masteries":    topic_masteries,
+        "topics_calibrated":  req.topics,
+        "correct_answers":    sum(1 for r in req.results if r.correct),
+        "total_questions":    len(req.results),
+    }
+
+
+@router.post("/session/finalize")
+async def session_finalize(req: SessionFinalizeRequest):
+    """
+    Called after ALL diagnostics for a session are complete.
+
+    This is the only place that:
+      - creates the student_session_history document
+      - increments session_count
+      - fires background cache fill
+      - returns the first real quiz question
+    """
+    db = get_db()
+
+    # Re-resolve content to get topics + source_text (by real _id)
+    resolved_topics:      list[str] = []
+    resolved_source_text: str       = ""
+
+    for content_id in req.content_ids:
+        try:
+            oid = ObjectId(content_id)
+        except Exception:
+            continue
+        item = await db.course_content.find_one({
+        "_id": oid,
+        "course_id": req.course_id,
+        "active": True,
+        })
+        if not item:
+            continue
+        resolved_topics.extend(item.get("topics", []))
+        resolved_source_text += "\n\n" + item.get("source_text", "")
+
+    seen, deduped = set(), []
+    for t in resolved_topics:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    resolved_topics = deduped
+
+    if not resolved_topics:
+        raise HTTPException(status_code=404, detail="No active content found.")
+
+    state = await _get_state(req.student_id, req.course_id, resolved_topics)
+
     for topic in resolved_topics:
         if topic not in state["topic_mastery"]:
             state["topic_mastery"][topic] = 0.5
 
-    # Restrict this session to the learner-selected topics only
     state["session_topics"] = resolved_topics
-
-    # Increment session count
+    state["current_difficulty"] = select_session_start_difficulty(
+        state.get("topic_mastery", {}),
+        resolved_topics,
+    )
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
-    mastery_before = {
-        topic: state["topic_mastery"].get(topic, 0.5)
-        for topic in resolved_topics
-    }
+    mastery_before = {t: state["topic_mastery"].get(t, 0.5) for t in resolved_topics}
+    
+    content_key = make_content_key(
+    str(item["_id"]),
+    item.get("updated_at") or item.get("uploaded_at") or str(item["_id"]),
+)
+
+    if not is_content_diagnosed(state, content_key):
+        raise HTTPException(
+            status_code=422,
+            detail="Diagnostic incomplete for one or more selected lectures."
+        )
 
     session_id = await _create_session_history(
-        student_id=req.student_id,
-        course_id=req.course_id,
-        session_topics=resolved_topics,
-        mastery_before=mastery_before,
-        start_difficulty=state["current_difficulty"],
-        target_questions=req.question_count,
-        selected_content_ids=req.content_ids or [],
+        student_id           = req.student_id,
+        course_id            = req.course_id,
+        session_topics       = resolved_topics,
+        mastery_before       = mastery_before,
+        start_difficulty     = state["current_difficulty"],
+        target_questions     = req.question_count,
+        selected_content_ids = req.content_ids,
     )
 
-    # Fire background cache fill for all resolved topics
     for topic in resolved_topics:
         asyncio.create_task(
             _replenish_cache(
-                topic,
-                state["current_difficulty"],
-                req.course_id,
-                resolved_source_text,
-                target=3
+                topic, state["current_difficulty"],
+                req.course_id, resolved_source_text, target=3
             )
         )
 
+    # Choose first topic and fetch first question
+    first_topic = resolved_topics[0]
+    state["session_topics"] = resolved_topics
+
+    gen_resp = await _generate_first_question(
+        student_id   = req.student_id,
+        course_id    = req.course_id,
+        topic        = first_topic,
+        difficulty   = state["current_difficulty"],
+        source_text  = resolved_source_text,
+        session_id   = session_id,
+        max_questions= req.question_count,
+    )
+
     return {
-        "student_id": req.student_id,
-        "course_id": req.course_id,
-        "session_id": session_id,
-        "topics": resolved_topics,
+        "success":              True,
+        "session_id":           session_id,
+        "topics":               resolved_topics,
         "resolved_source_text": resolved_source_text,
-        "session_count": state["session_count"],
-        "current_difficulty": state["current_difficulty"],
-        "topic_mastery": state["topic_mastery"],
-        "irt_active": state["irt_active"],
-        "cache_filling": True,
-        "message": f"Session started. Pre-generating questions for {len(resolved_topics)} topic(s)."
+        "current_difficulty":   state["current_difficulty"],
+        "topic_mastery":        state["topic_mastery"],
+        "irt_active":           state["irt_active"],
+        "first_question":       gen_resp,
     }
 
 @router.post("/support/explain")
@@ -841,15 +1110,16 @@ async def update_content_item(req: ContentUpdateRequest):
         {"_id": oid},
         {
             "$set": {
-                "course_id": req.course_id,
-                "course_name": req.course_name,
-                "week": req.week,
-                "content_type": "lecture",
-                "title": req.title,
-                "topics": req.topics,
-                "source_text": req.source_text,
-                "active": req.active,
-            }
+    "course_id": req.course_id,
+    "course_name": req.course_name,
+    "week": req.week,
+    "content_type": "lecture",
+    "title": req.title,
+    "topics": req.topics,
+    "source_text": req.source_text,
+    "active": req.active,
+    "updated_at": datetime.now(timezone.utc).isoformat(),
+}
         }
     )
 
