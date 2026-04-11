@@ -7,7 +7,7 @@ class GenerateRequest(BaseModel):
     topic:         str
     difficulty:    int = Field(default=3, ge=1, le=5)
     source_text:   str
-    mode:          str = "auto"
+    mode:          str = "normal_practice"
     content_ids:   list[str] = []
     question_count: int = 10
 
@@ -121,12 +121,8 @@ class DiagnosticCompleteRequest(BaseModel):
 
 
 class SessionFinalizeRequest(BaseModel):
-    """
-    Called after all diagnostics are done.
-    Triggers session doc creation, session_count increment,
-    cache fill, and returns the first real question.
-    """
     student_id:     str
     course_id:      str
-    content_ids:    list[str]    # real Mongo _id strings
+    content_ids:    list[str]
     question_count: int = 10
+    mode:           str = "normal_practice"

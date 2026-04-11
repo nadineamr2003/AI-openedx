@@ -18,6 +18,15 @@ DIFFICULTY_LABELS = {
     5: "Very Hard",
 }
 
+ALLOWED_MODES = {"auto", "normal_practice", "weakness_review", "challenge"}
+
+WEAK_THRESHOLD = 0.45
+GROWTH_MAX = 0.70
+
+ROTATION_POOL_SIZE = 3
+WEAK_CHECKIN_CADENCE = 4
+SPACED_REVIEW_CADENCE = 5
+
 # ── Diagnostic constants ─────────────────────────────────────────────
 DIAGNOSTIC_DIFFICULTIES    = [2, 3, 4]
 DIAGNOSTIC_WEIGHTS         = {2: 0.15, 3: 0.25, 4: 0.35}
@@ -64,38 +73,112 @@ def select_difficulty(mastery: float) -> int:
             best_diff = difficulty
     return best_diff
 
-def select_session_start_difficulty(topic_mastery: dict, session_topics: list[str]) -> int:
-    """
-    Pick the starting difficulty for a new session after diagnostic.
-    Uses the weakest diagnosed topic in the selected session scope so the
-    first real question is supportive, not overconfident.
-    """
+def select_session_start_difficulty(
+    topic_mastery: dict,
+    session_topics: list[str],
+    mode: str = "normal_practice",
+) -> int:
     if not session_topics:
         return 3
 
-    scores = [topic_mastery.get(t, 0.5) for t in session_topics]
-    if not scores:
+    scoped = {t: topic_mastery.get(t, 0.5) for t in session_topics}
+    if not scoped:
         return 3
 
-    anchor_mastery = min(scores)
+    mode = _normalize_mode(mode)
+    if mode == "auto":
+        mode = resolve_auto_mode(scoped)
+
+    scores = sorted(scoped.values())
+    weak_scores = [s for s in scores if s < WEAK_THRESHOLD]
+    growth_scores = [s for s in scores if WEAK_THRESHOLD <= s <= GROWTH_MAX]
+    strong_scores = [s for s in scores if s > GROWTH_MAX]
+
+    if mode == "weakness_review":
+        anchor_mastery = min(scores)
+    elif mode == "challenge":
+        anchor_mastery = max(scores)
+    else:
+        # normal_practice anchor = frontier topic
+        if growth_scores:
+            anchor_mastery = growth_scores[0]
+        elif weak_scores:
+            anchor_mastery = max(weak_scores)
+        elif strong_scores:
+            anchor_mastery = min(strong_scores)
+        else:
+            anchor_mastery = 0.5
+
     return select_difficulty(anchor_mastery)
 
 
-def select_next_topic(topic_mastery: dict, mode: str = "auto") -> tuple:
+def select_next_topic(
+    topic_mastery: dict,
+    mode: str = "normal_practice",
+    recent_answers: list[dict] | None = None,
+    total_answers: int = 0,
+) -> tuple:
+    if not topic_mastery:
+        raise ValueError("topic_mastery cannot be empty.")
+
+    recent_answers = recent_answers or []
+    mode = _normalize_mode(mode)
+
+    if mode == "auto":
+        mode = resolve_auto_mode(topic_mastery, recent_answers)
+
+    ordered_low = [t for t, _ in sorted(topic_mastery.items(), key=lambda x: x[1])]
+    ordered_high = [t for t, _ in sorted(topic_mastery.items(), key=lambda x: x[1], reverse=True)]
+
+    weak_topics = [t for t in ordered_low if topic_mastery[t] < WEAK_THRESHOLD]
+    growth_topics = [t for t in ordered_low if WEAK_THRESHOLD <= topic_mastery[t] <= GROWTH_MAX]
+    strong_topics = [t for t in ordered_low if topic_mastery[t] > GROWTH_MAX]
+
     if mode == "weakness_review":
-        return min(topic_mastery, key=topic_mastery.get), "weakness_review"
+        candidates = ordered_low[:min(ROTATION_POOL_SIZE, len(ordered_low))]
+        for topic in _recent_wrong_topics(recent_answers):
+            if topic in topic_mastery and topic not in candidates and topic_mastery[topic] <= 0.65:
+                candidates.append(topic)
+
+        chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+        return chosen, "weakness_review"
+
     if mode == "challenge":
-        return max(topic_mastery, key=topic_mastery.get), "challenge"
+        candidates = ordered_high[:min(ROTATION_POOL_SIZE, len(ordered_high))]
+        chosen = _pick_rotating_topic(
+            candidates,
+            topic_mastery,
+            recent_answers,
+            prefer_high_mastery=True,
+        )
+        return chosen, "challenge"
 
-    weakest       = min(topic_mastery, key=topic_mastery.get)
-    weakest_score = topic_mastery[weakest]
+    # normal_practice
+    if growth_topics:
+        if strong_topics and total_answers > 0 and total_answers % SPACED_REVIEW_CADENCE == 0:
+            candidates = strong_topics[:min(ROTATION_POOL_SIZE, len(strong_topics))]
+            chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+            return chosen, "normal_practice"
 
-    if weakest_score < 0.4:
-        return weakest, "weakness_review"
-    elif weakest_score < 0.7:
-        return weakest, "normal_practice"
-    else:
-        return max(topic_mastery, key=topic_mastery.get), "challenge"
+        if weak_topics and total_answers > 0 and total_answers % WEAK_CHECKIN_CADENCE == 0:
+            candidates = weak_topics[:min(ROTATION_POOL_SIZE, len(weak_topics))]
+            chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+            return chosen, "normal_practice"
+
+        candidates = growth_topics[:min(ROTATION_POOL_SIZE, len(growth_topics))]
+        chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+        return chosen, "normal_practice"
+
+    if weak_topics:
+        # fallback: learner is mostly weak, so use the strongest weak topic as the frontier
+        candidates = weak_topics[:min(ROTATION_POOL_SIZE, len(weak_topics))]
+        chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+        return chosen, "normal_practice"
+
+    # fallback: learner is already strong everywhere, so use lowest strong topic as productive practice
+    candidates = strong_topics[:min(ROTATION_POOL_SIZE, len(strong_topics))] or ordered_low[:1]
+    chosen = _pick_rotating_topic(candidates, topic_mastery, recent_answers)
+    return chosen, "normal_practice"
 
 
 def get_initial_student_state(student_id: str, course_id: str, topics: list) -> dict:
@@ -112,6 +195,7 @@ def get_initial_student_state(student_id: str, course_id: str, topics: list) -> 
         "session_topics":              topics,
         "diagnostic_status_by_content": {},
         "last_updated":                None,
+        "current_session_mode": "normal_practice",
     }
 
 
@@ -140,6 +224,76 @@ def process_answer(state: dict, topic: str, correct: bool, time_ms: int) -> dict
         state["current_difficulty"] = select_difficulty(state["topic_mastery"][topic])
 
     return state
+
+def _normalize_mode(mode: str) -> str:
+    return mode if mode in ALLOWED_MODES else "normal_practice"
+
+
+def _last_seen_distance(topic: str, recent_answers: list[dict] | None) -> int:
+    recent_answers = recent_answers or []
+    for i, ans in enumerate(reversed(recent_answers), start=1):
+        if ans.get("topic") == topic:
+            return i
+    return 10_000
+
+
+def _pick_rotating_topic(
+    candidates: list[str],
+    topic_mastery: dict[str, float],
+    recent_answers: list[dict] | None = None,
+    prefer_high_mastery: bool = False,
+) -> str:
+    recent_answers = recent_answers or []
+    if not candidates:
+        raise ValueError("No candidate topics available.")
+
+    last_topic = recent_answers[-1].get("topic") if recent_answers else None
+    pool = [t for t in candidates if t != last_topic] or list(candidates)
+
+    if prefer_high_mastery:
+        return sorted(
+            pool,
+            key=lambda t: (
+                -_last_seen_distance(t, recent_answers),
+                -topic_mastery.get(t, 0.5),
+                t,
+            )
+        )[0]
+
+    return sorted(
+        pool,
+        key=lambda t: (
+            -_last_seen_distance(t, recent_answers),
+            topic_mastery.get(t, 0.5),
+            t,
+        )
+    )[0]
+
+
+def _recent_wrong_topics(recent_answers: list[dict] | None, limit: int = 6) -> list[str]:
+    recent_answers = recent_answers or []
+    wrong_topics = []
+    for ans in reversed(recent_answers[-limit:]):
+        topic = ans.get("topic")
+        if not ans.get("correct") and topic and topic not in wrong_topics:
+            wrong_topics.append(topic)
+    return wrong_topics
+
+
+def resolve_auto_mode(topic_mastery: dict[str, float], recent_answers: list[dict] | None = None) -> str:
+    recent_answers = recent_answers or []
+    weakest_score = min(topic_mastery.values()) if topic_mastery else 0.5
+
+    if len(recent_answers) >= 2 and all(not ans.get("correct") for ans in recent_answers[-2:]):
+        return "weakness_review"
+
+    if weakest_score < 0.35:
+        return "weakness_review"
+
+    if any(WEAK_THRESHOLD <= score <= GROWTH_MAX for score in topic_mastery.values()):
+        return "normal_practice"
+
+    return "challenge"
 
 
 # ── Diagnostic helpers ───────────────────────────────────────────────

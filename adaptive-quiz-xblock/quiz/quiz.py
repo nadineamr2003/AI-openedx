@@ -88,6 +88,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     session_target_questions = Integer(default=0, scope=Scope.user_state)
     selected_course_id = String(default="", scope=Scope.user_state)
     active_session_id = String(default="", scope=Scope.user_state)
+    selected_session_mode = String(default="normal_practice", scope=Scope.user_state)
     # Diagnostic placement fields
     diagnostic_pending          = Boolean(default=False,  scope=Scope.user_state)
     diagnostic_items_json       = String(default="",      scope=Scope.user_state)
@@ -1252,56 +1253,59 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
     @XBlock.json_handler
     def start_session(self, data, suffix=""):
-        requested_q    = max(1, min(50, int(data.get("question_count", self.max_questions))))
+        requested_q     = max(1, min(50, int(data.get("question_count", self.max_questions))))
         selected_course = data.get("selected_course_id") or self._active_course_id()
         content_ids     = data.get("content_ids", [])
+        selected_mode   = data.get("mode") or "normal_practice"
 
-        self.selected_course_id       = selected_course
-        self.questions_seen           = 0
-        self.session_score            = 0
-        self.session_active           = True
-        self.session_source_text      = ""
-        self.session_topics_json      = json.dumps([])
-        self.session_target_questions = requested_q
+        self.selected_course_id        = selected_course
+        self.selected_session_mode     = selected_mode
+        self.questions_seen            = 0
+        self.session_score             = 0
+        self.session_active            = True
+        self.session_source_text       = ""
+        self.session_topics_json       = json.dumps([])
+        self.session_target_questions  = requested_q
 
         if not content_ids:
             return {"success": False, "error": "Please select at least one content item."}
 
         start_resp = self._api("/api/quiz/session/start", payload={
-            "student_id":   self._student_id(),
-            "course_id":    selected_course,
-            "topic":        "",
-            "source_text":  "",
-            "content_ids":  content_ids,
+            "student_id": self._student_id(),
+            "course_id": selected_course,
+            "topic": "",
+            "source_text": "",
+            "content_ids": content_ids,
             "question_count": requested_q,
+            "mode": selected_mode,
         })
 
         if not start_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
 
-        # ── Diagnostic branch ──────────────────────────────────────────
         if start_resp.get("diagnostic_needed"):
             items = start_resp.get("diagnostic_items", [])
-            self.diagnostic_pending             = True
-            self.diagnostic_items_json          = json.dumps(items)
-            self.diagnostic_item_index          = 0
-            self.diagnostic_question_index      = 0
-            self.diagnostic_results_json        = json.dumps({})
-            self.diagnostic_all_content_ids_json = json.dumps(
+            self.diagnostic_pending               = True
+            self.diagnostic_items_json            = json.dumps(items)
+            self.diagnostic_item_index            = 0
+            self.diagnostic_question_index        = 0
+            self.diagnostic_results_json          = json.dumps({})
+            self.diagnostic_all_content_ids_json  = json.dumps(
                 start_resp.get("all_content_ids", content_ids)
             )
-            self.diagnostic_question_count      = requested_q
-            self.diagnostic_resolved_source_text = start_resp.get("resolved_source_text", "")
+            self.diagnostic_question_count        = requested_q
+            self.diagnostic_resolved_source_text  = start_resp.get("resolved_source_text", "")
 
             return {
-                "success":                        True,
-                "diagnostic_needed":              True,
-                "diagnostic_items":               items,
-                "diagnostic_questions_per_item":  start_resp.get("diagnostic_questions_per_item", 3),
-                "topics":                         start_resp.get("topics", []),
+                "success": True,
+                "diagnostic_needed": True,
+                "diagnostic_items": items,
+                "diagnostic_questions_per_item": start_resp.get("diagnostic_questions_per_item", 3),
+                "topics": start_resp.get("topics", []),
+                "selected_mode": start_resp.get("selected_mode", selected_mode),
+                "effective_mode": start_resp.get("effective_mode", selected_mode),
             }
 
-        # ── No diagnostic needed — regular path ───────────────────────
         self.diagnostic_pending       = False
         self.active_session_id        = start_resp.get("session_id", "")
         self.session_topics_json      = json.dumps(start_resp.get("topics", []))
@@ -1469,31 +1473,27 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
     @XBlock.json_handler
     def finalize_session(self, data, suffix=""):
-        """
-        Called once all diagnostic items are complete.
-        Creates session doc, increments session_count, fires cache, returns first question.
-        """
         all_content_ids = json.loads(self.diagnostic_all_content_ids_json or "[]")
+        selected_mode = data.get("mode") or self.selected_session_mode or "normal_practice"
 
         resp = self._api("/api/quiz/session/finalize", payload={
-            "student_id":    self._student_id(),
-            "course_id":     self._active_course_id(),
-            "content_ids":   all_content_ids,
+            "student_id": self._student_id(),
+            "course_id": self._active_course_id(),
+            "content_ids": all_content_ids,
             "question_count": self.diagnostic_question_count or self.max_questions,
+            "mode": selected_mode,
         }, timeout=45)
 
         if not resp or not resp.get("success"):
             return {"success": False, "error": "Could not finalize session."}
 
-        # Clear diagnostic state
-        self.diagnostic_pending              = False
-        self.diagnostic_items_json           = ""
-        self.diagnostic_results_json         = ""
-        self.diagnostic_all_content_ids_json = ""
-        self.diagnostic_item_index           = 0
-        self.diagnostic_question_index       = 0
+        self.diagnostic_pending               = False
+        self.diagnostic_items_json            = ""
+        self.diagnostic_results_json          = ""
+        self.diagnostic_all_content_ids_json  = ""
+        self.diagnostic_item_index            = 0
+        self.diagnostic_question_index        = 0
 
-        # Set regular session state
         self.active_session_id   = resp.get("session_id", "")
         self.session_topics_json = json.dumps(resp.get("topics", []))
         self.session_source_text = resp.get("resolved_source_text", "")
@@ -1507,14 +1507,15 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             self.current_topic         = first_q["question"].get("topic", self.current_topic)
             self.current_difficulty    = first_q["question"].get("difficulty", self.current_difficulty)
             return {
-                "success":          True,
-                "question":         first_q["question"],
-                "questions_seen":   0,
-                "max_questions":    self.session_target_questions or self.max_questions,
+                "success": True,
+                "question": first_q["question"],
+                "questions_seen": 0,
+                "max_questions": self.session_target_questions or self.max_questions,
                 "current_difficulty": self.current_difficulty,
+                "selected_mode": resp.get("selected_mode", selected_mode),
+                "effective_mode": resp.get("effective_mode", selected_mode),
             }
 
-        # Fallback: let JS call get_question
         return {"success": True, "question": None}
 
     @XBlock.json_handler

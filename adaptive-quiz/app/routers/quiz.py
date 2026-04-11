@@ -170,6 +170,7 @@ async def _create_session_history(
     start_difficulty: int,
     target_questions: int,
     selected_content_ids: list[str],
+    selected_mode: str,
 ) -> str:
     db = get_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -198,6 +199,7 @@ async def _create_session_history(
         "weakest_topic_this_session": None,
         "strongest_topic_this_session": None,
         "recommendation": None,
+        "selected_mode": selected_mode,
     }
 
     await db.student_session_history.insert_one(doc)
@@ -355,6 +357,7 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "recommendation": doc.get("recommendation"),
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
+        "selected_mode": doc.get("selected_mode", "normal_practice"),
     }
 
     if include_questions:
@@ -514,7 +517,13 @@ async def submit(req: SubmitRequest):
         for topic in allowed_topics
     }
 
-    next_topic, next_mode = select_next_topic(scoped_mastery)
+    current_mode = state.get("current_session_mode", "normal_practice")
+    next_topic, next_mode = select_next_topic(
+        scoped_mastery,
+        mode=current_mode,
+        recent_answers=state.get("recent_answers", []),
+        total_answers=state.get("total_answers", 0),
+    )
     next_difficulty = state["current_difficulty"]
     updated_mastery = state["topic_mastery"].get(req.topic, 0.5)
 
@@ -669,9 +678,9 @@ async def session_start(req: GenerateRequest):
     Resolve content, check diagnostic status, and decide what happens next.
 
     If all selected content items have already been diagnosed at their current
-    version → create session immediately and return first question (legacy path).
+    version -> create session immediately and return session metadata.
 
-    If any item is new or has been updated since last diagnostic →
+    If any item is new or has been updated since last diagnostic ->
     do NOT create session_history yet. Return diagnostic metadata only.
     The XBlock runs the diagnostic, then calls /session/finalize.
     """
@@ -683,10 +692,16 @@ async def session_start(req: GenerateRequest):
             detail="Please select at least one content item.",
         )
 
-    # ── Resolve content items by real Mongo _id ───────────────────
-    resolved_topics:      list[str]  = []
-    resolved_source_text: str        = ""
-    diagnostic_items:     list[dict] = []
+    requested_mode = (
+        req.mode
+        if req.mode in {"auto", "normal_practice", "weakness_review", "challenge"}
+        else "normal_practice"
+    )
+
+    # Resolve selected content items by real Mongo _id
+    resolved_topics: list[str] = []
+    resolved_source_text: str = ""
+    diagnostic_items: list[dict] = []
 
     for content_id in req.content_ids:
         try:
@@ -695,35 +710,40 @@ async def session_start(req: GenerateRequest):
             continue
 
         item = await db.course_content.find_one({
-        "_id": oid,
-        "course_id": req.course_id,
-        "active": True,
+            "_id": oid,
+            "course_id": req.course_id,
+            "active": True,
         })
         if not item:
             continue
 
-        topics      = item.get("topics", [])
+        topics = item.get("topics", [])
         source_text = item.get("source_text", "")
-        version = item.get("updated_at") or item.get("uploaded_at") or str(item["_id"])
+        source_version = (
+            item.get("updated_at")
+            or item.get("uploaded_at")
+            or str(item["_id"])
+        )
 
         resolved_topics.extend(topics)
         resolved_source_text += "\n\n" + source_text
 
         diagnostic_items.append({
-            "content_id":     str(item["_id"]),
-            "title":          item.get("title", ""),
-            "topics":         topics,
-            "source_text":    source_text,
-            "source_version": version,
+            "content_id": str(item["_id"]),
+            "title": item.get("title", ""),
+            "topics": topics,
+            "source_text": source_text,
+            "source_version": source_version,
         })
 
-    # Deduplicate topics
-    seen, deduped = set(), []
-    for t in resolved_topics:
-        if t not in seen:
-            seen.add(t)
-            deduped.append(t)
-    resolved_topics = deduped
+    # Deduplicate topics while preserving order
+    seen = set()
+    deduped_topics = []
+    for topic in resolved_topics:
+        if topic not in seen:
+            seen.add(topic)
+            deduped_topics.append(topic)
+    resolved_topics = deduped_topics
 
     if not resolved_topics:
         raise HTTPException(
@@ -731,27 +751,19 @@ async def session_start(req: GenerateRequest):
             detail="No active content found for the selected items.",
         )
 
-    # ── Get/create student state ──────────────────────────────────
+    # Load or create state
     state = await _get_state(req.student_id, req.course_id, resolved_topics)
+
+    if "topic_mastery_source" not in state:
+        state["topic_mastery_source"] = {}
 
     for topic in resolved_topics:
         if topic not in state["topic_mastery"]:
             state["topic_mastery"][topic] = 0.5
-        if "topic_mastery_source" not in state:
-            state["topic_mastery_source"] = {}
         if topic not in state["topic_mastery_source"]:
             state["topic_mastery_source"][topic] = "default_prior"
 
-    state["session_topics"]  = resolved_topics
-    # DO NOT increment session_count here — deferred to finalize
-
-    state["current_difficulty"] = select_session_start_difficulty(
-    state.get("topic_mastery", {}),
-    resolved_topics,
-)
-    await _save_state(state)
-
-    # ── Check which items need diagnostic ────────────────────────
+    # Determine which selected items still need diagnostic
     items_needing_diagnostic = [
         item for item in diagnostic_items
         if not is_content_diagnosed(
@@ -761,46 +773,82 @@ async def session_start(req: GenerateRequest):
     ]
     diagnostic_needed = len(items_needing_diagnostic) > 0
 
-    if not diagnostic_needed:
-        # All items already diagnosed — go straight to session creation
-        session_id = await _create_session_history(
-            student_id           = req.student_id,
-            course_id            = req.course_id,
-            session_topics       = resolved_topics,
-            mastery_before       = {t: state["topic_mastery"].get(t, 0.5) for t in resolved_topics},
-            start_difficulty     = state["current_difficulty"],
-            target_questions     = req.question_count,
-            selected_content_ids = req.content_ids,
-        )
-        state["session_count"] = state.get("session_count", 0) + 1
-        await _save_state(state)
+    # Pick starting topic order + difficulty for this session scope
+    scoped_mastery = {
+        topic: state["topic_mastery"].get(topic, 0.5)
+        for topic in resolved_topics
+    }
 
-        for topic in resolved_topics:
-            asyncio.create_task(
-                _replenish_cache(topic, state["current_difficulty"],
-                                 req.course_id, resolved_source_text, target=3)
-            )
+    start_topic, effective_mode = select_next_topic(
+        scoped_mastery,
+        mode=requested_mode,
+        recent_answers=state.get("recent_answers", []),
+        total_answers=state.get("total_answers", 0),
+    )
 
+    resolved_topics = [start_topic] + [t for t in resolved_topics if t != start_topic]
+
+    state["session_topics"] = resolved_topics
+    state["current_session_mode"] = requested_mode
+    state["current_difficulty"] = select_session_start_difficulty(
+        state.get("topic_mastery", {}),
+        resolved_topics,
+        mode=requested_mode,
+    )
+
+    await _save_state(state)
+
+    if diagnostic_needed:
         return {
-            "diagnostic_needed":   False,
-            "session_id":          session_id,
-            "topics":              resolved_topics,
+            "diagnostic_needed": True,
+            "diagnostic_items": items_needing_diagnostic,
+            "diagnostic_questions_per_item": DIAGNOSTIC_QUESTION_COUNT,
+            "all_content_ids": req.content_ids,
+            "question_count": req.question_count,
             "resolved_source_text": resolved_source_text,
-            "current_difficulty":  state["current_difficulty"],
-            "topic_mastery":       state["topic_mastery"],
-            "irt_active":          state["irt_active"],
-            "cache_filling":       True,
+            "topics": resolved_topics,
+            "selected_mode": requested_mode,
+            "effective_mode": effective_mode,
+            "current_difficulty": state["current_difficulty"],
         }
 
-    # Diagnostic needed — return items, hold off session creation
+    # No diagnostic needed -> create session immediately
+    session_id = await _create_session_history(
+        student_id=req.student_id,
+        course_id=req.course_id,
+        session_topics=resolved_topics,
+        mastery_before={t: state["topic_mastery"].get(t, 0.5) for t in resolved_topics},
+        start_difficulty=state["current_difficulty"],
+        target_questions=req.question_count,
+        selected_content_ids=req.content_ids,
+        selected_mode=requested_mode,
+    )
+
+    state["session_count"] = state.get("session_count", 0) + 1
+    await _save_state(state)
+
+    for topic in resolved_topics:
+        asyncio.create_task(
+            _replenish_cache(
+                topic,
+                state["current_difficulty"],
+                req.course_id,
+                resolved_source_text,
+                target=3,
+            )
+        )
+
     return {
-        "diagnostic_needed":              True,
-        "diagnostic_items":               items_needing_diagnostic,
-        "diagnostic_questions_per_item":  DIAGNOSTIC_QUESTION_COUNT,
-        "all_content_ids":                req.content_ids,
-        "question_count":                 req.question_count,
-        "resolved_source_text":           resolved_source_text,
-        "topics":                         resolved_topics,
+        "diagnostic_needed": False,
+        "session_id": session_id,
+        "topics": resolved_topics,
+        "resolved_source_text": resolved_source_text,
+        "current_difficulty": state["current_difficulty"],
+        "topic_mastery": state["topic_mastery"],
+        "irt_active": state["irt_active"],
+        "cache_filling": True,
+        "selected_mode": requested_mode,
+        "effective_mode": effective_mode,
     }
     
 @router.post("/diagnostic/generate")
@@ -893,103 +941,151 @@ async def session_finalize(req: SessionFinalizeRequest):
     """
     db = get_db()
 
-    # Re-resolve content to get topics + source_text (by real _id)
-    resolved_topics:      list[str] = []
-    resolved_source_text: str       = ""
+    requested_mode = (
+        req.mode
+        if req.mode in {"auto", "normal_practice", "weakness_review", "challenge"}
+        else "normal_practice"
+    )
+
+    # Re-resolve selected content by real _id
+    resolved_topics: list[str] = []
+    resolved_source_text: str = ""
+    resolved_items: list[dict] = []
 
     for content_id in req.content_ids:
         try:
             oid = ObjectId(content_id)
         except Exception:
             continue
+
         item = await db.course_content.find_one({
-        "_id": oid,
-        "course_id": req.course_id,
-        "active": True,
+            "_id": oid,
+            "course_id": req.course_id,
+            "active": True,
         })
         if not item:
             continue
+
         resolved_topics.extend(item.get("topics", []))
         resolved_source_text += "\n\n" + item.get("source_text", "")
 
-    seen, deduped = set(), []
-    for t in resolved_topics:
-        if t not in seen:
-            seen.add(t)
-            deduped.append(t)
-    resolved_topics = deduped
+        resolved_items.append({
+            "content_id": str(item["_id"]),
+            "source_version": (
+                item.get("updated_at")
+                or item.get("uploaded_at")
+                or str(item["_id"])
+            ),
+        })
+
+    # Deduplicate topics while preserving order
+    seen = set()
+    deduped_topics = []
+    for topic in resolved_topics:
+        if topic not in seen:
+            seen.add(topic)
+            deduped_topics.append(topic)
+    resolved_topics = deduped_topics
 
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
 
     state = await _get_state(req.student_id, req.course_id, resolved_topics)
 
+    if "topic_mastery_source" not in state:
+        state["topic_mastery_source"] = {}
+
     for topic in resolved_topics:
         if topic not in state["topic_mastery"]:
             state["topic_mastery"][topic] = 0.5
+        if topic not in state["topic_mastery_source"]:
+            state["topic_mastery_source"][topic] = "default_prior"
+
+    # Enforce that every selected content item is diagnosed at its current version
+    for item in resolved_items:
+        content_key = make_content_key(item["content_id"], item["source_version"])
+        if not is_content_diagnosed(state, content_key):
+            raise HTTPException(
+                status_code=422,
+                detail="Diagnostic incomplete for one or more selected lectures."
+            )
+
+    # Pick mode-aware starting topic + difficulty
+    scoped_mastery = {
+        topic: state["topic_mastery"].get(topic, 0.5)
+        for topic in resolved_topics
+    }
+
+    start_topic, effective_mode = select_next_topic(
+        scoped_mastery,
+        mode=requested_mode,
+        recent_answers=state.get("recent_answers", []),
+        total_answers=state.get("total_answers", 0),
+    )
+
+    resolved_topics = [start_topic] + [t for t in resolved_topics if t != start_topic]
 
     state["session_topics"] = resolved_topics
+    state["current_session_mode"] = requested_mode
     state["current_difficulty"] = select_session_start_difficulty(
         state.get("topic_mastery", {}),
         resolved_topics,
+        mode=requested_mode,
     )
-    state["session_count"] = state.get("session_count", 0) + 1
-    await _save_state(state)
 
-    mastery_before = {t: state["topic_mastery"].get(t, 0.5) for t in resolved_topics}
-    
-    content_key = make_content_key(
-    str(item["_id"]),
-    item.get("updated_at") or item.get("uploaded_at") or str(item["_id"]),
-)
-
-    if not is_content_diagnosed(state, content_key):
-        raise HTTPException(
-            status_code=422,
-            detail="Diagnostic incomplete for one or more selected lectures."
-        )
+    mastery_before = {
+        t: state["topic_mastery"].get(t, 0.5)
+        for t in resolved_topics
+    }
 
     session_id = await _create_session_history(
-        student_id           = req.student_id,
-        course_id            = req.course_id,
-        session_topics       = resolved_topics,
-        mastery_before       = mastery_before,
-        start_difficulty     = state["current_difficulty"],
-        target_questions     = req.question_count,
-        selected_content_ids = req.content_ids,
+        student_id=req.student_id,
+        course_id=req.course_id,
+        session_topics=resolved_topics,
+        mastery_before=mastery_before,
+        start_difficulty=state["current_difficulty"],
+        target_questions=req.question_count,
+        selected_content_ids=req.content_ids,
+        selected_mode=requested_mode,
     )
+
+    state["session_count"] = state.get("session_count", 0) + 1
+    await _save_state(state)
 
     for topic in resolved_topics:
         asyncio.create_task(
             _replenish_cache(
-                topic, state["current_difficulty"],
-                req.course_id, resolved_source_text, target=3
+                topic,
+                state["current_difficulty"],
+                req.course_id,
+                resolved_source_text,
+                target=3,
             )
         )
 
-    # Choose first topic and fetch first question
     first_topic = resolved_topics[0]
-    state["session_topics"] = resolved_topics
 
     gen_resp = await _generate_first_question(
-        student_id   = req.student_id,
-        course_id    = req.course_id,
-        topic        = first_topic,
-        difficulty   = state["current_difficulty"],
-        source_text  = resolved_source_text,
-        session_id   = session_id,
-        max_questions= req.question_count,
+        student_id=req.student_id,
+        course_id=req.course_id,
+        topic=first_topic,
+        difficulty=state["current_difficulty"],
+        source_text=resolved_source_text,
+        session_id=session_id,
+        max_questions=req.question_count,
     )
 
     return {
-        "success":              True,
-        "session_id":           session_id,
-        "topics":               resolved_topics,
+        "success": True,
+        "session_id": session_id,
+        "topics": resolved_topics,
         "resolved_source_text": resolved_source_text,
-        "current_difficulty":   state["current_difficulty"],
-        "topic_mastery":        state["topic_mastery"],
-        "irt_active":           state["irt_active"],
-        "first_question":       gen_resp,
+        "current_difficulty": state["current_difficulty"],
+        "topic_mastery": state["topic_mastery"],
+        "irt_active": state["irt_active"],
+        "first_question": gen_resp,
+        "selected_mode": requested_mode,
+        "effective_mode": effective_mode,
     }
 
 @router.post("/support/explain")
