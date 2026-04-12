@@ -844,6 +844,29 @@
   margin: 0 0 16px;
 }
 
+.aq-explanation-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--aq-text-muted);
+}
+
+.aq-inline-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(43, 78, 222, .16);
+  border-top-color: var(--aq-primary);
+  border-radius: 50%;
+  animation: aq-spin .7s linear infinite;
+  flex: 0 0 auto;
+}
+
+.aq-explain-status {
+  margin: -8px 0 16px;
+  font-size: .78rem;
+  color: var(--aq-text-muted);
+}
+
 .aq-mastery-row {
   display: flex;
   align-items: center;
@@ -908,6 +931,17 @@
 .aq-btn-support:hover {
   background: var(--aq-primary);
   color: #fff;
+}
+
+.aq-btn-support-disabled,
+.aq-btn-support:disabled {
+  opacity: .65;
+  cursor: wait;
+}
+
+.aq-btn-support:disabled:hover {
+  background: transparent;
+  color: var(--aq-primary);
 }
 
 /* narrative bridge */

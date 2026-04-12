@@ -742,10 +742,11 @@ async def submit(req: SubmitRequest):
         next_topic_mastery=state["topic_mastery"].get(next_topic, 0.5),
     )
 
+    support_features.append("explain_simpler")
+
     if not is_correct:
         # Always show normal explanation and offer a simpler version immediately
         support_features.append("explanation")
-        support_features.append("explain_simpler")
 
         # If the learner is struggling repeatedly, offer reinforcement
         if consecutive_wrong >= 2:

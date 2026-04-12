@@ -32,6 +32,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     historySessions: [],
     historyPage: 0,
     historyPageSize: 3,
+    explainSimplerPending: false,
   };
 
   var reviewState = {
@@ -362,6 +363,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var expEl = $('#aq-explanation');
     if (expEl) expEl.textContent = data.explanation || '';
+    hideExplainStatus();
 
     var bridgeWrap = $('#aq-narrative-bridge');
     var bridgeText = $('#aq-narrative-text');
@@ -423,10 +425,64 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function makeSupportBtn(label, handler) {
     var btn = document.createElement('button');
+    btn.type = 'button';
     btn.className = 'aq-btn-support';
     btn.textContent = label;
-    btn.onclick = handler;
+    btn.setAttribute('data-default-label', label);
+    btn.onclick = function () { handler(btn); };
     return btn;
+  }
+
+  function setExplanationText(text) {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return;
+    expEl.classList.remove('aq-explanation-loading');
+    expEl.textContent = text || '';
+  }
+
+  function setExplanationLoading(message) {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return;
+    expEl.classList.add('aq-explanation-loading');
+    expEl.innerHTML =
+      '<span class="aq-inline-spinner" aria-hidden="true"></span>' +
+      '<span>' + escapeHtml(message || 'Simplifying explanation…') + '</span>';
+  }
+
+  function getExplainStatusEl() {
+    var statusEl = $('#aq-explain-status');
+    if (statusEl) return statusEl;
+
+    var expEl = $('#aq-explanation');
+    if (!expEl || !expEl.parentNode) return null;
+
+    statusEl = document.createElement('div');
+    statusEl.id = 'aq-explain-status';
+    statusEl.className = 'aq-explain-status aq-hidden';
+    expEl.parentNode.insertBefore(statusEl, expEl.nextSibling);
+    return statusEl;
+  }
+
+  function showExplainStatus(message) {
+    var statusEl = getExplainStatusEl();
+    if (!statusEl) return;
+    statusEl.textContent = message || '';
+    statusEl.classList.remove('aq-hidden');
+  }
+
+  function hideExplainStatus() {
+    var statusEl = getExplainStatusEl();
+    if (!statusEl) return;
+    statusEl.textContent = '';
+    statusEl.classList.add('aq-hidden');
+  }
+
+  function setExplainSimplerButtonState(btn, isLoading) {
+    if (!btn) return;
+    var defaultLabel = btn.getAttribute('data-default-label') || '💬 Simpler explanation';
+    btn.disabled = !!isLoading;
+    btn.classList.toggle('aq-btn-support-disabled', !!isLoading);
+    btn.textContent = isLoading ? '💬 Simplifying…' : defaultLabel;
   }
 
   function formatDateTime(isoString) {
@@ -657,15 +713,37 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
-  function handleExplainSimpler() {
+  function handleExplainSimpler(btn) {
+    if (state.explainSimplerPending) return;
+
+    var expEl = $('#aq-explanation');
+    var originalExplanation = expEl ? expEl.textContent : '';
+
+    state.explainSimplerPending = true;
+    hideExplainStatus();
+    setExplainSimplerButtonState(btn, true);
+    setExplanationLoading('Simplifying explanation...');
+
     jQuery.ajax({
       type: 'POST', url: urlExplain,
       data: JSON.stringify({}), contentType: 'application/json',
       success: function (data) {
-        if (data.success) {
-          var expEl = $('#aq-explanation');
-          if (expEl) expEl.textContent = data.simpler_explanation;
+        state.explainSimplerPending = false;
+        setExplainSimplerButtonState(btn, false);
+
+        if (data && data.success) {
+          setExplanationText(data.simpler_explanation);
+          hideExplainStatus();
+          return;
         }
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not simplify the explanation just now.');
+      },
+      error: function () {
+        state.explainSimplerPending = false;
+        setExplainSimplerButtonState(btn, false);
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not simplify the explanation just now.');
       }
     });
   }
