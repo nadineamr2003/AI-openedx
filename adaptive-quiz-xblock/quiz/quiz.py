@@ -1599,6 +1599,9 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "strongest_topic_this_session": submit_resp.get("strongest_topic_this_session"),
             "session_accuracy": submit_resp.get("session_accuracy"),
             "avg_time_spent_ms": submit_resp.get("avg_time_spent_ms"),
+            "lectures_practised_count": submit_resp.get("lectures_practised_count"),
+            "topics_practised_count": submit_resp.get("topics_practised_count"),
+            "content_mastery_summaries": submit_resp.get("content_mastery_summaries", []),
             "narrative_bridge": submit_resp.get("narrative_bridge"),
         }
 

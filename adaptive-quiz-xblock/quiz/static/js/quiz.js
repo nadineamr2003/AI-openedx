@@ -802,12 +802,64 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     wrap.classList.remove('aq-hidden');
   }
 
+  function renderLectureMasterySummary(items) {
+    var wrap = $('#aq-results-lecture-summary');
+    var listEl = $('#aq-results-lecture-list');
+    if (!wrap || !listEl) return;
+
+    listEl.innerHTML = '';
+
+    if (!items || items.length === 0) {
+      wrap.classList.add('aq-hidden');
+      return;
+    }
+
+    items.forEach(function (item) {
+      var beforePct = Math.round((item.avg_mastery_before || 0) * 100);
+      var afterPct = Math.round((item.avg_mastery_after || 0) * 100);
+      var deltaPct = Math.round((item.mastery_delta || 0) * 100);
+      var deltaClass = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat';
+      var deltaArrow = deltaPct > 0 ? '↑' : deltaPct < 0 ? '↓' : '→';
+      var deltaLabel = deltaPct > 0 ? '+' + deltaPct + '%' : deltaPct + '%';
+      var topicCount = item.topic_count || 0;
+
+      var card = document.createElement('div');
+      card.className = 'aq-lecture-change-card';
+      card.innerHTML =
+        '<div class="aq-lecture-change-top">' +
+        '<div>' +
+        '<div class="aq-lecture-change-title">' + escapeHtml(item.title || 'Selected Lecture') + '</div>' +
+        '<div class="aq-lecture-change-meta">' + topicCount + ' topic' + (topicCount === 1 ? '' : 's') + '</div>' +
+        '</div>' +
+        '<span class="aq-lecture-change-delta ' + deltaClass + '">' + deltaArrow + ' ' + deltaLabel + '</span>' +
+        '</div>' +
+        '<div class="aq-lecture-change-values">' + beforePct + '% → ' + afterPct + '%</div>';
+
+      listEl.appendChild(card);
+    });
+
+    wrap.classList.remove('aq-hidden');
+  }
+
   // ── Results ────────────────────────────────────────────────────────
   function showResults(data) {
     var score = data.session_score || state.sessionScore;
     var total = state.maxQuestionsCurrent;
     var pct = Math.round((score / total) * 100);
-    var incorrect = total - score;
+    var sessionAccuracy = typeof data.session_accuracy === 'number'
+      ? Math.round(data.session_accuracy * 100)
+      : pct;
+    var lecturesPractised = data.lectures_practised_count;
+    var topicsPractised = data.topics_practised_count;
+    var lectureSummaries = data.content_mastery_summaries || [];
+
+    if (typeof lecturesPractised !== 'number') {
+      lecturesPractised = lectureSummaries.length;
+    }
+
+    if (typeof topicsPractised !== 'number') {
+      topicsPractised = Array.isArray(data.practiced_topics) ? data.practiced_topics.length : 0;
+    }
 
     var emojiEl = $('#aq-result-emoji');
     var msgEl = $('#aq-results-msg') || $('#aq-score-msg');
@@ -831,11 +883,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     // Stats
     var els = {
-      '#aq-summary-accuracy': pct + '%',
-      '#aq-summary-incorrect': incorrect,
-      '#aq-summary-topic': state.lastTopic || 'General',
-      '#aq-summary-mastery': state.lastMasteryPct + '%',
-      '#aq-summary-difficulty': DIFF_LABEL[state.lastDifficulty] || 'Medium'
+      '#aq-summary-accuracy': sessionAccuracy + '%',
+      '#aq-summary-avg-time': formatMs(data.avg_time_spent_ms),
+      '#aq-summary-lectures': String(lecturesPractised || 0),
+      '#aq-summary-topics': String(topicsPractised || 0)
     };
     Object.keys(els).forEach(function (sel) {
       var el = element.querySelector(sel);
@@ -846,6 +897,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (pb) pb.style.width = '100%';
 
     renderSessionInsight(data);
+    renderLectureMasterySummary(lectureSummaries);
 
     showScreen('results');
   }
@@ -960,7 +1012,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
         '<div class="aq-session-card-grid">' +
         '<div class="aq-session-mini">' +
-        '<span class="aq-session-mini-label">Strongest Topic</span>' +
+        '<span class="aq-session-mini-label">Best Performed Topic</span>' +
         '<span class="aq-session-mini-value">' + escapeHtml(session.strongest_topic_this_session || '—') + '</span>' +
         '</div>' +
         '<div class="aq-session-mini">' +

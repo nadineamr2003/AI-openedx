@@ -1111,6 +1111,76 @@
   flex-wrap: wrap;
 }
 
+.aq-results-lecture-summary {
+  margin-bottom: 24px;
+  text-align: left;
+}
+
+.aq-lecture-change-list {
+  display: grid;
+  gap: 10px;
+}
+
+.aq-lecture-change-card {
+  background: var(--aq-bg);
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-sm);
+  padding: 14px 16px;
+}
+
+.aq-lecture-change-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.aq-lecture-change-title {
+  font-size: .92rem;
+  font-weight: 700;
+  color: var(--aq-text);
+  line-height: 1.4;
+}
+
+.aq-lecture-change-meta {
+  font-size: .76rem;
+  color: var(--aq-text-muted);
+  margin-top: 3px;
+}
+
+.aq-lecture-change-values {
+  font-size: .88rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.aq-lecture-change-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: .75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.aq-lecture-change-delta.up {
+  background: var(--aq-success-bg);
+  color: var(--aq-success);
+}
+
+.aq-lecture-change-delta.down {
+  background: var(--aq-danger-bg);
+  color: var(--aq-danger);
+}
+
+.aq-lecture-change-delta.flat {
+  background: var(--aq-primary-light);
+  color: var(--aq-primary);
+}
+
 /* ── Dashboard ───────────────────────────────────────────────────────── */
 .aq-mastery-section {
   margin: 24px 0 0;

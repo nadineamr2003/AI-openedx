@@ -425,6 +425,68 @@ def _build_session_recommendation(
 
     return None
 
+
+async def _build_content_mastery_summaries(doc: dict, topic_mastery_after: dict) -> list[dict]:
+    db = get_db()
+
+    selected_content_ids = doc.get("selected_content_ids", [])
+    selected_content_titles = doc.get("selected_content_titles", [])
+    course_id = doc.get("course_id")
+    topic_mastery_before = doc.get("topic_mastery_before", {}) or {}
+
+    if not selected_content_ids or not course_id:
+        return []
+
+    title_by_id = {}
+    for idx, content_id in enumerate(selected_content_ids):
+        if idx < len(selected_content_titles):
+            title_by_id[content_id] = selected_content_titles[idx]
+
+    object_ids = []
+    for content_id in selected_content_ids:
+        try:
+            object_ids.append(ObjectId(content_id))
+        except Exception:
+            continue
+
+    docs_by_id = {}
+    if object_ids:
+        content_docs = await db.course_content.find({
+            "_id": {"$in": object_ids},
+            "course_id": course_id,
+        }).to_list(length=len(object_ids))
+        docs_by_id = {str(item["_id"]): item for item in content_docs}
+
+    summaries = []
+    for content_id in selected_content_ids:
+        content_doc = docs_by_id.get(content_id)
+        topics = content_doc.get("topics", []) if content_doc else []
+        matched_topics = [
+            topic for topic in topics
+            if topic in topic_mastery_before and topic in topic_mastery_after
+        ]
+
+        if not matched_topics:
+            continue
+
+        avg_before = sum(topic_mastery_before[topic] for topic in matched_topics) / len(matched_topics)
+        avg_after = sum(topic_mastery_after[topic] for topic in matched_topics) / len(matched_topics)
+
+        summaries.append({
+            "content_id": content_id,
+            "title": (
+                (content_doc or {}).get("title")
+                or title_by_id.get(content_id)
+                or "Selected Lecture"
+            ),
+            "avg_mastery_before": round(avg_before, 4),
+            "avg_mastery_after": round(avg_after, 4),
+            "mastery_delta": round(avg_after - avg_before, 4),
+            "topic_count": len(matched_topics),
+        })
+
+    return summaries
+
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
     db = get_db()
     doc = await db.student_session_history.find_one({"session_id": session_id})
@@ -448,6 +510,10 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         if topic and topic not in seen:
             seen.add(topic)
             practiced_topics.append(topic)
+
+    lectures_practised_count = len(doc.get("selected_content_ids", []) or [])
+    topics_practised_count = len(practiced_topics)
+    content_mastery_summaries = await _build_content_mastery_summaries(doc, topic_mastery_after)
 
     topic_session_stats = _compute_topic_session_stats(question_log)
 
@@ -501,6 +567,9 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "avg_time_spent_ms": avg_time,
                 "topic_mastery_after": topic_mastery_after,
                 "practiced_topics": practiced_topics,
+                "lectures_practised_count": lectures_practised_count,
+                "topics_practised_count": topics_practised_count,
+                "content_mastery_summaries": content_mastery_summaries,
                 "weakest_topic_this_session": weakest_topic,
                 "strongest_topic_this_session": strongest_topic,
                 "recommendation": recommendation,
@@ -513,6 +582,9 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         "accuracy": accuracy,
         "avg_time_spent_ms": avg_time,
         "practiced_topics": practiced_topics,
+        "lectures_practised_count": lectures_practised_count,
+        "topics_practised_count": topics_practised_count,
+        "content_mastery_summaries": content_mastery_summaries,
         "weakest_topic_this_session": weakest_topic,
         "strongest_topic_this_session": strongest_topic,
         "recommendation": recommendation,
@@ -535,6 +607,9 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "recommendation": doc.get("recommendation"),
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
+        "lectures_practised_count": doc.get("lectures_practised_count"),
+        "topics_practised_count": doc.get("topics_practised_count"),
+        "content_mastery_summaries": doc.get("content_mastery_summaries", []),
         "selected_mode": doc.get("selected_mode", "normal_practice"),
         "selected_content_titles": doc.get("selected_content_titles", []),
     }
@@ -807,6 +882,9 @@ async def submit(req: SubmitRequest):
         strongest_topic_this_session=session_summary.get("strongest_topic_this_session"),
         session_accuracy=session_summary.get("accuracy"),
         avg_time_spent_ms=session_summary.get("avg_time_spent_ms"),
+        lectures_practised_count=session_summary.get("lectures_practised_count"),
+        topics_practised_count=session_summary.get("topics_practised_count"),
+        content_mastery_summaries=session_summary.get("content_mastery_summaries"),
         narrative_bridge=narrative_bridge,
     )
 
