@@ -24,6 +24,7 @@ class SubmitRequest(BaseModel):
     topic:            str
     difficulty:       int
     time_spent_ms:    int
+    time_context:     str | None = None
     session_id:       str | None = None
 
 

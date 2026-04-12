@@ -1541,6 +1541,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
         student_id = self._student_id()
         time_spent_ms = int(data.get("time_spent_ms", 15000))
+        time_context = data.get("time_context")
 
         submit_resp = self._api("/api/quiz/submit", payload={
         "student_id": student_id,
@@ -1554,6 +1555,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         "topic": self.current_topic,
         "difficulty": self.current_difficulty,
         "time_spent_ms": time_spent_ms,
+        "time_context": time_context,
         "session_id": self.active_session_id or None,
         })
 

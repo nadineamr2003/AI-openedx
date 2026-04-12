@@ -767,7 +767,8 @@ async def submit(req: SubmitRequest):
         state=state,
         topic=req.topic,
         correct=is_correct,
-        time_ms=req.time_spent_ms
+        time_ms=req.time_spent_ms,
+        time_context=req.time_context,
     )
 
     # Decide next parameters (scoped to current session topics)
@@ -818,14 +819,11 @@ async def submit(req: SubmitRequest):
     )
 
     support_features.append("explain_simpler")
+    support_features.append("one_more_like_this")
 
     if not is_correct:
         # Always show normal explanation and offer a simpler version immediately
         support_features.append("explanation")
-
-        # If the learner is struggling repeatedly, offer reinforcement
-        if consecutive_wrong >= 2:
-            support_features.append("one_more_like_this")
 
     session_complete = False
     session_summary = {}

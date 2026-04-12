@@ -1,6 +1,7 @@
 /* ── Adaptive Quiz XBlock — quiz.js ────────────────────────────────── */
 
 function AdaptiveQuizXBlock(runtime, element, initArgs) {
+  var LONG_TIME_CONTEXT_THRESHOLD_MS = 90 * 1000;
 
   var MAX_Q = initArgs.max_questions || 10;
   var DISPLAY_NAME = initArgs.display_name || 'GUC StudyPath';
@@ -33,6 +34,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     historyPage: 0,
     historyPageSize: 3,
     explainSimplerPending: false,
+    pendingAnswerKey: null,
+    pendingTimeSpentMs: null,
   };
 
   var reviewState = {
@@ -305,6 +308,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var fb = $('#aq-feedback');
     if (fb) fb.classList.add('aq-hidden');
+    hideTimeContextPrompt();
 
     showScreen('question');
   }
@@ -320,13 +324,51 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
 
     var timeSpentMs = Date.now() - (state.questionStart || Date.now());
+    if (timeSpentMs > LONG_TIME_CONTEXT_THRESHOLD_MS) {
+      state.pendingAnswerKey = selectedKey;
+      state.pendingTimeSpentMs = timeSpentMs;
+      showTimeContextPrompt();
+      return;
+    }
+
+    submitAnswer(selectedKey, timeSpentMs, null);
+  }
+
+  function submitAnswer(selectedKey, timeSpentMs, timeContext) {
+    hideTimeContextPrompt();
     jQuery.ajax({
       type: 'POST', url: urlSubmit,
-      data: JSON.stringify({ selected_answer: selectedKey, time_spent_ms: timeSpentMs }),
+      data: JSON.stringify({
+        selected_answer: selectedKey,
+        time_spent_ms: timeSpentMs,
+        time_context: timeContext || null
+      }),
       contentType: 'application/json',
       success: function (data) { renderFeedback(data, selectedKey); },
       error: function () { alert('Network error submitting answer.'); }
     });
+  }
+
+  function showTimeContextPrompt() {
+    var prompt = $('#aq-time-context');
+    if (prompt) prompt.classList.remove('aq-hidden');
+  }
+
+  function hideTimeContextPrompt() {
+    var prompt = $('#aq-time-context');
+    if (prompt) prompt.classList.add('aq-hidden');
+  }
+
+  function handleTimeContextChoice(timeContext) {
+    if (!state.pendingAnswerKey || state.pendingTimeSpentMs === null) return;
+
+    var selectedKey = state.pendingAnswerKey;
+    var timeSpentMs = state.pendingTimeSpentMs;
+
+    state.pendingAnswerKey = null;
+    state.pendingTimeSpentMs = null;
+
+    submitAnswer(selectedKey, timeSpentMs, timeContext);
   }
 
   function renderFeedback(data, selectedKey) {
@@ -406,7 +448,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       // otherwise the frontend score can diverge from finalized backend session history.
       if (!data.session_complete && features.indexOf('one_more_like_this') !== -1) {
         supportRow.appendChild(
-          makeSupportBtn('🔄 One more like this', handleSimilarQuestion)
+          makeSupportBtn('🔄 One more question like this', handleSimilarQuestion)
         );
       }
     }
@@ -1638,6 +1680,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   if (backResultsBtn) backResultsBtn.onclick = function () {
     showScreen(state.dashboardOrigin === 'results' ? 'results' : 'start');
   };
+
+  var timeThinkingBtn = $('#aq-time-thinking');
+  if (timeThinkingBtn) timeThinkingBtn.onclick = function () { handleTimeContextChoice('thinking'); };
+
+  var timeDistractedBtn = $('#aq-time-distracted');
+  if (timeDistractedBtn) timeDistractedBtn.onclick = function () { handleTimeContextChoice('distracted'); };
+
+  var timeSkipBtn = $('#aq-time-skip');
+  if (timeSkipBtn) timeSkipBtn.onclick = function () { handleTimeContextChoice('unknown'); };
 
   var dashRetryBtn = $('#aq-btn-dashboard-retry');
   if (dashRetryBtn) dashRetryBtn.onclick = function () { pickerMode = 'quiz'; loadCoursePicker(); };
