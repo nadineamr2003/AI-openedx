@@ -65,46 +65,147 @@ def _build_narrative_bridge(
     current_difficulty: int,
     next_difficulty: int,
     consecutive_wrong: int,
+    current_topic_mastery: float,
+    next_topic_mastery: float,
 ) -> str:
     current_diff_label = _difficulty_label(current_difficulty)
     next_diff_label = _difficulty_label(next_difficulty)
 
-    if is_correct:
+    mode = (next_mode or "normal_practice").lower()
+
+    def _topic_relation() -> str:
+        if next_topic == current_topic:
+            return "the same topic"
+        return next_topic
+
+    if mode == "weakness_review":
+        if is_correct:
+            if next_topic == current_topic:
+                if next_difficulty > current_difficulty:
+                    return (
+                        f"You are improving on {current_topic}, so weakness review keeps you there "
+                        f"and raises the challenge from {current_diff_label} to {next_diff_label}."
+                    )
+                return (
+                    f"You answered correctly, and weakness review keeps the focus on {current_topic} "
+                    f"to stabilise it through guided repetition."
+                )
+            return (
+                f"You answered correctly, and weakness review now rotates to {next_topic} "
+                f"because it is another area that still needs reinforcement."
+            )
+
+        if consecutive_wrong >= 2:
+            return (
+                f"Weakness review is staying close to {current_topic} because repeated errors suggest "
+                f"this concept still needs step-by-step support."
+            )
+
         if next_topic != current_topic:
             return (
-                f"You handled {current_topic} well, so the next question shifts to {next_topic} "
-                f"to keep your practice balanced at a {next_diff_label} level."
+                f"This answer suggests {next_topic} also needs reinforcement, so weakness review rotates there next."
             )
+
+        if next_difficulty < current_difficulty:
+            return (
+                f"Weakness review keeps you on {current_topic} and lowers the difficulty from "
+                f"{current_diff_label} to {next_diff_label} to rebuild confidence."
+            )
+
+        return (
+            f"Weakness review keeps the focus on {current_topic} so you can strengthen it before moving on."
+        )
+
+    if mode == "challenge":
+        if is_correct:
+            if next_topic != current_topic:
+                return (
+                    f"You handled {current_topic} well, so challenge mode now pushes you toward {next_topic}, "
+                    f"one of your stronger areas, at a {next_diff_label} level."
+                )
+            if next_difficulty > current_difficulty:
+                return (
+                    f"You answered correctly, so challenge mode keeps you on {current_topic} "
+                    f"and increases the difficulty from {current_diff_label} to {next_diff_label}."
+                )
+            return (
+                f"You answered correctly, so challenge mode continues on {current_topic} "
+                f"to stretch your understanding at a {next_diff_label} level."
+            )
+
+        if next_topic != current_topic:
+            return (
+                f"Even though that one was difficult, challenge mode keeps the session ambitious "
+                f"by moving to {_topic_relation()}."
+            )
+
+        if next_difficulty < current_difficulty:
+            return (
+                f"Challenge mode is still pushing your stronger path, but it eases from "
+                f"{current_diff_label} to {next_diff_label} so the stretch stays productive."
+            )
+
+        return (
+            f"Challenge mode keeps the pressure on {current_topic} so you continue working at the edge of mastery."
+        )
+
+    # normal_practice / auto-resolved normal
+    if is_correct:
+        if next_topic != current_topic:
+            if next_topic_mastery > 0.70:
+                return (
+                    f"You handled {current_topic} well, so normal practice briefly shifts to {next_topic} "
+                    f"for spaced review and retention at a {next_diff_label} level."
+                )
+            if next_topic_mastery < 0.45:
+                return (
+                    f"You handled {current_topic} well, and normal practice now checks in on {next_topic} "
+                    f"because it still looks weaker."
+                )
+            return (
+                f"You handled {current_topic} well, so normal practice moves to {next_topic} "
+                f"because it is a good next step for growth."
+            )
+
         if next_difficulty > current_difficulty:
             return (
-                f"You answered correctly, so the next question stays on {current_topic} "
-                f"but increases the challenge from {current_diff_label} to {next_diff_label}."
+                f"You answered correctly, so normal practice keeps the focus on {current_topic} "
+                f"and increases the challenge from {current_diff_label} to {next_diff_label}."
             )
+
         return (
-            f"You answered correctly, so the next question continues on {next_topic} "
-            f"at a {next_diff_label} level to strengthen this concept."
+            f"You answered correctly, so normal practice stays on {current_topic} "
+            f"to consolidate it at a {next_diff_label} level."
         )
 
     if consecutive_wrong >= 2:
         return (
-            f"You have been struggling with {current_topic}, so the next step keeps the focus on reinforcement "
-            f"before moving you forward."
+            f"Normal practice is slowing down around {current_topic} because repeated errors suggest "
+            f"this concept needs more guided reinforcement before moving on."
         )
 
     if next_topic != current_topic:
+        if next_topic_mastery > 0.70:
+            return (
+                f"Normal practice now shifts to {next_topic} as a spaced-review checkpoint, "
+                f"so the session stays balanced instead of drilling one area too long."
+            )
+        if next_topic_mastery < 0.45:
+            return (
+                f"This answer suggests {next_topic} needs attention, so normal practice redirects there next."
+            )
         return (
-            f"This answer suggests that {next_topic} needs attention, so the next question redirects your practice there."
+            f"Normal practice now moves to {next_topic} because it is the most useful next topic for progress."
         )
 
     if next_difficulty < current_difficulty:
         return (
-            f"This concept still needs support, so the next question stays on {current_topic} "
+            f"This concept still needs support, so normal practice stays on {current_topic} "
             f"and lowers the difficulty from {current_diff_label} to {next_diff_label}."
         )
 
     return (
-        f"This concept still needs support, so the next question continues on {current_topic} "
-        f"at a {next_diff_label} level for more guided practice."
+        f"Normal practice keeps the focus on {current_topic} so you can strengthen it before the session moves on."
     )
 
 async def _compute_overall_stats(student_id: str, course_id: str) -> dict:
@@ -637,7 +738,9 @@ async def submit(req: SubmitRequest):
         current_difficulty=req.difficulty,
         next_difficulty=next_difficulty,
         consecutive_wrong=consecutive_wrong,
-        )
+        current_topic_mastery=state["topic_mastery"].get(req.topic, 0.5),
+        next_topic_mastery=state["topic_mastery"].get(next_topic, 0.5),
+    )
 
     if not is_correct:
         # Always show normal explanation and offer a simpler version immediately
