@@ -9,9 +9,16 @@ from app.models.quiz import (
     DiagnosticItem, SessionFinalizeRequest,
 )
 from app.services.adaptation import (
-    get_initial_student_state, process_answer, select_next_topic,
-    make_content_key, is_content_diagnosed, get_diagnostic_difficulty,
-    apply_diagnostic_results, DIAGNOSTIC_QUESTION_COUNT,select_session_start_difficulty
+    get_initial_student_state,
+    process_answer,
+    select_next_topic,
+    make_content_key,
+    is_content_diagnosed,
+    apply_diagnostic_results,
+    diagnostic_target_question_count,
+    diagnostic_coverage_goal,
+    plan_diagnostic_question,
+    select_session_start_difficulty,
 )
 from app.services.ai_engine import (
     generate_question,
@@ -728,12 +735,17 @@ async def session_start(req: GenerateRequest):
         resolved_topics.extend(topics)
         resolved_source_text += "\n\n" + source_text
 
+        target_questions = diagnostic_target_question_count(len(topics))
+        coverage_goal = diagnostic_coverage_goal(len(topics), target_questions)
+
         diagnostic_items.append({
             "content_id": str(item["_id"]),
             "title": item.get("title", ""),
             "topics": topics,
             "source_text": source_text,
             "source_version": source_version,
+            "diagnostic_target_questions": target_questions,
+            "diagnostic_coverage_goal": coverage_goal,
         })
 
     # Deduplicate topics while preserving order
@@ -802,7 +814,9 @@ async def session_start(req: GenerateRequest):
         return {
             "diagnostic_needed": True,
             "diagnostic_items": items_needing_diagnostic,
-            "diagnostic_questions_per_item": DIAGNOSTIC_QUESTION_COUNT,
+            "diagnostic_questions_per_item": max(
+            (item["diagnostic_target_questions"] for item in items_needing_diagnostic),
+            default=0,),
             "all_content_ids": req.content_ids,
             "question_count": req.question_count,
             "resolved_source_text": resolved_source_text,
@@ -854,42 +868,47 @@ async def session_start(req: GenerateRequest):
 @router.post("/diagnostic/generate")
 async def diagnostic_generate(req: DiagnosticGenerateRequest):
     """
-    Generate one diagnostic placement question.
-    Always freshly generated — bypasses cache entirely.
-    Difficulty is determined by question index: [2, 3, 4].
+    Generate the next diagnostic question using a two-stage plan:
+      1. coverage
+      2. uncertainty refinement
     """
-    difficulty = get_diagnostic_difficulty(req.question_index)
+    topics = req.topics or ([req.topic] if req.topic else [])
+    if not topics:
+        raise HTTPException(status_code=422, detail="No topics provided for diagnostic generation.")
+
+    results_so_far = [r.model_dump() for r in req.results_so_far]
 
     try:
+        plan = plan_diagnostic_question(
+            topics=topics,
+            results_so_far=results_so_far,
+            question_index=req.question_index,
+            target_questions=req.target_questions,
+        )
+
         question = await generate_question(
-            topic=req.topic,
-            difficulty=difficulty,
+            topic=plan["topic"],
+            difficulty=plan["difficulty"],
             source_text=req.source_text,
         )
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
     return {
-        "success":        True,
-        "question":       question,
+        "success": True,
+        "question": question,
         "question_index": req.question_index,
-        "difficulty":     difficulty,
-        "total_questions": DIAGNOSTIC_QUESTION_COUNT,
+        "topic": plan["topic"],
+        "difficulty": plan["difficulty"],
+        "total_questions": plan["target_questions"],
+        "coverage_goal": plan["coverage_goal"],
+        "phase": plan["phase"],
+        "lecture_baseline_preview": plan["lecture_baseline_preview"],
     }
 
 
 @router.post("/diagnostic/complete")
 async def diagnostic_complete(req: DiagnosticCompleteRequest):
-    """
-    Finalise one content item's diagnostic.
-
-    - Computes lecture baseline from all results
-    - Applies topic-level offsets for directly-tested topics
-    - Untouched topics get baseline × shrink factor
-    - Stamps mastery_source = "diagnostic"
-    - Records diagnostic_status_by_content[content_key]
-    - Does NOT touch recent_answers or total_answers (separate evidence stream)
-    """
     if not req.topics:
         raise HTTPException(status_code=422, detail="No topics provided.")
 
@@ -899,32 +918,35 @@ async def diagnostic_complete(req: DiagnosticCompleteRequest):
     now_iso = datetime.now(timezone.utc).isoformat()
 
     state = apply_diagnostic_results(
-        state          = state,
-        topics         = req.topics,
-        results        = results_as_dicts,
-        content_id     = req.content_id,
-        source_version = req.source_version,
+        state=state,
+        topics=req.topics,
+        results=results_as_dicts,
+        content_id=req.content_id,
+        source_version=req.source_version,
     )
 
-    # Stamp the timestamp (apply_diagnostic_results leaves it None)
     content_key = make_content_key(req.content_id, req.source_version)
     state["diagnostic_status_by_content"][content_key]["timestamp"] = now_iso
 
     await _save_state(state)
 
-    topic_masteries = state["diagnostic_status_by_content"][content_key]["topic_masteries"]
-    baseline        = state["diagnostic_status_by_content"][content_key]["mastery"]
+    status = state["diagnostic_status_by_content"][content_key]
 
     return {
-        "success":            True,
-        "content_id":         req.content_id,
-        "content_key":        content_key,
-        "lecture_baseline":   baseline,
-        "lecture_label":      _mastery_label(baseline),
-        "topic_masteries":    topic_masteries,
-        "topics_calibrated":  req.topics,
-        "correct_answers":    sum(1 for r in req.results if r.correct),
-        "total_questions":    len(req.results),
+        "success": True,
+        "content_id": req.content_id,
+        "content_key": content_key,
+        "lecture_baseline": status["mastery"],
+        "lecture_label": _mastery_label(status["mastery"]),
+        "topic_masteries": status["topic_masteries"],
+        "topic_evidence_counts": status["topic_evidence_counts"],
+        "topic_uncertainty": status["topic_uncertainty"],
+        "topic_provisional_bands": status["topic_provisional_bands"],
+        "topics_calibrated": req.topics,
+        "correct_answers": sum(1 for r in req.results if r.correct),
+        "total_questions": len(req.results),
+        "expected_questions": status["expected_questions"],
+        "coverage_goal": status["coverage_goal"],
     }
 
 

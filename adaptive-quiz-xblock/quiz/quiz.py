@@ -1323,45 +1323,52 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     @XBlock.json_handler
     def get_diagnostic_question(self, data, suffix=""):
         """Fetch the current diagnostic question from the backend."""
-        items      = json.loads(self.diagnostic_items_json or "[]")
+        items = json.loads(self.diagnostic_items_json or "[]")
         item_index = self.diagnostic_item_index
-        q_index    = self.diagnostic_question_index
+        q_index = self.diagnostic_question_index
 
         if item_index >= len(items):
             return {"success": False, "error": "Diagnostic already complete."}
 
-        item   = items[item_index]
+        item = items[item_index]
         topics = item.get("topics", [])
         if not topics:
             return {"success": False, "error": "No topics for this content item."}
 
-        # Rotate topic across questions so each covers a different concept
-        topic = topics[q_index % len(topics)]
+        content_id = item.get("content_id", "")
+        all_results = json.loads(self.diagnostic_results_json or "{}")
+        results_so_far = all_results.get(content_id, [])
+        target_questions = int(item.get("diagnostic_target_questions", 5))
 
         resp = self._api("/api/quiz/diagnostic/generate", payload={
-            "student_id":     self._student_id(),
-            "course_id":      self._active_course_id(),
-            "topic":          topic,
+            "student_id": self._student_id(),
+            "course_id": self._active_course_id(),
             "question_index": q_index,
-            "source_text":    item.get("source_text", ""),
+            "topics": topics,
+            "source_text": item.get("source_text", ""),
+            "results_so_far": results_so_far,
+            "target_questions": target_questions,
         }, timeout=45)
 
         if not resp or not resp.get("success"):
             return {"success": False, "error": "Could not generate diagnostic question."}
 
         self.current_question_json = json.dumps(resp["question"])
-        self.current_topic         = topic
+        self.current_topic = resp.get("topic") or resp["question"].get("topic", "")
 
         return {
-            "success":          True,
-            "question":         resp["question"],
-            "question_index":   q_index,
-            "total_questions":  resp.get("total_questions", 3),
-            "item_index":       item_index,
-            "total_items":      len(items),
-            "content_id":       item.get("content_id", ""),
-            "content_title":    item.get("title", ""),
-            "difficulty":       resp.get("difficulty", 3),
+            "success": True,
+            "question": resp["question"],
+            "question_index": q_index,
+            "total_questions": resp.get("total_questions", target_questions),
+            "coverage_goal": resp.get("coverage_goal"),
+            "phase": resp.get("phase"),
+            "lecture_baseline_preview": resp.get("lecture_baseline_preview"),
+            "item_index": item_index,
+            "total_items": len(items),
+            "content_id": content_id,
+            "content_title": item.get("title", ""),
+            "difficulty": resp.get("difficulty", 3),
         }
 
 
@@ -1382,7 +1389,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         items         = json.loads(self.diagnostic_items_json or "[]")
         item_index    = self.diagnostic_item_index
         q_index       = self.diagnostic_question_index
-        total_q       = 3
+        total_q       = int(items[item_index].get("diagnostic_target_questions", 5)) if item_index < len(items) else 5
 
         content_id = items[item_index]["content_id"] if item_index < len(items) else ""
 

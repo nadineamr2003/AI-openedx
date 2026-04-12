@@ -50,9 +50,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     summaryPerItem: {},    // content_id → {title, correct, total, baseline, label, topicMasteries}
   };
 
+  function getDiagnosticTargetForItem(item) {
+    return parseInt((item && item.diagnostic_target_questions) || 0, 10) || 0;
+  }
+
+  function getDiagnosticTotalPlannedQuestions() {
+    return diagState.items.reduce(function (sum, item) {
+      return sum + getDiagnosticTargetForItem(item);
+    }, 0);
+  }
+
+  function getDiagnosticAnsweredBeforeCurrent() {
+    var sum = 0;
+    for (var i = 0; i < diagState.itemIndex; i++) {
+      sum += getDiagnosticTargetForItem(diagState.items[i]);
+    }
+    return sum;
+  }
+
   function $(sel) { return element.querySelector(sel); }
 
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content','mode', 'diagnostic', 'diagnostic-results'];
+  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
 
   function showScreen(name) {
     SCREENS.forEach(function (s) {
@@ -221,23 +239,23 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function setSelectedMode(mode) {
-  selectedMode = mode || 'normal_practice';
+    selectedMode = mode || 'normal_practice';
 
-  element.querySelectorAll('.aq-mode-card').forEach(function (card) {
-    card.classList.toggle('aq-mode-card-selected', card.getAttribute('data-mode') === selectedMode);
-  });
-}
-
-function initModePicker() {
-  var cards = element.querySelectorAll('.aq-mode-card');
-  cards.forEach(function (card) {
-    card.addEventListener('click', function () {
-      setSelectedMode(card.getAttribute('data-mode'));
+    element.querySelectorAll('.aq-mode-card').forEach(function (card) {
+      card.classList.toggle('aq-mode-card-selected', card.getAttribute('data-mode') === selectedMode);
     });
-  });
+  }
 
-  setSelectedMode('normal_practice');
-}
+  function initModePicker() {
+    var cards = element.querySelectorAll('.aq-mode-card');
+    cards.forEach(function (card) {
+      card.addEventListener('click', function () {
+        setSelectedMode(card.getAttribute('data-mode'));
+      });
+    });
+
+    setSelectedMode('normal_practice');
+  }
 
   // ── Question rendering ──────────────────────────────────────────────
   function updateHeader(question, seenNow) {
@@ -1117,11 +1135,11 @@ function initModePicker() {
     jQuery.ajax({
       type: 'POST', url: urlStart,
       data: JSON.stringify({
-  question_count: chosenCount,
-  selected_course_id: courseId,
-  content_ids: ids,
-  mode: mode || 'normal_practice'
-}),
+        question_count: chosenCount,
+        selected_course_id: courseId,
+        content_ids: ids,
+        mode: mode || 'normal_practice'
+      }),
       contentType: 'application/json',
       success: function (data) {
         if (data && data.diagnostic_needed) {
@@ -1141,7 +1159,7 @@ function initModePicker() {
     diagState.totalItems = diagState.items.length;
     diagState.itemIndex = 0;
     diagState.questionIndex = 0;
-    diagState.totalQuestions = data.diagnostic_questions_per_item || 3;
+    diagState.totalQuestions = getDiagnosticTotalPlannedQuestions();
     diagState.answered = false;
     diagState.summaryPerItem = {};
 
@@ -1151,28 +1169,37 @@ function initModePicker() {
   function loadDiagnosticQuestion() {
     setLoading('Preparing assessment question…');
     jQuery.ajax({
-      type: 'POST', url: urlGetDiagQ,
-      data: JSON.stringify({}), contentType: 'application/json',
+      type: 'POST',
+      url: urlGetDiagQ,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
       success: function (data) {
         if (!data.success) {
-          // Diagnostic question failed — skip to finalize gracefully
-          finalizeDiagnosticSession();
+          alert(data.error || 'Could not generate assessment question.');
+          showScreen('start');
           return;
         }
         renderDiagnosticQuestion(data);
       },
-      error: function () { finalizeDiagnosticSession(); }
+      error: function () {
+        alert('Could not generate assessment question.');
+        showScreen('start');
+      }
     });
   }
-
   function renderDiagnosticQuestion(data) {
     var q = data.question;
     diagState.answered = false;
     diagState.questionStart = Date.now();
     diagState.itemIndex = data.item_index || 0;
-diagState.questionIndex = data.question_index || 0;
+    diagState.questionIndex = data.question_index || 0;
 
-    // Header
+    var currentItemTarget = data.total_questions || getDiagnosticTargetForItem(diagState.items[diagState.itemIndex]);
+    var completedBeforeCurrent = getDiagnosticAnsweredBeforeCurrent();
+    var overallAnswered = completedBeforeCurrent + diagState.questionIndex;
+    var totalPlanned = getDiagnosticTotalPlannedQuestions();
+    var pct = totalPlanned > 0 ? Math.round((overallAnswered / totalPlanned) * 100) : 0;
+
     var titleEl = $('#aq-diag-title');
     var subEl = $('#aq-diag-sub');
     var itemLbl = $('#aq-diag-item-label');
@@ -1182,42 +1209,38 @@ diagState.questionIndex = data.question_index || 0;
         ? 'Assessment · Lecture ' + (data.item_index + 1) + ' of ' + data.total_items
         : 'Quick Placement Assessment';
     }
+
     if (subEl) {
-      subEl.textContent = 'Answer ' + diagState.totalQuestions +
-        ' questions so we can calibrate your starting level for "' +
+      subEl.textContent =
+        'Answer ' + currentItemTarget + ' questions so we can calibrate your starting level for "' +
         escapeHtml(data.content_title || 'this lecture') + '".';
     }
+
     if (itemLbl) {
       itemLbl.textContent = data.total_items > 1
         ? 'Lecture ' + (data.item_index + 1) + ' / ' + data.total_items
         : '';
     }
 
-    // Progress bar — overall across all items
-    var overallQ = diagState.itemIndex * diagState.totalQuestions + diagState.questionIndex;
-    var totalQ = diagState.totalItems * diagState.totalQuestions;
-    var pct = totalQ > 0 ? Math.round((overallQ / totalQ) * 100) : 0;
     var fillEl = $('#aq-diag-progress-fill');
     var labelEl = $('#aq-diag-progress-label');
     if (fillEl) fillEl.style.width = pct + '%';
-    if (labelEl) labelEl.textContent = 'Question ' + (data.question_index + 1) +
-      ' of ' + data.total_questions;
+    if (labelEl) {
+      labelEl.textContent = 'Question ' + (data.question_index + 1) + ' of ' + currentItemTarget;
+    }
 
-    // Badges
     var topicBadge = $('#aq-diag-badge-topic');
     var diffBadge = $('#aq-diag-badge-diff');
-    if (topicBadge) topicBadge.textContent = q.topic || 'General';
+    if (topicBadge) topicBadge.textContent = q.topic || data.topic || 'General';
     if (diffBadge) {
-      var d = q.difficulty || 3;
+      var d = q.difficulty || data.difficulty || 3;
       diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
       diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
     }
 
-    // Question text
     var qtEl = $('#aq-diag-question-text');
     if (qtEl) qtEl.textContent = q.question;
 
-    // Options
     ['A', 'B', 'C', 'D'].forEach(function (key) {
       var btn = $('#aq-diag-opt-' + key);
       if (!btn) return;
@@ -1247,14 +1270,27 @@ diagState.questionIndex = data.question_index || 0;
     });
 
     jQuery.ajax({
-      type: 'POST', url: urlSubmitDiagA,
-      data: JSON.stringify({ selected_answer: selectedKey, time_spent_ms: timeSpentMs }),
+      type: 'POST',
+      url: urlSubmitDiagA,
+      data: JSON.stringify({
+        selected_answer: selectedKey,
+        time_spent_ms: timeSpentMs
+      }),
       contentType: 'application/json',
-      success: function (data) { renderDiagnosticFeedback(data, selectedKey); },
+      success: function (data) {
+        renderDiagnosticFeedback(data, selectedKey);
+      },
       error: function () {
-        // Best-effort advance
-        diagState.questionIndex += 1;
-        loadDiagnosticQuestion();
+        alert('Could not submit assessment answer. Please try again.');
+        diagState.answered = false;
+
+        ['A', 'B', 'C', 'D'].forEach(function (k) {
+          var b = $('#aq-diag-opt-' + k);
+          if (b) {
+            b.disabled = false;
+            b.classList.remove('selected');
+          }
+        });
       }
     });
   }
@@ -1301,7 +1337,11 @@ diagState.questionIndex = data.question_index || 0;
         type: 'POST', url: urlCompleteDiag,
         data: JSON.stringify({}), contentType: 'application/json',
         success: function (result) {
-          if (!result.success) { finalizeDiagnosticSession(); return; }
+          if (!result.success) {
+            alert(result.error || 'Could not process assessment results.');
+            showScreen('start');
+            return;
+          }
 
           // Store for summary screen
           var cid = result.content_id;
@@ -1323,7 +1363,10 @@ diagState.questionIndex = data.question_index || 0;
             loadDiagnosticQuestion();
           }
         },
-        error: function () { finalizeDiagnosticSession(); }
+        error: function () {
+          alert('Could not process assessment results.');
+          showScreen('start');
+        }
       });
 
     } else {
@@ -1377,19 +1420,19 @@ diagState.questionIndex = data.question_index || 0;
     showScreen('diagnostic-results');
 
     var startBtn = $('#aq-btn-diag-start');
-var homeBtn = $('#aq-btn-diag-home');
+    var homeBtn = $('#aq-btn-diag-home');
 
-if (startBtn) {
-  startBtn.onclick = function () {
-    finalizeDiagnosticSession();
-  };
-}
+    if (startBtn) {
+      startBtn.onclick = function () {
+        finalizeDiagnosticSession();
+      };
+    }
 
-if (homeBtn) {
-  homeBtn.onclick = function () {
-    showScreen('start');
-  };
-}
+    if (homeBtn) {
+      homeBtn.onclick = function () {
+        showScreen('start');
+      };
+    }
   }
 
   function finalizeDiagnosticSession() {
@@ -1467,39 +1510,39 @@ if (homeBtn) {
   if (contentBackBtn) contentBackBtn.onclick = function () { showScreen('course'); };
 
   var contentStartBtn = $('#aq-btn-content-start');
-if (contentStartBtn) {
-  contentStartBtn.onclick = function () {
-    var checked = element.querySelectorAll('#aq-content-list input[type=checkbox]:checked');
-    selectedContentIds = Array.from(checked).map(function (cb) { return cb.value; });
+  if (contentStartBtn) {
+    contentStartBtn.onclick = function () {
+      var checked = element.querySelectorAll('#aq-content-list input[type=checkbox]:checked');
+      selectedContentIds = Array.from(checked).map(function (cb) { return cb.value; });
 
-    if (selectedContentIds.length === 0) {
-      alert('Please select at least one content item.');
-      return;
-    }
+      if (selectedContentIds.length === 0) {
+        alert('Please select at least one content item.');
+        return;
+      }
 
-    showScreen('mode');
-  };
-}
+      showScreen('mode');
+    };
+  }
 
-var modeBackBtn = $('#aq-btn-mode-back');
-if (modeBackBtn) {
-  modeBackBtn.onclick = function () {
-    showScreen('content');
-  };
-}
-
-var modeStartBtn = $('#aq-btn-mode-start');
-if (modeStartBtn) {
-  modeStartBtn.onclick = function () {
-    if (!selectedContentIds || selectedContentIds.length === 0) {
-      alert('Please select at least one content item.');
+  var modeBackBtn = $('#aq-btn-mode-back');
+  if (modeBackBtn) {
+    modeBackBtn.onclick = function () {
       showScreen('content');
-      return;
-    }
+    };
+  }
 
-    startSessionWithIds(selectedContentIds, selectedCourseId, selectedMode);
-  };
-}
+  var modeStartBtn = $('#aq-btn-mode-start');
+  if (modeStartBtn) {
+    modeStartBtn.onclick = function () {
+      if (!selectedContentIds || selectedContentIds.length === 0) {
+        alert('Please select at least one content item.');
+        showScreen('content');
+        return;
+      }
+
+      startSessionWithIds(selectedContentIds, selectedCourseId, selectedMode);
+    };
+  }
 
   var viewAllSessionsBtn = $('#aq-btn-view-all-sessions');
   if (viewAllSessionsBtn) {

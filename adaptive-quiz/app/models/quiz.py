@@ -87,42 +87,47 @@ class ContentToggleRequest(BaseModel):
 
 # ── Diagnostic models ────────────────────────────────────────────────
 
+class DiagnosticResult(BaseModel):
+    difficulty: int
+    correct: bool
+    time_ms: int
+    topic: str
+
+
 class DiagnosticItem(BaseModel):
     """One content item returned by session/start when diagnostic is needed."""
-    content_id:     str          # real Mongo _id string
-    title:          str
-    topics:         list[str]
-    source_text:    str
-    source_version: str          # uploaded_at — used to build content_key
+    content_id: str
+    title: str
+    topics: list[str]
+    source_text: str
+    source_version: str
+    diagnostic_target_questions: int
+    diagnostic_coverage_goal: int
 
 
 class DiagnosticGenerateRequest(BaseModel):
-    student_id:     str
-    course_id:      str
-    topic:          str
-    question_index: int = Field(ge=0, le=2)
-    source_text:    str
-
-
-class DiagnosticResult(BaseModel):
-    difficulty: int
-    correct:    bool
-    time_ms:    int
-    topic:      str
+    student_id: str
+    course_id: str
+    topic: str | None = None
+    question_index: int = Field(ge=0, le=20)
+    topics: list[str] = []
+    source_text: str
+    results_so_far: list[DiagnosticResult] = []
+    target_questions: int | None = None
 
 
 class DiagnosticCompleteRequest(BaseModel):
-    student_id:     str
-    course_id:      str
-    content_id:     str          # real Mongo _id string
-    source_version: str          # uploaded_at for version key
-    topics:         list[str]
-    results:        list[DiagnosticResult]
+    student_id: str
+    course_id: str
+    content_id: str
+    source_version: str
+    topics: list[str]
+    results: list[DiagnosticResult]
 
 
 class SessionFinalizeRequest(BaseModel):
-    student_id:     str
-    course_id:      str
-    content_ids:    list[str]
+    student_id: str
+    course_id: str
+    content_ids: list[str]
     question_count: int = 10
-    mode:           str = "normal_practice"
+    mode: str = "normal_practice"

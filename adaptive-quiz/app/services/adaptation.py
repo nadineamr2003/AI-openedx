@@ -28,13 +28,21 @@ WEAK_CHECKIN_CADENCE = 4
 SPACED_REVIEW_CADENCE = 5
 
 # ── Diagnostic constants ─────────────────────────────────────────────
-DIAGNOSTIC_DIFFICULTIES    = [2, 3, 4]
-DIAGNOSTIC_WEIGHTS         = {2: 0.15, 3: 0.25, 4: 0.35}
-DIAGNOSTIC_BASE            = 0.10
-DIAGNOSTIC_QUESTION_COUNT  = len(DIAGNOSTIC_DIFFICULTIES)
-DIAGNOSTIC_UNTESTED_SHRINK = 0.92   # slight uncertainty penalty for untested topics
-DIAGNOSTIC_DIRECT_WEIGHT   = 0.70   # weight for directly-tested topic evidence
-DIAGNOSTIC_BASELINE_WEIGHT = 0.30   # complement
+DIAGNOSTIC_MIN_QUESTIONS = 5
+DIAGNOSTIC_MAX_QUESTIONS = 10
+DIAGNOSTIC_UNTESTED_SHRINK = 0.94
+
+DIAGNOSTIC_ONE_EVIDENCE_DIRECT_WEIGHT = 0.55
+DIAGNOSTIC_MULTI_EVIDENCE_DIRECT_WEIGHT = 0.75
+
+DIAGNOSTIC_DIFF_SCORE_WEIGHTS = {
+    2: 1.00,   # easy
+    3: 1.15,   # medium
+    4: 1.30,   # hard
+}
+
+DIAGNOSTIC_BASE_FLOOR = 0.15
+DIAGNOSTIC_BASE_CEILING = 0.85
 
 
 def compute_time_weight(time_ms: int) -> float:
@@ -298,6 +306,210 @@ def resolve_auto_mode(topic_mastery: dict[str, float], recent_answers: list[dict
 
 # ── Diagnostic helpers ───────────────────────────────────────────────
 
+def diagnostic_target_question_count(num_topics: int) -> int:
+    """
+    Variable-length lecture readiness check.
+
+    1–2 topics  -> 5 questions
+    3–4 topics  -> 6 questions
+    5–6 topics  -> 8 questions
+    7+ topics   -> 10 questions
+    """
+    if num_topics <= 2:
+        return 5
+    if num_topics <= 4:
+        return 6
+    if num_topics <= 6:
+        return 8
+    return 10
+
+
+def diagnostic_coverage_goal(num_topics: int, target_questions: int | None = None) -> int:
+    """
+    Reserve at least some room for refinement after broad coverage.
+    """
+    target = target_questions or diagnostic_target_question_count(num_topics)
+    reserve_refinement = 2 if target >= 7 else 1
+    return min(num_topics, max(1, target - reserve_refinement))
+
+
+def diagnostic_band_label(mastery: float) -> str:
+    if mastery < WEAK_THRESHOLD:
+        return "weak"
+    if mastery <= GROWTH_MAX:
+        return "growth_ready"
+    return "strong"
+
+
+def _diagnostic_weighted_accuracy(results: list[dict]) -> float:
+    if not results:
+        return 0.5
+
+    total_weight = 0.0
+    earned_weight = 0.0
+
+    for r in results:
+        diff = int(r.get("difficulty", 3))
+        weight = DIAGNOSTIC_DIFF_SCORE_WEIGHTS.get(diff, 1.15)
+        total_weight += weight
+        if r.get("correct"):
+            earned_weight += weight
+
+    if total_weight <= 0:
+        return 0.5
+
+    return earned_weight / total_weight
+
+
+def _compute_lecture_baseline(results: list[dict]) -> float:
+    """
+    Variable-length readiness baseline.
+
+    This is now a weighted proportion of correct answers, not a fixed 3-question
+    sum, so it scales properly for 5/6/8/10-question diagnostics.
+    """
+    acc = _diagnostic_weighted_accuracy(results)
+    mastery = DIAGNOSTIC_BASE_FLOOR + (acc * (DIAGNOSTIC_BASE_CEILING - DIAGNOSTIC_BASE_FLOOR))
+    return round(max(DIAGNOSTIC_BASE_FLOOR, min(DIAGNOSTIC_BASE_CEILING, mastery)), 4)
+
+
+def _build_diagnostic_topic_preview(topics: list[str], results: list[dict]) -> tuple[float, dict[str, dict]]:
+    """
+    Returns:
+      - lecture baseline
+      - per-topic preview with evidence count, uncertainty, and provisional mastery
+    """
+    baseline = _compute_lecture_baseline(results)
+    preview: dict[str, dict] = {}
+
+    for topic in topics:
+        topic_results = [r for r in results if r.get("topic") == topic]
+        evidence_count = len(topic_results)
+
+        if evidence_count == 0:
+            direct_mastery = None
+            mastery_estimate = round(baseline * DIAGNOSTIC_UNTESTED_SHRINK, 4)
+            uncertainty = 1.0
+            mixed_outcomes = False
+        else:
+            direct_mastery = _compute_lecture_baseline(topic_results)
+
+            direct_weight = (
+                DIAGNOSTIC_ONE_EVIDENCE_DIRECT_WEIGHT
+                if evidence_count == 1
+                else DIAGNOSTIC_MULTI_EVIDENCE_DIRECT_WEIGHT
+            )
+
+            mastery_estimate = round(
+                direct_weight * direct_mastery +
+                (1.0 - direct_weight) * baseline,
+                4,
+            )
+
+            mixed_outcomes = len({bool(r.get("correct")) for r in topic_results}) > 1
+
+            if evidence_count == 1:
+                uncertainty = 0.55
+            else:
+                uncertainty = 0.35
+
+            if mixed_outcomes:
+                uncertainty = min(1.0, uncertainty + 0.15)
+
+        preview[topic] = {
+            "evidence_count": evidence_count,
+            "direct_mastery": direct_mastery,
+            "mastery_estimate": mastery_estimate,
+            "uncertainty": round(uncertainty, 4),
+            "mixed_outcomes": mixed_outcomes,
+            "band": diagnostic_band_label(mastery_estimate),
+        }
+
+    return baseline, preview
+
+
+def plan_diagnostic_question(
+    topics: list[str],
+    results_so_far: list[dict],
+    question_index: int,
+    target_questions: int | None = None,
+) -> dict:
+    """
+    Coverage first, refinement second.
+
+    Stage 1:
+      - broadly cover the lecture topics
+    Stage 2:
+      - spend remaining questions on the most uncertain topics
+    """
+    if not topics:
+        raise ValueError("topics cannot be empty for diagnostic planning.")
+
+    target = target_questions or diagnostic_target_question_count(len(topics))
+    coverage_goal = diagnostic_coverage_goal(len(topics), target)
+
+    baseline, preview = _build_diagnostic_topic_preview(topics, results_so_far)
+    asked_count = len(results_so_far)
+    last_topic = results_so_far[-1].get("topic") if results_so_far else None
+
+    # ── Stage 1: coverage ──────────────────────────────────────────
+    if asked_count < coverage_goal:
+        coverage_topics = topics[:coverage_goal]
+        uncovered = [t for t in coverage_topics if preview[t]["evidence_count"] == 0]
+        candidates = uncovered or coverage_topics
+        next_topic = next((t for t in candidates if t != last_topic), candidates[0])
+
+        coverage_index = asked_count
+        if coverage_index == 0:
+            difficulty = 2
+        elif coverage_index == coverage_goal - 1 and coverage_goal >= 4:
+            difficulty = 4
+        else:
+            difficulty = 3
+
+        return {
+            "topic": next_topic,
+            "difficulty": difficulty,
+            "target_questions": target,
+            "coverage_goal": coverage_goal,
+            "phase": "coverage",
+            "lecture_baseline_preview": baseline,
+        }
+
+    # ── Stage 2: refinement ────────────────────────────────────────
+    ranked_topics = sorted(
+        topics,
+        key=lambda t: (
+            -preview[t]["uncertainty"],           # most uncertain first
+            preview[t]["evidence_count"],         # lower evidence first
+            abs((preview[t]["mastery_estimate"] or baseline) - 0.5),  # closer to middle = more ambiguous
+        )
+    )
+
+    candidates = [t for t in ranked_topics if t != last_topic] or ranked_topics
+    next_topic = candidates[0]
+
+    est = preview[next_topic]["mastery_estimate"]
+    evidence = preview[next_topic]["evidence_count"]
+
+    if evidence == 0:
+        difficulty = 3
+    elif est < WEAK_THRESHOLD:
+        difficulty = 2
+    elif est > GROWTH_MAX:
+        difficulty = 4
+    else:
+        difficulty = 3
+
+    return {
+        "topic": next_topic,
+        "difficulty": difficulty,
+        "target_questions": target,
+        "coverage_goal": coverage_goal,
+        "phase": "refinement",
+        "lecture_baseline_preview": baseline,
+    }
+
 def make_content_key(content_id: str, source_version: str) -> str:
     """
     Stable version-aware key for diagnostic tracking.
@@ -313,88 +525,69 @@ def is_content_diagnosed(state: dict, content_key: str) -> bool:
     return bool(status and status.get("completed"))
 
 
-def get_diagnostic_difficulty(question_index: int) -> int:
-    return DIAGNOSTIC_DIFFICULTIES[question_index % DIAGNOSTIC_QUESTION_COUNT]
-
-
-def _compute_lecture_baseline(results: list[dict]) -> float:
-    """
-    Compute a single baseline mastery for the whole lecture from 3 diagnostic results.
-
-    Scoring:
-      0/3 correct → 0.10  (Struggling)
-      easy only   → 0.25  (Emerging)
-      med only    → 0.35  (Emerging)
-      hard only   → 0.45  (Developing — knows hard, missed easier)
-      easy+med    → 0.50  (Developing)
-      easy+hard   → 0.60  (Developing)
-      med+hard    → 0.70  (Proficient)
-      all 3       → 0.85  (Proficient)
-    """
-    score = DIAGNOSTIC_BASE
-    for r in results:
-        if r.get("correct"):
-            score += DIAGNOSTIC_WEIGHTS.get(int(r.get("difficulty", 3)), 0)
-    return round(min(0.85, max(DIAGNOSTIC_BASE, score)), 4)
-
-
 def apply_diagnostic_results(
-    state:      dict,
-    topics:     list[str],
-    results:    list[dict],
+    state: dict,
+    topics: list[str],
+    results: list[dict],
     content_id: str,
     source_version: str,
 ) -> dict:
     """
-    Dedicated diagnostic helper — completely separate from process_answer.
+    Final diagnostic writeback.
 
-    For each topic in this content item:
-      - If the topic was directly tested: blend direct score (70%) + baseline (30%)
-      - If not tested: baseline × UNTESTED_SHRINK (slight uncertainty penalty)
-
-    Also stamps topic_mastery_source = "diagnostic" for all affected topics.
-    Does NOT touch recent_answers or total_answers — diagnostic is a separate
-    evidence stream, not part of the adaptive practice history.
+    This now stores:
+      - lecture baseline
+      - topic mastery estimates
+      - topic evidence counts
+      - topic uncertainty
+      - provisional band labels
     """
     if "topic_mastery_source" not in state:
         state["topic_mastery_source"] = {}
     if "diagnostic_status_by_content" not in state:
         state["diagnostic_status_by_content"] = {}
 
-    baseline = _compute_lecture_baseline(results)
+    target_questions = diagnostic_target_question_count(len(topics))
+    coverage_goal = diagnostic_coverage_goal(len(topics), target_questions)
 
-    topic_masteries: dict[str, float] = {}
+    baseline, preview = _build_diagnostic_topic_preview(topics, results)
 
-    for topic in topics:
-        topic_results = [r for r in results if r.get("topic") == topic]
+    topic_masteries = {
+        topic: preview[topic]["mastery_estimate"]
+        for topic in topics
+    }
+    topic_evidence_counts = {
+        topic: preview[topic]["evidence_count"]
+        for topic in topics
+    }
+    topic_uncertainty = {
+        topic: preview[topic]["uncertainty"]
+        for topic in topics
+    }
+    topic_provisional_bands = {
+        topic: preview[topic]["band"]
+        for topic in topics
+    }
 
-        if topic_results:
-            direct_score = _compute_lecture_baseline(topic_results)
-            blended      = round(
-                DIAGNOSTIC_DIRECT_WEIGHT * direct_score +
-                DIAGNOSTIC_BASELINE_WEIGHT * baseline,
-                4,
-            )
-            topic_masteries[topic] = blended
-        else:
-            topic_masteries[topic] = round(baseline * DIAGNOSTIC_UNTESTED_SHRINK, 4)
-
-    # Write to state — only overwrite if student has no practice history for this topic
     for topic, mastery in topic_masteries.items():
         current_source = state["topic_mastery_source"].get(topic, "default_prior")
         if current_source in ("default_prior", "diagnostic"):
-            state["topic_mastery"][topic]        = mastery
+            state["topic_mastery"][topic] = mastery
             state["topic_mastery_source"][topic] = "diagnostic"
 
-    # Record diagnostic completion for this content version
     content_key = make_content_key(content_id, source_version)
     state["diagnostic_status_by_content"][content_key] = {
-        "completed":        True,
-        "mastery":          baseline,
-        "topic_masteries":  topic_masteries,
-        "timestamp":        None,     # set by caller with UTC time
-        "source_version":   source_version,
-        "questions_count":  len(results),
+        "completed": True,
+        "mastery": baseline,
+        "topic_masteries": topic_masteries,
+        "topic_evidence_counts": topic_evidence_counts,
+        "topic_uncertainty": topic_uncertainty,
+        "topic_provisional_bands": topic_provisional_bands,
+        "timestamp": None,
+        "source_version": source_version,
+        "questions_count": len(results),
+        "expected_questions": target_questions,
+        "coverage_goal": coverage_goal,
     }
 
     return state
