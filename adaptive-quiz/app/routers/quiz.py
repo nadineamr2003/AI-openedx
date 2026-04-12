@@ -12,6 +12,7 @@ from app.services.adaptation import (
     get_initial_student_state,
     process_answer,
     select_next_topic,
+    select_difficulty,
     make_content_key,
     is_content_diagnosed,
     apply_diagnostic_results,
@@ -514,8 +515,6 @@ async def submit(req: SubmitRequest):
         time_ms=req.time_spent_ms
     )
 
-    await _save_state(state)
-
     # Decide next parameters (scoped to current session topics)
     allowed_topics = state.get("session_topics") or list(state["topic_mastery"].keys()) or [req.topic]
 
@@ -531,8 +530,14 @@ async def submit(req: SubmitRequest):
         recent_answers=state.get("recent_answers", []),
         total_answers=state.get("total_answers", 0),
     )
-    next_difficulty = state["current_difficulty"]
+
+    next_topic_mastery = state["topic_mastery"].get(next_topic, 0.5)
+    next_difficulty = select_difficulty(next_topic_mastery)
+    state["current_difficulty"] = next_difficulty
+
     updated_mastery = state["topic_mastery"].get(req.topic, 0.5)
+
+    await _save_state(state)
 
         # Support features
     support_features = []
