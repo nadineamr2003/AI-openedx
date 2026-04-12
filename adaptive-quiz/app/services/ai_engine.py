@@ -79,6 +79,9 @@ VARIATION_ANGLES = [
     "Focus on comparing this concept to a related one.",
     "Focus on what happens when this concept is applied incorrectly.",
     "Focus on the steps or process involved.",
+    "Focus on choosing the best explanation for why something happens.",
+    "Focus on distinguishing two easily confused concepts.",
+    "Focus on interpreting a short scenario or symptom."
 ]
 
 PROMPT_TEMPLATE = """
@@ -88,21 +91,41 @@ Requirements:
 - Question angle: {variation}
 - Topic: {topic}
 - Difficulty: {difficulty_label}
--(very easy = very basic recognition / obvious recall, easy = straightforward recall, medium = normal application, hard = multi-step reasoning or comparison, very hard = deeper analysis, nuanced distinction, or trickier application)
+
+Difficulty contract:
+- very easy = single-fact recognition or obvious cue from the source
+- easy = direct recall, direct definition, or one-step identification
+- medium = one-step application, direct comparison, or simple consequence
+- hard = multi-clue reasoning, close comparison, short applied scenario, or best-answer selection
+- very hard = nuanced distinction, tradeoff, best explanation, edge case, or tricky application
+
+Additional difficulty rules:
+- Very easy and easy questions must NOT require multi-step reasoning.
+- Hard and very hard questions must NOT be solvable by spotting one obvious keyword.
+- Hard and very hard questions should require reasoning, discrimination, or applied interpretation.
+- If the source text is too shallow to support the requested difficulty honestly, generate the fairest strong question possible without inventing unsupported depth.
+- Do not fake difficulty with vague wording, unnecessary complexity, or fancy phrasing.
+- Prefer clear but intellectually honest difficulty.
+
+Question quality rules:
 - Exactly 4 answer choices labeled A, B, C, D
 - Exactly 1 correct answer
 - Randomize which answer choice is correct. It must not systematically be A.
 - A short explanation (2-3 sentences) for why the correct answer is right
 - Do not mention answer letters in the explanation. Explain using the concept/content itself.
 - Stay grounded in the provided material — do NOT invent facts
-- All distractors must be plausible, not obviously wrong
+- All distractors must be plausible
+- Distractors must differ for meaningful conceptual reasons, not trivial wording tricks
+- Distractors must be incorrect or less accurate than the correct answer, not alternative true statements.
+- Hard and very hard distractors should be close and credible, not obviously wrong
+- Prefer concept understanding, application, comparison, consequence, best explanation, or careful distinction over wording tricks
+- Avoid vague meta phrasing like "according to the text" or "in page" unless absolutely necessary.
+- The correct answer must be clearly supported by the source text.
+- Hard and very hard questions should feel like genuine reasoning questions rather than plain recall with harder wording.
+- Easy and very easy questions should feel honestly direct rather than accidentally tricky.
 - Ignore instructor names, staff names, office hours, course logistics, grades, contact details, URLs, and administrative information
 - Never ask about who teaches the course, staff members, email addresses, office hours, access codes, or grade distribution
 - Do NOT generate misconception-style stems such as "What is a misconception..." or "Which wrong assumption..."
-- The correct answer must be clearly supported by the source text.
-- Distractors must be incorrect or less accurate than the correct answer, not alternative true statements.
-- Avoid vague meta phrasing like "according to the text" or "in page" unless absolutely necessary.
-- Prefer concept understanding, application, comparison, or consequence questions over wording tricks.
 - If the source text is too weak to support a high-quality question on this topic, choose a safer factual angle rather than inventing nuance.
 
 Source text:
@@ -194,6 +217,8 @@ def validate_question(q: dict) -> bool:
     if _looks_like_admin_question(q):
         return False
     if _looks_like_misframed_misconception_question(q):
+        return False
+    if _difficulty_mismatch_obvious(q):
         return False
     return True
 
@@ -411,6 +436,35 @@ FORBIDDEN_QUESTION_MARKERS = [
     "thank you",
 ]
 
+REASONING_MARKERS = [
+    "best explanation",
+    "best describes",
+    "best answer",
+    "most likely",
+    "why",
+    "how would",
+    "what happens if",
+    "what would happen if",
+    "which outcome",
+    "which scenario",
+    "tradeoff",
+    "compared with",
+    "compared to",
+    "difference between",
+    "distinguish",
+    "scenario",
+]
+
+PLAIN_RECALL_MARKERS = [
+    "what is",
+    "which is",
+    "which term",
+    "which statement defines",
+    "what does",
+    "which of the following is the definition",
+    "what term describes",
+]
+
 
 def _sanitize_source_text_for_questions(source_text: str) -> str:
     """
@@ -462,6 +516,42 @@ def _looks_like_admin_question(q: dict) -> bool:
     ]).lower()
 
     return any(marker in combined for marker in FORBIDDEN_QUESTION_MARKERS)
+
+
+def _looks_like_plain_recall_question(question_text: str) -> bool:
+    text = question_text.strip().lower()
+    if not text:
+        return False
+
+    if any(marker in text for marker in REASONING_MARKERS):
+        return False
+
+    return any(text.startswith(marker) or marker in text for marker in PLAIN_RECALL_MARKERS)
+
+
+def _looks_like_reasoning_question(question_text: str) -> bool:
+    text = question_text.strip().lower()
+    if not text:
+        return False
+
+    return any(marker in text for marker in REASONING_MARKERS)
+
+
+def _difficulty_mismatch_obvious(q: dict) -> bool:
+    question_text = str(q.get("question", ""))
+
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty >= 4 and _looks_like_plain_recall_question(question_text):
+        return True
+
+    if difficulty <= 2 and _looks_like_reasoning_question(question_text):
+        return True
+
+    return False
 
 
 async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
