@@ -241,36 +241,79 @@ async def _append_question_log(
             }
         }
     )
+    
+def _compute_topic_session_stats(question_log: list[dict]) -> dict[str, dict]:
+    stats: dict[str, dict] = {}
+
+    for entry in question_log:
+        topic = entry.get("topic")
+        if not topic:
+            continue
+
+        if topic not in stats:
+            stats[topic] = {
+                "attempts": 0,
+                "correct": 0,
+                "wrong": 0,
+                "total_time_spent_ms": 0,
+                "accuracy": 0.0,
+                "avg_time_spent_ms": 0,
+            }
+
+        stats[topic]["attempts"] += 1
+        stats[topic]["total_time_spent_ms"] += int(entry.get("time_spent_ms", 0) or 0)
+
+        if entry.get("is_correct"):
+            stats[topic]["correct"] += 1
+        else:
+            stats[topic]["wrong"] += 1
+
+    for topic, s in stats.items():
+        attempts = s["attempts"]
+        s["accuracy"] = round(s["correct"] / attempts, 4) if attempts > 0 else 0.0
+        s["avg_time_spent_ms"] = int(s["total_time_spent_ms"] / attempts) if attempts > 0 else 0
+
+    return stats
 
 def _build_session_recommendation(
     accuracy: float,
-    weakest_topic: str | None,
+    review_topic: str | None,
     strongest_topic: str | None,
 ) -> str | None:
-    if not weakest_topic:
-        return None
-
-    if accuracy >= 0.8:
-        if strongest_topic and strongest_topic != weakest_topic:
+    if review_topic:
+        if accuracy >= 0.8:
+            if strongest_topic and strongest_topic != review_topic:
+                return (
+                    f"Strong session overall. You performed best on {strongest_topic}. "
+                    f"The main topic still worth tightening up is {review_topic}."
+                )
             return (
-                f"Strong session overall. You performed best on {strongest_topic}. "
-                f"To push this session even further, focus next on {weakest_topic} and try a harder follow-up set."
+                f"Strong session overall. The only topic that still looks worth revisiting is {review_topic}."
+            )
+
+        if accuracy >= 0.60:
+            return (
+                f"Good progress. {review_topic} showed the most difficulty in this session, "
+                f"so a short focused follow-up on it would help."
+            )
+
+        return (
+            f"This session was challenging, which is completely normal. "
+            f"Start your next attempt by reviewing {review_topic} step by step."
+        )
+
+    if strongest_topic:
+        if accuracy >= 0.8:
+            return (
+                f"Excellent session. You handled all practiced topics well, with especially strong performance on {strongest_topic}. "
+                f"You are ready to continue or try a more challenging follow-up."
             )
         return (
-            f"Strong session overall. Your next best move is to strengthen {weakest_topic} "
-            f"so it catches up with the rest of your practiced topics."
+            f"Solid session. No single topic clearly needs review right now. "
+            f"Keep practising to consolidate what you built here."
         )
 
-    if accuracy >= 0.60:
-        return (
-            f"Good progress. Among the topics you practiced, {weakest_topic} still needs more review. "
-            f"A focused follow-up session on it would help consolidate your understanding."
-        )
-
-    return (
-        f"This session was challenging, which is completely normal. "
-        f"For your next attempt, consider reviewing {weakest_topic} and work through it step by step."
-    )
+    return None
 
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
     db = get_db()
@@ -296,27 +339,44 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
             seen.add(topic)
             practiced_topics.append(topic)
 
-    practiced_mastery_after = {
-        topic: topic_mastery_after.get(topic, 0.5)
-        for topic in practiced_topics
-        if topic in topic_mastery_after
-    }
+    topic_session_stats = _compute_topic_session_stats(question_log)
 
     weakest_topic = None
     strongest_topic = None
 
-    # Prefer practiced topics for learner-facing insight
-    if practiced_mastery_after:
-        weakest_topic = min(practiced_mastery_after, key=practiced_mastery_after.get)
-        strongest_topic = max(practiced_mastery_after, key=practiced_mastery_after.get)
-    elif topic_mastery_after:
-        # fallback only if something goes wrong
-        weakest_topic = min(topic_mastery_after, key=topic_mastery_after.get)
-        strongest_topic = max(topic_mastery_after, key=topic_mastery_after.get)
+    if topic_session_stats:
+        # strongest = best session-local performance, preferring more evidence
+        strongest_topic = max(
+            topic_session_stats,
+            key=lambda t: (
+                topic_session_stats[t]["accuracy"],
+                topic_session_stats[t]["attempts"],
+                -topic_session_stats[t]["avg_time_spent_ms"],
+            )
+        )
+
+        review_candidates = [
+            t for t, s in topic_session_stats.items()
+            if (
+                (s["attempts"] >= 2 and s["accuracy"] < 0.6) or
+                (s["wrong"] >= 2) or
+                (s["attempts"] == 1 and s["accuracy"] == 0.0)
+            )
+        ]
+
+        if review_candidates:
+            weakest_topic = min(
+                review_candidates,
+                key=lambda t: (
+                    topic_session_stats[t]["accuracy"],
+                    -topic_session_stats[t]["wrong"],
+                    -topic_session_stats[t]["attempts"],
+                )
+            )
 
     recommendation = _build_session_recommendation(
         accuracy=accuracy,
-        weakest_topic=weakest_topic,
+        review_topic=weakest_topic,
         strongest_topic=strongest_topic,
     )
 

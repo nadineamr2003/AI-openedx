@@ -75,7 +75,6 @@ OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "").strip()
 
 VARIATION_ANGLES = [
     "Focus on a practical use case or real example.",
-    "Focus on common mistakes or misconceptions.",
     "Focus on the definition or core concept.",
     "Focus on comparing this concept to a related one.",
     "Focus on what happens when this concept is applied incorrectly.",
@@ -88,7 +87,8 @@ Requirements:
 - Be creative with the question angle — avoid repeating common phrasings
 - Question angle: {variation}
 - Topic: {topic}
-- Difficulty: {difficulty_label} (very easy = very basic recognition / obvious recall, easy = straightforward recall, medium = normal application, hard = multi-step reasoning or comparison, very hard = deeper analysis, nuanced distinction, or trickier application)
+- Difficulty: {difficulty_label}
+-(very easy = very basic recognition / obvious recall, easy = straightforward recall, medium = normal application, hard = multi-step reasoning or comparison, very hard = deeper analysis, nuanced distinction, or trickier application)
 - Exactly 4 answer choices labeled A, B, C, D
 - Exactly 1 correct answer
 - Randomize which answer choice is correct. It must not systematically be A.
@@ -98,6 +98,12 @@ Requirements:
 - All distractors must be plausible, not obviously wrong
 - Ignore instructor names, staff names, office hours, course logistics, grades, contact details, URLs, and administrative information
 - Never ask about who teaches the course, staff members, email addresses, office hours, access codes, or grade distribution
+- Do NOT generate misconception-style stems such as "What is a misconception..." or "Which wrong assumption..."
+- The correct answer must be clearly supported by the source text.
+- Distractors must be incorrect or less accurate than the correct answer, not alternative true statements.
+- Avoid vague meta phrasing like "according to the text" or "in page" unless absolutely necessary.
+- Prefer concept understanding, application, comparison, or consequence questions over wording tricks.
+- If the source text is too weak to support a high-quality question on this topic, choose a safer factual angle rather than inventing nuance.
 
 Source text:
 {source_text}
@@ -187,7 +193,21 @@ def validate_question(q: dict) -> bool:
         return False
     if _looks_like_admin_question(q):
         return False
+    if _looks_like_misframed_misconception_question(q):
+        return False
     return True
+
+MISCONCEPTION_STEM_MARKERS = [
+    "misconception",
+    "common misconception",
+    "mistaken belief",
+    "incorrect belief",
+    "wrong assumption",
+]
+
+def _looks_like_misframed_misconception_question(q: dict) -> bool:
+    question_text = str(q.get("question", "")).lower()
+    return any(marker in question_text for marker in MISCONCEPTION_STEM_MARKERS)
 
 def _remap_explanation_letter(explanation: str, old_letter: str, new_letter: str) -> str:
     if not explanation or old_letter == new_letter:
@@ -529,6 +549,11 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
 
     raise ValueError("All providers/models failed to produce a valid question.\n" + "\n".join(all_failures))
 
+# Rewrite the explanation in much simpler language.
+# Use an analogy if it helps.
+# Be concise — 2 to 3 sentences maximum.
+# Do not introduce new topics.
+
 async def generate_simple_explanation(
     topic: str,
     question: str,
@@ -541,10 +566,12 @@ Topic: {topic}
 Question: {question}
 Original explanation: {explanation}
 
-Rewrite the explanation in much simpler language.
-Use an analogy if it helps.
-Be concise — 2 to 3 sentences maximum.
-Do not introduce new topics.
+Rewrite the explanation in much simpler language for a beginner student.
+- Keep it factually consistent with the original explanation.
+- Define any technical term briefly if needed.
+- Use an analogy only if it genuinely clarifies the concept.
+- Be concise — 2 to 3 sentences maximum.
+- Do not introduce new topics or extra facts not already implied by the original explanation.
 
 Respond with ONLY the simpler explanation text, no preamble.
 """
