@@ -124,6 +124,7 @@ async def _compute_overall_stats(student_id: str, course_id: str) -> dict:
                 "completed_sessions": {"$sum": 1},
                 "completed_questions_answered": {"$sum": "$questions_answered"},
                 "completed_correct_answers": {"$sum": "$correct_answers"},
+                "completed_total_time_spent_ms": {"$sum": "$total_time_spent_ms"},
             }
         }
     ]
@@ -135,21 +136,27 @@ async def _compute_overall_stats(student_id: str, course_id: str) -> dict:
             "completed_questions_answered": 0,
             "completed_correct_answers": 0,
             "overall_accuracy": None,
+            "overall_avg_time_spent_ms": None,
         }
 
     row = stats[0]
     total_answered = row.get("completed_questions_answered", 0)
     total_correct = row.get("completed_correct_answers", 0)
+    total_time = row.get("completed_total_time_spent_ms", 0)
 
     overall_accuracy = None
+    overall_avg_time_spent_ms = None
+
     if total_answered > 0:
         overall_accuracy = round(total_correct / total_answered, 4)
+        overall_avg_time_spent_ms = int(total_time / total_answered)
 
     return {
         "completed_sessions": row.get("completed_sessions", 0),
         "completed_questions_answered": total_answered,
         "completed_correct_answers": total_correct,
         "overall_accuracy": overall_accuracy,
+        "overall_avg_time_spent_ms": overall_avg_time_spent_ms,
     }
 
 async def _get_state(student_id: str, course_id: str, topics: list[str]) -> dict:
@@ -178,6 +185,7 @@ async def _create_session_history(
     start_difficulty: int,
     target_questions: int,
     selected_content_ids: list[str],
+    selected_content_titles: list[str],
     selected_mode: str,
 ) -> str:
     db = get_db()
@@ -195,6 +203,7 @@ async def _create_session_history(
         "correct_answers": 0,
         "accuracy": 0.0,
         "selected_content_ids": selected_content_ids,
+        "selected_content_titles": selected_content_titles,
         "session_topics": session_topics,
         "start_difficulty": start_difficulty,
         "end_difficulty": start_difficulty,
@@ -426,6 +435,7 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
         "selected_mode": doc.get("selected_mode", "normal_practice"),
+        "selected_content_titles": doc.get("selected_content_titles", []),
     }
 
     if include_questions:
@@ -527,6 +537,15 @@ async def _generate_first_question(
         "current_difficulty": difficulty,
         "session_id":       session_id,
     }
+    
+def _dedupe_keep_order(values: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -704,6 +723,7 @@ async def get_state(student_id: str, course_id: str):
     state["completed_questions_answered"] = stats["completed_questions_answered"]
     state["completed_correct_answers"] = stats["completed_correct_answers"]
     state["overall_accuracy"] = stats["overall_accuracy"]
+    state["overall_avg_time_spent_ms"] = stats["overall_avg_time_spent_ms"]
 
     return state
 
@@ -774,6 +794,7 @@ async def session_start(req: GenerateRequest):
     resolved_topics: list[str] = []
     resolved_source_text: str = ""
     diagnostic_items: list[dict] = []
+    resolved_content_titles: list[str] = []
 
     for content_id in req.content_ids:
         try:
@@ -799,6 +820,7 @@ async def session_start(req: GenerateRequest):
 
         resolved_topics.extend(topics)
         resolved_source_text += "\n\n" + source_text
+        resolved_content_titles.append(item.get("title", ""))
 
         target_questions = diagnostic_target_question_count(len(topics))
         coverage_goal = diagnostic_coverage_goal(len(topics), target_questions)
@@ -821,6 +843,7 @@ async def session_start(req: GenerateRequest):
             seen.add(topic)
             deduped_topics.append(topic)
     resolved_topics = deduped_topics
+    resolved_content_titles = _dedupe_keep_order(resolved_content_titles)
 
     if not resolved_topics:
         raise HTTPException(
@@ -880,8 +903,9 @@ async def session_start(req: GenerateRequest):
             "diagnostic_needed": True,
             "diagnostic_items": items_needing_diagnostic,
             "diagnostic_questions_per_item": max(
-            (item["diagnostic_target_questions"] for item in items_needing_diagnostic),
-            default=0,),
+                (item["diagnostic_target_questions"] for item in items_needing_diagnostic),
+                default=0,
+            ),
             "all_content_ids": req.content_ids,
             "question_count": req.question_count,
             "resolved_source_text": resolved_source_text,
@@ -900,6 +924,7 @@ async def session_start(req: GenerateRequest):
         start_difficulty=state["current_difficulty"],
         target_questions=req.question_count,
         selected_content_ids=req.content_ids,
+        selected_content_titles=resolved_content_titles,
         selected_mode=requested_mode,
     )
 
@@ -1038,6 +1063,7 @@ async def session_finalize(req: SessionFinalizeRequest):
     resolved_topics: list[str] = []
     resolved_source_text: str = ""
     resolved_items: list[dict] = []
+    resolved_content_titles: list[str] = []
 
     for content_id in req.content_ids:
         try:
@@ -1055,6 +1081,7 @@ async def session_finalize(req: SessionFinalizeRequest):
 
         resolved_topics.extend(item.get("topics", []))
         resolved_source_text += "\n\n" + item.get("source_text", "")
+        resolved_content_titles.append(item.get("title", ""))
 
         resolved_items.append({
             "content_id": str(item["_id"]),
@@ -1073,6 +1100,7 @@ async def session_finalize(req: SessionFinalizeRequest):
             seen.add(topic)
             deduped_topics.append(topic)
     resolved_topics = deduped_topics
+    resolved_content_titles = _dedupe_keep_order(resolved_content_titles)
 
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
@@ -1133,6 +1161,7 @@ async def session_finalize(req: SessionFinalizeRequest):
         start_difficulty=state["current_difficulty"],
         target_questions=req.question_count,
         selected_content_ids=req.content_ids,
+        selected_content_titles=resolved_content_titles,
         selected_mode=requested_mode,
     )
 

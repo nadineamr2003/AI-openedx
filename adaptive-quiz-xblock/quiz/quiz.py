@@ -1654,7 +1654,6 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
         content_items = content_resp.get("items", []) if content_resp else []
 
-        # No progress yet → return empty dashboard instead of error
         if not mastery_resp and not state_resp:
             return {
                 "success": True,
@@ -1668,7 +1667,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "session_count": 0,
                 "total_answers": 0,
                 "overall_accuracy": None,
-                "current_difficulty": 3,
+                "overall_avg_time_spent_ms": None,
                 "content_items": content_items,
             }
 
@@ -1690,7 +1689,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "session_count": state_resp.get("completed_sessions", state_resp.get("session_count", 0)),
             "total_answers": state_resp.get("completed_questions_answered", state_resp.get("total_answers", 0)),
             "overall_accuracy": state_resp.get("overall_accuracy"),
-            "current_difficulty": state_resp.get("current_difficulty", 3),
+            "overall_avg_time_spent_ms": state_resp.get("overall_avg_time_spent_ms"),
             "content_items": content_items,
         }
 

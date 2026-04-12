@@ -450,6 +450,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return mins + 'm ' + rem + 's';
   }
 
+  function formatModeLabel(mode) {
+    var m = String(mode || '').toLowerCase();
+    if (m === 'normal_practice') return 'Normal Practice';
+    if (m === 'weakness_review') return 'Weakness Review';
+    if (m === 'challenge') return 'Challenge';
+    if (m === 'auto') return 'Auto';
+    return mode || '—';
+  }
+
   function masteryStageClass(label) {
     switch (label) {
       case 'Struggling': return 'struggling';
@@ -799,7 +808,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       '#aq-dash-sessions': data.session_count || 0,
       '#aq-dash-total-answers': data.total_answers || 0,
       '#aq-dash-overall-accuracy': overallAccuracy,
-      '#aq-dash-difficulty': DIFF_LABEL[data.current_difficulty || 3] || 'Medium'
+      '#aq-dash-avg-time': formatMs(data.overall_avg_time_spent_ms || 0)
     };
     Object.keys(fields).forEach(function (sel) {
       var el = element.querySelector(sel);
@@ -836,6 +845,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     sessions.forEach(function (session, idx) {
       var score = (session.correct_answers || 0) + ' / ' + (session.target_questions || 0);
       var pct = Math.round((session.accuracy || 0) * 100);
+      var modeText = formatModeLabel(session.selected_mode);
+      var lectureTitles = Array.isArray(session.selected_content_titles) && session.selected_content_titles.length
+        ? session.selected_content_titles.join(', ')
+        : '—';
 
       var actionsHtml = '';
       if (showReviewButton && session.question_log && session.question_log.length) {
@@ -854,6 +867,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         '<div class="aq-session-meta">Completed session</div>' +
         '</div>' +
         '<div class="aq-session-score-badge">' + score + ' · ' + pct + '%</div>' +
+        '</div>' +
+
+        '<div class="aq-session-context">' +
+        '<div class="aq-session-context-row">' +
+        '<span class="aq-session-context-label">Mode</span>' +
+        '<span class="aq-session-context-value">' + escapeHtml(modeText) + '</span>' +
+        '</div>' +
+        '<div class="aq-session-context-row">' +
+        '<span class="aq-session-context-label">Lectures</span>' +
+        '<span class="aq-session-context-value">' + escapeHtml(lectureTitles) + '</span>' +
+        '</div>' +
         '</div>' +
 
         '<div class="aq-session-card-grid">' +

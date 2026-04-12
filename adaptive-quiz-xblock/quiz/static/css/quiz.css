@@ -1297,6 +1297,39 @@
   white-space: nowrap;
 }
 
+.aq-session-context {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-sm);
+  background: #FCFDFF;
+}
+
+.aq-session-context-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.aq-session-context-label {
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--aq-text-muted);
+}
+
+.aq-session-context-value {
+  font-size: .84rem;
+  font-weight: 700;
+  color: var(--aq-text);
+  line-height: 1.5;
+}
+
 .aq-session-card-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -2108,6 +2141,10 @@ body.aq-modal-open {
   .aq-session-card-grid {
     grid-template-columns: 1fr;
   }
+  .aq-session-context-row {
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
 }
 
 /* ── Responsive ──────────────────────────────────────────────────────── */
