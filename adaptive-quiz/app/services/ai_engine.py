@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import re
+import time
 from dotenv import load_dotenv
 import random
 from typing import Any, Dict, List, Optional
@@ -72,16 +73,67 @@ PROVIDERS = {
 
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "").strip()
+_PROVIDER_COOLDOWNS: dict[str, float] = {}
+_PROVIDER_503_FAILURES: dict[str, list[float]] = {}
 
-VARIATION_ANGLES = [
-    "Focus on a practical use case or real example.",
+VERY_EASY_EASY_ANGLES = [
     "Focus on the definition or core concept.",
-    "Focus on comparing this concept to a related one.",
-    "Focus on what happens when this concept is applied incorrectly.",
-    "Focus on the steps or process involved.",
-    "Focus on choosing the best explanation for why something happens.",
-    "Focus on distinguishing two easily confused concepts.",
-    "Focus on interpreting a short scenario or symptom."
+    "Focus on a direct comparison between related concepts.",
+    "Focus on a simple process step or sequence.",
+    "Focus on a straightforward practical use or example.",
+]
+
+MEDIUM_ANGLES = [
+    "Focus on a practical use case or real example that needs one step of application.",
+    "Focus on a direct consequence of applying the concept.",
+    "Focus on what happens when this concept is applied incorrectly in a simple case.",
+    "Focus on choosing the best interpretation of a short, concrete situation.",
+]
+
+HARD_ANGLES = [
+    "Focus on choosing the best explanation among close alternatives.",
+    "Focus on distinguishing two easily confused concepts in a non-obvious way.",
+    "Focus on interpreting a short scenario or symptom rather than recalling a sentence.",
+    "Focus on a tradeoff or consequence under a meaningful constraint.",
+]
+
+VERY_HARD_ANGLES = [
+    "Focus on a tradeoff under meaningful constraints and competing priorities.",
+    "Focus on diagnosing a failure, symptom, or consequence from multiple plausible causes.",
+    "Focus on the best explanation among very close alternatives with subtle distinctions.",
+    "Focus on an edge case, exception, or subtle distinction that changes the best answer.",
+    "Focus on a scenario with competing priorities where multiple answers seem plausible at first.",
+]
+
+MAX_DIRECT_SOURCE_CHARS = 12000
+TARGET_CHUNK_SIZE = 1200
+MAX_CHUNK_SIZE = 1500
+MIN_CONTEXT_CHARS = 8000
+MAX_CONTEXT_CHARS = 10000
+MAX_TOPIC_CHUNKS = 4
+
+TOPIC_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "based", "by", "for", "from",
+    "in", "into", "is", "of", "on", "or", "the", "to", "using", "via",
+    "with",
+}
+
+DEFINITION_MARKERS = [
+    "is defined as",
+    "refers to",
+    "means",
+    "defined as",
+    "is the process",
+    "is a process",
+    "is the ability",
+]
+
+EXPLANATION_MARKERS = [
+    "because",
+    "therefore",
+    "for example",
+    "for instance",
+    "such as",
 ]
 
 PROMPT_TEMPLATE = """
@@ -103,6 +155,18 @@ Additional difficulty rules:
 - Very easy and easy questions must NOT require multi-step reasoning.
 - Hard and very hard questions must NOT be solvable by spotting one obvious keyword.
 - Hard and very hard questions should require reasoning, discrimination, or applied interpretation.
+- Hard and very hard questions should not be direct lecture restatements with slightly more formal wording.
+- "Why" wording by itself does NOT make a question hard.
+- If the answer is stated directly in the source, that usually fits medium or hard unless the question adds a genuine reasoning layer.
+- Very hard questions should require at least one of: nuanced distinction, tradeoff, edge case, best explanation among close alternatives, or short scenario-based interpretation.
+- If the topic is introductory and the source is direct, prefer an honest medium or hard question over a fake very-hard one.
+- Do NOT introduce unsupported assumptions into the stem or options.
+- Do NOT invent numeric thresholds, timing values, protocol mechanisms, or system behaviors unless they are clearly supported by the source text.
+- If you use a scenario, keep it neutral unless the extra details are directly grounded in the source.
+- Do not make a question hard just by wrapping a directly stated fact in a formal scenario.
+- For TCP/UDP or similar direct contrasts, do NOT write a very-hard question that merely rephrases which option is more suitable or why, unless the scenario introduces a real tradeoff, constraint, or ambiguity.
+- Very hard questions should not be simple source paraphrases with stronger wording.
+- If the source supports only a direct concept contrast, generate an honest medium or hard question instead of a fake very-hard one.
 - If the source text is too shallow to support the requested difficulty honestly, generate the fairest strong question possible without inventing unsupported depth.
 - Do not fake difficulty with vague wording, unnecessary complexity, or fancy phrasing.
 - Prefer clear but intellectually honest difficulty.
@@ -122,6 +186,10 @@ Question quality rules:
 - Distractors must differ for meaningful conceptual reasons, not trivial wording tricks
 - Distractors must be incorrect or less accurate than the correct answer, not alternative true statements.
 - Hard and very hard distractors should be close and credible, not obviously wrong
+- Hard and very hard distractors may be partly true in another context, but must be less correct than the right answer in this specific context.
+- Do not use silly, unrelated, or trivially eliminable distractors for hard or very hard questions.
+- Hard and very hard distractors should stay plausible within the same domain.
+- Hard and very hard distractors should not introduce random unrelated mechanisms or obviously false protocol claims.
 - Prefer concept understanding, application, comparison, consequence, best explanation, or careful distinction over wording tricks
 - Avoid vague meta phrasing like "according to the text" or "in page" unless absolutely necessary.
 - The correct answer must be clearly supported by the source text.
@@ -206,27 +274,66 @@ class ProviderHTTPError(Exception):
         super().__init__(f"{provider}/{model} -> {status_code}: {message}")
 
 
-def validate_question(q: dict) -> bool:
+class NoValidQuestionError(ValueError):
+    pass
+
+
+def validate_question(q: dict, source_text: str | None = None) -> tuple[bool, list[str]]:
+    reasons = []
     required = ["question", "options", "correct_answer", "explanation", "topic", "difficulty"]
     if not all(k in q for k in required):
-        return False
+        reasons.append("missing_required_fields")
+        return False, reasons
     if not isinstance(q["options"], dict):
-        return False
+        reasons.append("options_not_dict")
+        return False, reasons
     if q["correct_answer"] not in q["options"]:
-        return False
+        reasons.append("correct_answer_not_in_options")
+        return False, reasons
     if len(q["options"]) != 4:
-        return False
+        reasons.append("wrong_option_count")
     if len(q["question"].strip()) < 10:
-        return False
+        reasons.append("question_too_short")
     if _question_contains_embedded_options(q["question"]):
-        return False
+        reasons.append("embedded_options")
     if _looks_like_admin_question(q):
-        return False
+        reasons.append("admin_question")
     if _looks_like_misframed_misconception_question(q):
-        return False
-    if _difficulty_mismatch_obvious(q):
-        return False
-    return True
+        reasons.append("misframed_misconception")
+    reasons.extend(_difficulty_mismatch_reasons(q, source_text))
+    return len(reasons) == 0, reasons
+
+def validate_question_core_only(q: dict) -> tuple[bool, list[str]]:
+    reasons = []
+    required = ["question", "options", "correct_answer", "explanation", "topic", "difficulty"]
+
+    if not all(k in q for k in required):
+        reasons.append("missing_required_fields")
+        return False, reasons
+
+    if not isinstance(q["options"], dict):
+        reasons.append("options_not_dict")
+        return False, reasons
+
+    if q["correct_answer"] not in q["options"]:
+        reasons.append("correct_answer_not_in_options")
+
+    if len(q["options"]) != 4:
+        reasons.append("wrong_option_count")
+
+    if len(str(q["question"]).strip()) < 10:
+        reasons.append("question_too_short")
+
+    if _question_contains_embedded_options(str(q.get("question", ""))):
+        reasons.append("embedded_options")
+
+    if _looks_like_admin_question(q):
+        reasons.append("admin_question")
+
+    if _looks_like_misframed_misconception_question(q):
+        reasons.append("misframed_misconception")
+
+    return len(reasons) == 0, reasons
 
 MISCONCEPTION_STEM_MARKERS = [
     "misconception",
@@ -341,6 +448,39 @@ def _response_excerpt(resp: httpx.Response, max_len: int = 300) -> str:
 def _safe_exception_text(e: Exception) -> str:
     text = repr(e)
     return text if len(text) <= 300 else text[:300] + "..."
+
+
+def _provider_cooldown_remaining(provider_name: str) -> float:
+    now = time.time()
+    expires_at = _PROVIDER_COOLDOWNS.get(provider_name, 0.0)
+    if expires_at <= now:
+        _PROVIDER_COOLDOWNS.pop(provider_name, None)
+        return 0.0
+    return expires_at - now
+
+
+def _set_provider_cooldown(provider_name: str, seconds: int) -> None:
+    _PROVIDER_COOLDOWNS[provider_name] = time.time() + seconds
+
+
+def _record_provider_throttle(provider_name: str, status_code: int) -> None:
+    if provider_name != "gemini":
+        return
+
+    now = time.time()
+    if status_code == 429:
+        _set_provider_cooldown(provider_name, 600)
+        return
+
+    if status_code != 503:
+        return
+
+    failures = _PROVIDER_503_FAILURES.get(provider_name, [])
+    failures = [stamp for stamp in failures if now - stamp <= 120]
+    failures.append(now)
+    _PROVIDER_503_FAILURES[provider_name] = failures
+    if len(failures) >= 2:
+        _set_provider_cooldown(provider_name, 120)
 
 
 def _is_retryable_status(status_code: int) -> bool:
@@ -479,6 +619,55 @@ PLAIN_RECALL_MARKERS = [
     "what term describes",
 ]
 
+HIGH_DIFFICULTY_REASONING_MARKERS = [
+    "best explanation",
+    "best accounts for",
+    "most likely",
+    "tradeoff",
+    "constraint",
+    "edge case",
+    "in a scenario",
+    "in this scenario",
+    "suppose",
+    "consider",
+    "under which",
+    "under a",
+    "given that",
+    "despite",
+    "even if",
+]
+
+DIRECT_RESTATEMENT_PREFIXES = [
+    "what is the primary reason",
+    "what is the main reason",
+    "what is the primary purpose",
+    "why is ",
+    "why are ",
+    "why does ",
+    "why do ",
+    "which statement best describes",
+    "which statement correctly describes",
+    "which statement is true about",
+    "what is true about",
+]
+
+WEAK_DISTRACTOR_MARKERS = [
+    "all of the above",
+    "none of the above",
+]
+
+GENERIC_QUESTION_TERMS = {
+    "about", "against", "among", "because", "beneficial", "best", "better",
+    "cause", "causes", "choice", "close", "compared", "comparison", "condition",
+    "consequence", "constraint", "correct", "delivery", "describes", "difference",
+    "effect", "exact", "explains", "factor", "feature", "following", "given",
+    "happens", "important", "likely", "main", "matters", "mechanism", "most",
+    "option", "over", "preferred", "priority", "protocol", "question", "reason",
+    "result", "scenario", "situation", "specific", "statement", "suitable",
+    "suitability", "supports", "system", "timely", "under", "using", "versus",
+    "which", "while", "would",
+}
+
 
 def _sanitize_source_text_for_questions(source_text: str) -> str:
     """
@@ -522,6 +711,505 @@ def _sanitize_source_text_for_questions(source_text: str) -> str:
     return "\n\n".join(kept).strip()
 
 
+def _topic_terms(topic: str) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9\s/-]", " ", (topic or "").lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    terms = []
+
+    for token in re.split(r"[\s/-]+", normalized):
+        if len(token) < 3 or token in TOPIC_STOPWORDS:
+            continue
+        terms.append(token)
+        if token.endswith("s") and len(token) > 4:
+            terms.append(token[:-1])
+
+    seen = set()
+    deduped = []
+    for term in terms:
+        if term not in seen:
+            seen.add(term)
+            deduped.append(term)
+    return deduped
+
+
+def _split_large_paragraph(paragraph: str, max_chunk_size: int) -> list[str]:
+    paragraph = paragraph.strip()
+    if not paragraph:
+        return []
+    if len(paragraph) <= max_chunk_size:
+        return [paragraph]
+
+    sentences = re.split(r"(?<=[.!?])\s+", paragraph)
+    parts = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        candidate = sentence if not current else f"{current} {sentence}"
+        if len(candidate) <= max_chunk_size:
+            current = candidate
+            continue
+
+        if current:
+            parts.append(current)
+            current = ""
+
+        if len(sentence) <= max_chunk_size:
+            current = sentence
+            continue
+
+        start = 0
+        while start < len(sentence):
+            end = min(start + max_chunk_size, len(sentence))
+            if end < len(sentence):
+                split_at = sentence.rfind(" ", start, end)
+                if split_at > start + int(max_chunk_size * 0.6):
+                    end = split_at
+            parts.append(sentence[start:end].strip())
+            start = end
+            while start < len(sentence) and sentence[start].isspace():
+                start += 1
+
+    if current:
+        parts.append(current)
+
+    return [part for part in parts if part]
+
+
+def _split_source_into_chunks(source_text: str, target_chunk_size: int = TARGET_CHUNK_SIZE) -> list[str]:
+    paragraphs = re.split(r"\n\s*\n", source_text or "")
+    units = []
+
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        units.extend(_split_large_paragraph(paragraph, MAX_CHUNK_SIZE))
+
+    chunks = []
+    current = ""
+
+    for unit in units:
+        candidate = unit if not current else f"{current}\n\n{unit}"
+        if len(candidate) <= MAX_CHUNK_SIZE or len(current) < int(target_chunk_size * 0.7):
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+        current = unit
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _score_chunk_for_topic(chunk: str, topic: str) -> float:
+    chunk_lower = chunk.lower()
+    topic_phrase = re.sub(r"\s+", " ", (topic or "").strip().lower())
+    terms = _topic_terms(topic)
+
+    score = 0.0
+    matched_terms = 0
+
+    if topic_phrase and topic_phrase in chunk_lower:
+        score += 8.0
+
+    for term in terms:
+        matches = re.findall(rf"\b{re.escape(term)}\b", chunk_lower)
+        if not matches:
+            continue
+        matched_terms += 1
+        score += 2.0
+        score += min(len(matches), 3) * 0.5
+
+    if terms and matched_terms == len(terms):
+        score += 3.0
+    elif matched_terms >= 2:
+        score += 1.5
+
+    if matched_terms and any(marker in chunk_lower for marker in DEFINITION_MARKERS):
+        score += 1.0
+
+    if matched_terms and any(marker in chunk_lower for marker in EXPLANATION_MARKERS):
+        score += 0.5
+
+    return score
+
+
+def _balanced_chunk_indices(chunk_count: int) -> list[int]:
+    if chunk_count <= 0:
+        return []
+    if chunk_count <= 3:
+        return list(range(chunk_count))
+
+    indices = [0, chunk_count // 2, chunk_count - 1]
+    if chunk_count >= 6:
+        indices.insert(1, chunk_count // 3)
+
+    seen = set()
+    ordered = []
+    for idx in indices:
+        bounded = max(0, min(idx, chunk_count - 1))
+        if bounded not in seen:
+            seen.add(bounded)
+            ordered.append(bounded)
+    return ordered
+
+
+def _selected_context_length(chunks: list[str], indices: set[int]) -> int:
+    return sum(len(chunks[idx]) for idx in indices)
+
+
+def _expand_chunk_selection(
+    chunks: list[str],
+    selected_indices: list[int],
+    scores: list[float],
+    min_chars: int,
+    max_chars: int,
+) -> list[int]:
+    selected = set(selected_indices)
+    if not selected:
+        return []
+
+    target_chars = min(max_chars, max(min_chars, _selected_context_length(chunks, selected)))
+
+    while len(selected) < len(chunks):
+        current_chars = _selected_context_length(chunks, selected)
+        if current_chars >= target_chars:
+            break
+
+        candidates = set()
+        for idx in selected:
+            if idx - 1 >= 0 and idx - 1 not in selected:
+                candidates.add(idx - 1)
+            if idx + 1 < len(chunks) and idx + 1 not in selected:
+                candidates.add(idx + 1)
+
+        if not candidates:
+            candidates = {idx for idx in _balanced_chunk_indices(len(chunks)) if idx not in selected}
+        if not candidates:
+            break
+
+        best_idx = min(
+            candidates,
+            key=lambda idx: (
+                -scores[idx],
+                min(abs(idx - chosen) for chosen in selected),
+                idx,
+            ),
+        )
+
+        next_chars = current_chars + len(chunks[best_idx])
+        if next_chars > max_chars and current_chars >= min_chars:
+            break
+
+        selected.add(best_idx)
+
+    return sorted(selected)
+
+
+def _select_question_context(source_text: str, topic: str) -> tuple[str, str, int]:
+    if len(source_text) <= MAX_DIRECT_SOURCE_CHARS:
+        return source_text, "full_cleaned_text", 1
+
+    chunks = _split_source_into_chunks(source_text)
+    if len(chunks) <= 1:
+        return source_text, "full_cleaned_text", len(chunks) or 1
+
+    scores = [_score_chunk_for_topic(chunk, topic) for chunk in chunks]
+    ranked_indices = sorted(range(len(chunks)), key=lambda idx: (-scores[idx], idx))
+    positive_scores = [score for score in scores if score > 0]
+    max_score = max(scores) if scores else 0.0
+    weak_scoring = not positive_scores or max_score < 2.5
+
+    if weak_scoring:
+        seed_indices = _balanced_chunk_indices(len(chunks))
+        mode = "balanced_fallback"
+    else:
+        desired_count = min(MAX_TOPIC_CHUNKS, max(2, len(chunks) // 3))
+        seed_indices = ranked_indices[:desired_count]
+        mode = "topic_chunks"
+
+    selected_indices = _expand_chunk_selection(
+        chunks=chunks,
+        selected_indices=seed_indices,
+        scores=scores,
+        min_chars=MIN_CONTEXT_CHARS,
+        max_chars=MAX_CONTEXT_CHARS,
+    )
+
+    context = "\n\n".join(chunks[idx] for idx in selected_indices)
+    return context, mode, len(seed_indices)
+
+
+def _choose_variation_angle(difficulty: int) -> tuple[str, str]:
+    if difficulty <= 2:
+        return random.choice(VERY_EASY_EASY_ANGLES), "very_easy_easy"
+    if difficulty == 3:
+        return random.choice(MEDIUM_ANGLES), "medium"
+    if difficulty == 4:
+        return random.choice(HARD_ANGLES), "hard"
+    return random.choice(VERY_HARD_ANGLES), "very_hard"
+
+
+def _significant_terms(text: str) -> set[str]:
+    terms = set()
+    normalized = re.sub(r"[^a-z0-9\s-]", " ", (text or "").lower())
+    for token in re.split(r"[\s-]+", normalized):
+        if len(token) < 4 or token in TOPIC_STOPWORDS:
+            continue
+        terms.add(token)
+        if token.endswith("s") and len(token) > 5:
+            terms.add(token[:-1])
+    return terms
+
+
+def _has_high_difficulty_reasoning_layer(question_text: str) -> bool:
+    text = question_text.strip().lower()
+    if not text:
+        return False
+
+    return any(marker in text for marker in HIGH_DIFFICULTY_REASONING_MARKERS)
+
+
+def _extract_numeric_tokens(text: str) -> set[str]:
+    matches = re.findall(
+        r"\b\d+(?:\.\d+)?(?:\s?(?:%|percent|ms|millisecond(?:s)?|second(?:s)?|sec|minute(?:s)?|hour(?:s)?|kbps|mbps|gbps|hz|khz|mhz|ghz|fps|bytes?|packets?))?\b",
+        (text or "").lower(),
+    )
+    return {re.sub(r"\s+", "", match.strip()) for match in matches if match.strip()}
+
+
+def _source_terms(source_text: str) -> set[str]:
+    return _significant_terms(source_text)
+
+
+def _question_text_blob(q: dict) -> str:
+    options = " ".join(str(v) for v in (q.get("options", {}) or {}).values())
+    return " ".join([
+        str(q.get("question", "")),
+        options,
+    ]).strip()
+
+
+def _significant_ngrams(text: str, n: int = 3) -> set[str]:
+    tokens = [
+        token for token in re.split(r"[^a-z0-9]+", (text or "").lower())
+        if len(token) >= 4 and token not in TOPIC_STOPWORDS and token not in GENERIC_QUESTION_TERMS
+    ]
+    if len(tokens) < n:
+        return set()
+    return {
+        " ".join(tokens[idx:idx + n])
+        for idx in range(len(tokens) - n + 1)
+    }
+
+
+def _introduces_unsupported_numeric_detail(q: dict, source_text: str) -> bool:
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4 or not source_text:
+        return False
+
+    question_numbers = _extract_numeric_tokens(_question_text_blob(q))
+    if not question_numbers:
+        return False
+
+    source_numbers = _extract_numeric_tokens(source_text)
+    return any(token not in source_numbers for token in question_numbers)
+
+
+def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> bool:
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4 or not source_text:
+        return False
+
+    allowed_terms = (
+        _source_terms(source_text)
+        | set(_topic_terms(str(q.get("topic", ""))))
+        | GENERIC_QUESTION_TERMS
+    )
+
+    question_terms = _significant_terms(_question_text_blob(q))
+    out_of_source = {
+        term for term in question_terms
+        if term not in allowed_terms
+    }
+
+    option_specifics = 0
+    for option_text in (q.get("options", {}) or {}).values():
+        if _significant_terms(str(option_text)) - allowed_terms:
+            option_specifics += 1
+
+    return len(out_of_source) >= 7 or (len(out_of_source) >= 6 and option_specifics >= 3)
+
+
+def _looks_like_direct_suitability_contrast(question_text: str) -> bool:
+    text = question_text.strip().lower()
+    if not text:
+        return False
+
+    comparison_markers = [
+        "more suitable",
+        "less suitable",
+        "better suited",
+        "more appropriate",
+        "preferred over",
+        "rather than",
+        "instead of",
+        "over ",
+    ]
+    premise_markers = [
+        "which protocol",
+        "which option",
+        "why is",
+        "what protocol characteristic",
+        "when timely delivery",
+        "when ordering matters",
+    ]
+
+    return (
+        any(marker in text for marker in comparison_markers) and
+        any(marker in text for marker in premise_markers)
+    )
+
+
+def _looks_like_direct_restatement_question(question_text: str) -> bool:
+    text = question_text.strip().lower()
+    if not text:
+        return False
+
+    if _has_high_difficulty_reasoning_layer(text):
+        return False
+
+    if _looks_like_direct_suitability_contrast(text):
+        return True
+
+    return any(
+        text.startswith(prefix) or prefix in text
+        for prefix in DIRECT_RESTATEMENT_PREFIXES
+    )
+
+
+def _high_difficulty_looks_too_direct(q: dict) -> bool:
+    question_text = str(q.get("question", "")).strip()
+    if not question_text:
+        return False
+
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4:
+        return False
+
+    if not _looks_like_direct_restatement_question(question_text):
+        return False
+
+    return True
+
+
+def _high_difficulty_is_too_close_to_source(q: dict, source_text: str) -> bool:
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4 or not source_text:
+        return False
+
+    question_text = str(q.get("question", "")).strip()
+    if not question_text:
+        return False
+
+    question_ngrams = _significant_ngrams(question_text, n=3)
+    if not question_ngrams:
+        return False
+
+    source_ngrams = _significant_ngrams(source_text, n=3)
+    overlap = question_ngrams & source_ngrams
+    if not overlap:
+        return False
+
+    if _has_high_difficulty_reasoning_layer(question_text):
+        return False
+
+    if not _looks_like_direct_restatement_question(question_text):
+        return False
+
+    if difficulty >= 5:
+        return len(overlap) >= 2
+
+    return len(overlap) >= 4
+
+
+def _high_difficulty_distractors_look_too_weak(q: dict) -> bool:
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4:
+        return False
+
+    options = q.get("options", {}) or {}
+    correct_letter = q.get("correct_answer")
+    correct_text = str(options.get(correct_letter, "")).strip()
+    distractors = [
+        str(text).strip()
+        for letter, text in options.items()
+        if letter != correct_letter and str(text).strip()
+    ]
+
+    if len(distractors) != 3 or not correct_text:
+        return False
+
+    correct_words = len(correct_text.split())
+    correct_len = len(correct_text)
+    distractor_lengths = [len(text) for text in distractors]
+    short_distractors = sum(
+        1 for text in distractors
+        if len(text.split()) <= 3 or len(text) < max(12, int(correct_len * 0.45))
+    )
+
+    if correct_words >= 7 and short_distractors >= 2:
+        return True
+
+    if correct_len >= 30 and sum(distractor_lengths) / len(distractor_lengths) < correct_len * 0.6:
+        return True
+
+    anchor_terms = (
+        set(_topic_terms(str(q.get("topic", ""))))
+        | _significant_terms(str(q.get("question", "")))
+        | _significant_terms(correct_text)
+    )
+
+    weak_overlap = 0
+    for distractor in distractors:
+        lowered = distractor.lower()
+        if any(marker in lowered for marker in WEAK_DISTRACTOR_MARKERS):
+            return True
+
+        overlap = anchor_terms & _significant_terms(distractor)
+        if not overlap and len(distractor.split()) <= 5:
+            weak_overlap += 1
+
+    return weak_overlap >= 2
+
+
 def _looks_like_admin_question(q: dict) -> bool:
     combined = " ".join([
         str(q.get("question", "")),
@@ -551,8 +1239,9 @@ def _looks_like_reasoning_question(question_text: str) -> bool:
     return any(marker in text for marker in REASONING_MARKERS)
 
 
-def _difficulty_mismatch_obvious(q: dict) -> bool:
+def _difficulty_mismatch_reasons(q: dict, source_text: str | None = None) -> list[str]:
     question_text = str(q.get("question", ""))
+    reasons = []
 
     try:
         difficulty = int(q.get("difficulty", 3))
@@ -560,15 +1249,30 @@ def _difficulty_mismatch_obvious(q: dict) -> bool:
         difficulty = 3
 
     if difficulty >= 4 and _looks_like_plain_recall_question(question_text):
-        return True
+        reasons.append("plain_recall_high_difficulty")
+
+    if difficulty >= 4 and _high_difficulty_looks_too_direct(q):
+        reasons.append("too_direct_high_difficulty")
+
+    if difficulty >= 4 and _high_difficulty_distractors_look_too_weak(q):
+        reasons.append("weak_distractors_high_difficulty")
+
+    if source_text and difficulty >= 4 and _introduces_unsupported_numeric_detail(q, source_text):
+        reasons.append("unsupported_numeric_detail")
+
+    if source_text and difficulty >= 4 and _introduces_too_many_out_of_source_specifics(q, source_text):
+        reasons.append("too_many_out_of_source_specifics")
+
+    if source_text and difficulty >= 4 and _high_difficulty_is_too_close_to_source(q, source_text):
+        reasons.append("too_close_to_source")
 
     if difficulty <= 2 and _looks_like_reasoning_question(question_text):
-        return True
+        reasons.append("too_reasoning_heavy_low_difficulty")
 
-    return False
+    return reasons
 
 
-async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
+async def _generate_question_once(topic: str, difficulty: int, source_text: str) -> dict:
     difficulty_label = {
     1: "very easy",
     2: "easy",
@@ -576,25 +1280,54 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
     4: "hard",
     5: "very hard",
     }[difficulty]
-    variation = random.choice(VARIATION_ANGLES)
+    variation, variation_bucket = _choose_variation_angle(difficulty)
 
     clean_source_text = _sanitize_source_text_for_questions(source_text) or source_text
+    selected_context, context_mode, selected_chunk_count = _select_question_context(
+        clean_source_text,
+        topic,
+    )
+
+    logger.info(
+        "[LLM] Question context selected mode=%s original_chars=%s selected_chars=%s topic=%s seed_chunks=%s",
+        context_mode,
+        len(clean_source_text),
+        len(selected_context),
+        topic,
+        selected_chunk_count,
+    )
+    logger.info(
+        "[LLM] Question difficulty calibration difficulty=%s variation_bucket=%s topic=%s",
+        difficulty,
+        variation_bucket,
+        topic,
+    )
 
     prompt = PROMPT_TEMPLATE.format(
         variation=variation,
         topic=topic,
         difficulty_label=difficulty_label,
         difficulty=difficulty,
-        source_text=clean_source_text[:4000]
+        source_text=selected_context
     )
 
     all_failures = []
+    reserve_candidate = None
 
     async with httpx.AsyncClient(timeout=30) as client:
         for provider_name in PROVIDER_ORDER:
             provider_cfg = PROVIDERS.get(provider_name)
             if not provider_cfg:
                 logger.warning(f"[LLM] Unknown provider in PROVIDER_ORDER: {provider_name}")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
                 continue
 
             if not provider_cfg["api_key"]:
@@ -615,17 +1348,35 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
 
                     q = json.loads(raw)
 
-                    if validate_question(q):
+                    is_valid, reasons = validate_question(q, selected_context)
+                    if is_valid:
                         q = _shuffle_question_options(q)
                         logger.info(f"[LLM] SUCCESS provider={provider_name} model={model} topic={topic} difficulty={difficulty}")
                         return q
                     else:
-                        msg = f"[LLM] Validation failed provider={provider_name} model={model}"
+                        reason_text = ",".join(reasons) if reasons else "unknown"
+                        msg = f"[LLM] Validation failed provider={provider_name} model={model} reasons={reason_text}"
                         logger.warning(msg)
                         all_failures.append(msg)
+
+                        core_valid, _ = validate_question_core_only(q)
+                        if core_valid and reserve_candidate is None:
+                            reserve_candidate = {
+                                "question": q,
+                                "provider": provider_name,
+                                "model": model,
+                                "strict_reasons": reasons,
+                            }
+                            logger.info(
+                                "[LLM] Reserve candidate stored provider=%s model=%s reasons=%s",
+                                provider_name,
+                                model,
+                                reason_text,
+                            )
                         continue
 
                 except ProviderHTTPError as e:
+                    _record_provider_throttle(e.provider, e.status_code)
                     msg = f"[LLM] HTTP failure provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -651,7 +1402,43 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
                     all_failures.append(msg)
                     continue
 
-    raise ValueError("All providers/models failed to produce a valid question.\n" + "\n".join(all_failures))
+    if reserve_candidate is not None:
+        question = _shuffle_question_options(reserve_candidate["question"])
+        logger.warning(
+            "[LLM] LAST_RESORT_ACCEPT provider=%s model=%s strict_reasons=%s",
+            reserve_candidate["provider"],
+            reserve_candidate["model"],
+            ",".join(reserve_candidate["strict_reasons"]) if reserve_candidate["strict_reasons"] else "unknown",
+        )
+        return question
+
+    raise NoValidQuestionError("All providers/models failed to produce a valid question.\n" + "\n".join(all_failures))
+
+
+async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
+    try:
+        return await _generate_question_once(topic, difficulty, source_text)
+    except NoValidQuestionError as primary_error:
+        fallback_difficulty = None
+        if difficulty == 5:
+            fallback_difficulty = 4
+        elif difficulty == 4:
+            fallback_difficulty = 3
+
+        if fallback_difficulty is None:
+            raise ValueError(str(primary_error)) from primary_error
+
+        logger.warning(
+            "[LLM] Falling back generation topic=%s requested_difficulty=%s fallback_difficulty=%s",
+            topic,
+            difficulty,
+            fallback_difficulty,
+        )
+
+        try:
+            return await _generate_question_once(topic, fallback_difficulty, source_text)
+        except NoValidQuestionError as fallback_error:
+            raise ValueError(str(fallback_error)) from primary_error
 
 # Rewrite the explanation in much simpler language.
 # Use an analogy if it helps.

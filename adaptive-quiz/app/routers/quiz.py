@@ -1,6 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 from uuid import uuid4
+import hashlib
+import json
+import logging
 from bson import ObjectId
 from app.models.quiz import (
     GenerateRequest, SubmitRequest, SubmitResponse, MasteryResponse,
@@ -31,10 +34,38 @@ from app.db.mongodb import get_db
 import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
+CACHE_PROMPT_VERSION = "quiz-cache-v2"
+logger = logging.getLogger(__name__)
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
     return {"student_id": student_id, "course_id": course_id}
+
+
+def _normalize_source_text(source_text: str) -> str:
+    return " ".join((source_text or "").split())
+
+
+def _make_source_scope_key(source_text: str) -> str:
+    normalized_source = _normalize_source_text(source_text)
+    return hashlib.sha256(normalized_source.encode("utf-8")).hexdigest()[:16]
+
+
+def _make_question_hash(question: dict) -> str:
+    options = question.get("options", {}) or {}
+    sorted_options = {
+        key: options[key]
+        for key in sorted(options)
+    }
+    payload = {
+        "question": str(question.get("question", "")).strip(),
+        "options": sorted_options,
+        "correct_answer": str(question.get("correct_answer", "")).strip(),
+        "topic": str(question.get("topic", "")).strip(),
+        "difficulty": question.get("difficulty"),
+    }
+    serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 def _mastery_label(mastery: float) -> str:
     if mastery < 0.30:
@@ -619,43 +650,85 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
 
     return item
 
-async def _get_cached_question(topic: str, difficulty: int, course_id: str) -> dict | None:
+async def _get_cached_question(
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    source_scope_key: str,
+    prompt_version: str,
+) -> dict | None:
     db = get_db()
-    question = await db.questions_cache.find_one({
-        "topic": topic,
-        "difficulty": difficulty,
-        "course_id": course_id,
-        "used": False
-    })
+    question = await db.questions_cache.find_one(
+        {
+            "topic": topic,
+            "difficulty": difficulty,
+            "course_id": course_id,
+            "source_scope_key": source_scope_key,
+            "prompt_version": prompt_version,
+            "used": False,
+        },
+        sort=[("generated_at", -1)],
+    )
     if question:
+        used_at = datetime.now(timezone.utc).isoformat()
         await db.questions_cache.update_one(
             {"_id": question["_id"]},
-            {"$set": {"used": True}}
+            {"$set": {"used": True, "used_at": used_at}}
         )
         question.pop("_id", None)
     return question
 
 
-async def _replenish_cache(topic: str, difficulty: int,
-                           course_id: str, source_text: str,
-                           target: int = 5):
+async def _replenish_cache(
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    source_text: str,
+    source_scope_key: str,
+    prompt_version: str,
+    target: int = 1,
+):
     db = get_db()
     count = await db.questions_cache.count_documents({
         "topic": topic,
         "difficulty": difficulty,
         "course_id": course_id,
+        "source_scope_key": source_scope_key,
+        "prompt_version": prompt_version,
         "used": False
     })
     needed = max(0, target - count)
+
+    logger.info(
+        "[CACHE] Replenish start topic=%s difficulty=%s current_unused=%s target=%s needed=%s",
+        topic, difficulty, count, target, needed
+    )
+
     for _ in range(needed):
         try:
             await asyncio.sleep(2)
             q = await generate_question(topic, difficulty, source_text)
+            generated_at = datetime.now(timezone.utc).isoformat()
             q["course_id"] = course_id
             q["used"] = False
-            q["generated_at"] = datetime.now(timezone.utc).isoformat()
-            await db.questions_cache.insert_one(q)
-        except Exception:
+            q["generated_at"] = generated_at
+            q["used_at"] = None
+            q["source_scope_key"] = source_scope_key
+            q["prompt_version"] = prompt_version
+            q["question_hash"] = _make_question_hash(q)
+
+            result = await db.questions_cache.insert_one(q)
+
+            logger.info(
+                "[CACHE] Replenish inserted topic=%s difficulty=%s cache_id=%s",
+                topic, difficulty, str(result.inserted_id)
+            )
+
+        except Exception as e:
+            logger.warning(
+                "[CACHE] Replenish failed topic=%s difficulty=%s error=%r",
+                topic, difficulty, e
+            )
             break
         
 def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dict:
@@ -691,16 +764,49 @@ async def _generate_first_question(
     max_questions: int,
 ) -> dict:
     """Generate (or pull from cache) the first question for a freshly created session."""
-    cached = await _get_cached_question(topic, difficulty, course_id)
+    source_scope_key = _make_source_scope_key(source_text)
+    cached = await _get_cached_question(
+        topic=topic,
+        difficulty=difficulty,
+        course_id=course_id,
+        source_scope_key=source_scope_key,
+        prompt_version=CACHE_PROMPT_VERSION,
+    )
     if cached:
         asyncio.create_task(
-            _replenish_cache(topic, difficulty, course_id, source_text)
+            _replenish_cache(
+                topic=topic,
+                difficulty=difficulty,
+                course_id=course_id,
+                source_text=source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=CACHE_PROMPT_VERSION,
+                target=1,
+            )
         )
         question = cached
     else:
         try:
             question = await generate_question(
                 topic=topic, difficulty=difficulty, source_text=source_text
+            )
+            generated_difficulty = int(question.get("difficulty", difficulty))
+            logger.info(
+                "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
+                topic,
+                difficulty,
+                generated_difficulty,
+            )
+            asyncio.create_task(
+                _replenish_cache(
+                    topic=topic,
+                    difficulty=generated_difficulty,
+                    course_id=course_id,
+                    source_text=source_text,
+                    source_scope_key=source_scope_key,
+                    prompt_version=CACHE_PROMPT_VERSION,
+                    target=1,
+                )
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -729,13 +835,30 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 async def generate(req: GenerateRequest):
     """Generate next question — serve from cache if available."""
     try:
+        state = await _get_state(req.student_id, req.course_id, [req.topic])
+        source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
+        prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+
         # Try cache first
-        cached = await _get_cached_question(req.topic, req.difficulty, req.course_id)
+        cached = await _get_cached_question(
+            topic=req.topic,
+            difficulty=req.difficulty,
+            course_id=req.course_id,
+            source_scope_key=source_scope_key,
+            prompt_version=prompt_version,
+        )
         if cached:
             # Fire background replenishment
             asyncio.create_task(
-                _replenish_cache(req.topic, req.difficulty,
-                                 req.course_id, req.source_text)
+                _replenish_cache(
+                    topic=req.topic,
+                    difficulty=req.difficulty,
+                    course_id=req.course_id,
+                    source_text=req.source_text,
+                    source_scope_key=source_scope_key,
+                    prompt_version=prompt_version,
+                    target=1,
+                )
             )
             return cached
 
@@ -744,6 +867,24 @@ async def generate(req: GenerateRequest):
             topic=req.topic,
             difficulty=req.difficulty,
             source_text=req.source_text
+        )
+        generated_difficulty = int(question.get("difficulty", req.difficulty))
+        logger.info(
+            "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
+            req.topic,
+            req.difficulty,
+            generated_difficulty,
+        )
+        asyncio.create_task(
+            _replenish_cache(
+                topic=req.topic,
+                difficulty=generated_difficulty,
+                course_id=req.course_id,
+                source_text=req.source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+                target=1,
+            )
         )
         return question
 
@@ -1024,6 +1165,7 @@ async def session_start(req: GenerateRequest):
             deduped_topics.append(topic)
     resolved_topics = deduped_topics
     resolved_content_titles = _dedupe_keep_order(resolved_content_titles)
+    source_scope_key = _make_source_scope_key(resolved_source_text)
 
     if not resolved_topics:
         raise HTTPException(
@@ -1070,6 +1212,8 @@ async def session_start(req: GenerateRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    state["current_source_scope_key"] = source_scope_key
+    state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
     state["current_difficulty"] = select_session_start_difficulty(
         state.get("topic_mastery", {}),
         resolved_topics,
@@ -1111,17 +1255,6 @@ async def session_start(req: GenerateRequest):
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
-    for topic in resolved_topics:
-        asyncio.create_task(
-            _replenish_cache(
-                topic,
-                state["current_difficulty"],
-                req.course_id,
-                resolved_source_text,
-                target=3,
-            )
-        )
-
     return {
         "diagnostic_needed": False,
         "session_id": session_id,
@@ -1130,7 +1263,7 @@ async def session_start(req: GenerateRequest):
         "current_difficulty": state["current_difficulty"],
         "topic_mastery": state["topic_mastery"],
         "irt_active": state["irt_active"],
-        "cache_filling": True,
+        "cache_filling": False,
         "selected_mode": requested_mode,
         "effective_mode": effective_mode,
     }
@@ -1281,6 +1414,7 @@ async def session_finalize(req: SessionFinalizeRequest):
             deduped_topics.append(topic)
     resolved_topics = deduped_topics
     resolved_content_titles = _dedupe_keep_order(resolved_content_titles)
+    source_scope_key = _make_source_scope_key(resolved_source_text)
 
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
@@ -1322,6 +1456,8 @@ async def session_finalize(req: SessionFinalizeRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    state["current_source_scope_key"] = source_scope_key
+    state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
     state["current_difficulty"] = select_session_start_difficulty(
         state.get("topic_mastery", {}),
         resolved_topics,
@@ -1347,17 +1483,6 @@ async def session_finalize(req: SessionFinalizeRequest):
 
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
-
-    for topic in resolved_topics:
-        asyncio.create_task(
-            _replenish_cache(
-                topic,
-                state["current_difficulty"],
-                req.course_id,
-                resolved_source_text,
-                target=3,
-            )
-        )
 
     first_topic = resolved_topics[0]
 
