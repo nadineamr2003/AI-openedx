@@ -76,11 +76,41 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
 
+  var COURSE_PICKER_COPY = {
+    quiz: {
+      step: 'Step 1 of 3',
+      title: 'Choose a course',
+      subtitle: 'Select the course you want to practise.'
+    },
+    progress: {
+      step: '',
+      title: 'Choose a course',
+      subtitle: 'Select the course whose progress you want to view.'
+    }
+  };
+
+  function updateHomeButtonVisibility(screenName) {
+    var visibilityByButton = {
+      '#aq-btn-results-home': screenName === 'results',
+      '#aq-btn-course-home': screenName === 'course',
+      '#aq-btn-content-home': screenName === 'content',
+      '#aq-btn-mode-home': screenName === 'mode',
+      '#aq-btn-dashboard-home': screenName === 'dashboard',
+      '#aq-btn-history-home': screenName === 'history'
+    };
+
+    Object.keys(visibilityByButton).forEach(function (sel) {
+      var btn = $(sel);
+      if (btn) btn.classList.toggle('aq-hidden', !visibilityByButton[sel]);
+    });
+  }
+
   function showScreen(name) {
     SCREENS.forEach(function (s) {
       var el = element.querySelector('#aq-screen-' + s);
       if (el) el.classList.toggle('aq-hidden', s !== name);
     });
+    updateHomeButtonVisibility(name);
   }
 
   function setLoading(msg) {
@@ -127,6 +157,25 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var allContentItems = [];
   var selectedMode = 'normal_practice';
 
+  function configureCoursePickerForMode() {
+    var modeConfig = COURSE_PICKER_COPY[pickerMode] || COURSE_PICKER_COPY.quiz;
+    var stepBadge = $('#aq-course-step-badge');
+    var titleEl = $('#aq-course-title');
+    var subtitleEl = $('#aq-course-subtitle');
+
+    if (stepBadge) {
+      stepBadge.textContent = modeConfig.step;
+      stepBadge.classList.toggle('aq-hidden', !modeConfig.step);
+    }
+    if (titleEl) titleEl.textContent = modeConfig.title;
+    if (subtitleEl) subtitleEl.textContent = modeConfig.subtitle;
+  }
+
+  function goHome() {
+    pickerMode = 'quiz';
+    showScreen('start');
+  }
+
   function loadCoursePicker() {
     setLoading('Loading available courses…');
     jQuery.ajax({
@@ -147,6 +196,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function renderCoursePicker(courses) {
     var list = $('#aq-course-list');
     if (!list) { showScreen('start'); return; }
+    configureCoursePickerForMode();
     list.innerHTML = '';
     courses.forEach(function (course, index) {
       var cid = course.course_id;
@@ -1695,6 +1745,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var progressStartBtn = $('#aq-btn-progress-start');
   if (progressStartBtn) progressStartBtn.onclick = function () { pickerMode = 'progress'; loadCoursePicker(); };
+
+  [
+    '#aq-btn-results-home',
+    '#aq-btn-course-home',
+    '#aq-btn-content-home',
+    '#aq-btn-mode-home',
+    '#aq-btn-dashboard-home',
+    '#aq-btn-history-home'
+  ].forEach(function (sel) {
+    var btn = $(sel);
+    if (btn) {
+      btn.onclick = function () {
+        goHome();
+      };
+    }
+  });
 
   var courseBackBtn = $('#aq-btn-course-back');
   if (courseBackBtn) courseBackBtn.onclick = function () { showScreen('start'); };

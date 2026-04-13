@@ -39,10 +39,15 @@
   <!-- ── COURSE PICKER ──────────────────────────────────────────────── -->
   <div class="aq-screen aq-hidden" id="aq-screen-course">
     <div class="aq-panel">
-      <div class="aq-panel-header">
-        <div class="aq-step-badge">Step 1 of 3</div>
-        <h2 class="aq-panel-title">Choose a course</h2>
-        <p class="aq-panel-sub">Select the course you want to practise.</p>
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <div class="aq-step-badge" id="aq-course-step-badge">Step 1 of 3</div>
+          <h2 class="aq-panel-title" id="aq-course-title">Choose a course</h2>
+          <p class="aq-panel-sub" id="aq-course-subtitle">Select the course you want to practise.</p>
+        </div>
+        <button class="aq-icon-btn aq-hidden" id="aq-btn-course-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
       </div>
       <div class="aq-list" id="aq-course-list">
         <div class="aq-skeleton"></div>
@@ -58,10 +63,15 @@
   <!-- ── CONTENT PICKER ────────────────────────────────────────────── -->
   <div class="aq-screen aq-hidden" id="aq-screen-content">
     <div class="aq-panel">
-      <div class="aq-panel-header">
-        <div class="aq-step-badge">Step 2 of 3</div>
-        <h2 class="aq-panel-title">What do you want to practise?</h2>
-        <p class="aq-panel-sub">Pick one or more lectures — your quiz will be generated from the content you select.</p>
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <div class="aq-step-badge">Step 2 of 3</div>
+          <h2 class="aq-panel-title">What do you want to practise?</h2>
+          <p class="aq-panel-sub">Pick one or more lectures — your quiz will be generated from the content you select.</p>
+        </div>
+        <button class="aq-icon-btn aq-hidden" id="aq-btn-content-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
       </div>
       <div class="aq-filter-bar">
         <div class="aq-filter-group">
@@ -103,10 +113,15 @@
 
   <div class="aq-screen aq-hidden" id="aq-screen-mode">
     <div class="aq-panel aq-mode-panel">
-      <div class="aq-panel-header">
-        <div class="aq-step-badge">Step 3 of 3</div>
-        <h2 class="aq-panel-title">Choose your practice mode</h2>
-        <p class="aq-panel-sub">Pick the style of session you want for this attempt.</p>
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <div class="aq-step-badge">Step 3 of 3</div>
+          <h2 class="aq-panel-title">Choose your practice mode</h2>
+          <p class="aq-panel-sub">Pick the style of session you want for this attempt.</p>
+        </div>
+        <button class="aq-icon-btn aq-hidden" id="aq-btn-mode-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
       </div>
 
       <div class="aq-mode-grid" id="aq-mode-grid">
@@ -321,6 +336,11 @@
   <!-- ── RESULTS ────────────────────────────────────────────────────── -->
   <div class="aq-screen aq-hidden" id="aq-screen-results">
     <div class="aq-results">
+      <div class="aq-results-header">
+        <button class="aq-icon-btn aq-hidden" id="aq-btn-results-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
+      </div>
       <div class="aq-results-top">
         <div class="aq-score-ring">
           <svg viewBox="0 0 120 120" class="aq-ring-svg">
@@ -399,9 +419,14 @@
   <!-- ── DASHBOARD ──────────────────────────────────────────────────── -->
   <div class="aq-screen aq-hidden" id="aq-screen-dashboard">
     <div class="aq-panel">
-      <div class="aq-panel-header">
-        <h2 class="aq-panel-title">My Progress</h2>
-        <p class="aq-panel-sub" id="aq-dashboard-course-label">Course: —</p>
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <h2 class="aq-panel-title">My Progress</h2>
+          <p class="aq-panel-sub" id="aq-dashboard-course-label">Course: —</p>
+        </div>
+        <button class="aq-icon-btn" id="aq-btn-dashboard-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
       </div>
 
       <div class="aq-stats-grid aq-stats-grid-4">
@@ -449,10 +474,15 @@
 
   <div class="aq-screen aq-hidden" id="aq-screen-history">
     <div class="aq-panel">
-      <div class="aq-panel-header">
-        <div class="aq-step-badge">History</div>
-        <h2 class="aq-panel-title">Session History</h2>
-        <p class="aq-panel-sub" id="aq-history-course-label">Course: —</p>
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <div class="aq-step-badge">History</div>
+          <h2 class="aq-panel-title">Session History</h2>
+          <p class="aq-panel-sub" id="aq-history-course-label">Course: —</p>
+        </div>
+        <button class="aq-icon-btn" id="aq-btn-history-home" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
       </div>
 
       <div class="aq-history-pager" id="aq-history-pager-wrap">

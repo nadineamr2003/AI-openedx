@@ -315,6 +315,17 @@
   margin-bottom: 24px;
 }
 
+.aq-panel-header-with-action {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.aq-panel-header-main {
+  min-width: 0;
+}
+
 .aq-step-badge {
   display: inline-block;
   font-size: .7rem;
@@ -340,6 +351,41 @@
   color: var(--aq-text-muted);
   margin: 0;
   line-height: 1.5;
+}
+
+.aq-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1.5px solid var(--aq-border);
+  border-radius: 999px;
+  background: var(--aq-surface);
+  color: var(--aq-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color .15s var(--aq-ease), color .15s var(--aq-ease), background .15s var(--aq-ease), box-shadow .15s var(--aq-ease);
+}
+
+.aq-icon-btn:hover {
+  color: var(--aq-primary);
+  border-color: rgba(43, 78, 222, .3);
+  background: var(--aq-primary-light);
+}
+
+.aq-icon-btn:focus-visible {
+  outline: none;
+  border-color: var(--aq-primary);
+  box-shadow: 0 0 0 3px rgba(43, 78, 222, .14);
+}
+
+.aq-home-glyph {
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+  font-weight: 700;
+  transform: translateY(-.02em);
 }
 
 .aq-panel-actions {
@@ -1017,6 +1063,12 @@
   padding: 36px 32px;
   box-shadow: var(--aq-shadow-md);
   text-align: center;
+}
+
+.aq-results-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .aq-results-top {

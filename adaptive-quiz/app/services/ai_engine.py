@@ -108,6 +108,10 @@ Additional difficulty rules:
 - Prefer clear but intellectually honest difficulty.
 
 Question quality rules:
+- The "question" field must contain ONLY the question stem.
+- Do NOT include answer choices, answer labels, or option text inside the question stem.
+- Do NOT write A), B), C), D), A., B., C., or D. inside the question stem.
+- Put answer choices only inside the "options" object.
 - Exactly 4 answer choices labeled A, B, C, D
 - Exactly 1 correct answer
 - Randomize which answer choice is correct. It must not systematically be A.
@@ -214,6 +218,8 @@ def validate_question(q: dict) -> bool:
         return False
     if len(q["question"].strip()) < 10:
         return False
+    if _question_contains_embedded_options(q["question"]):
+        return False
     if _looks_like_admin_question(q):
         return False
     if _looks_like_misframed_misconception_question(q):
@@ -233,6 +239,14 @@ MISCONCEPTION_STEM_MARKERS = [
 def _looks_like_misframed_misconception_question(q: dict) -> bool:
     question_text = str(q.get("question", "")).lower()
     return any(marker in question_text for marker in MISCONCEPTION_STEM_MARKERS)
+
+
+def _question_contains_embedded_options(question_text: str) -> bool:
+    if not question_text:
+        return False
+
+    markers = re.findall(r"(?:^|[\s(\[{])([A-D])[\)\.](?=\s+\S)", question_text)
+    return len(markers) >= 2
 
 def _remap_explanation_letter(explanation: str, old_letter: str, new_letter: str) -> str:
     if not explanation or old_letter == new_letter:
