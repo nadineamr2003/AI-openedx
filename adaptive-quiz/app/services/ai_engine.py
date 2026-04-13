@@ -668,6 +668,17 @@ GENERIC_QUESTION_TERMS = {
     "which", "while", "would",
 }
 
+DOMAIN_GENERAL_ALLOWED_TERMS = {
+    "application", "applications", "behavior", "behaviors", "case", "cases",
+    "client", "clients", "communication", "communications", "connection",
+    "connections", "context", "contexts", "data", "delay", "delays", "flow",
+    "flows", "latency", "media", "message", "messages", "network", "networks",
+    "ordered", "ordering", "packet", "packets", "performance", "receiver",
+    "receivers", "reliability", "reliable", "sender", "senders", "sequence",
+    "service", "services", "stream", "streams", "streaming", "timing",
+    "traffic", "transport", "transmission", "video",
+}
+
 
 def _sanitize_source_text_for_questions(source_text: str) -> str:
     """
@@ -989,12 +1000,67 @@ def _source_terms(source_text: str) -> set[str]:
     return _significant_terms(source_text)
 
 
+def _expand_term_variants(terms: set[str]) -> set[str]:
+    expanded = set()
+    for term in terms:
+        if not term:
+            continue
+        expanded.add(term)
+        if term.endswith("s") and len(term) > 5:
+            expanded.add(term[:-1])
+        elif len(term) > 4:
+            expanded.add(f"{term}s")
+    return expanded
+
+
+def _allowed_domain_terms_for_question(topic: str, source_text: str) -> set[str]:
+    base_terms = _source_terms(source_text) | set(_topic_terms(topic))
+    return (
+        _expand_term_variants(base_terms)
+        | DOMAIN_GENERAL_ALLOWED_TERMS
+        | GENERIC_QUESTION_TERMS
+    )
+
+
 def _question_text_blob(q: dict) -> str:
     options = " ".join(str(v) for v in (q.get("options", {}) or {}).values())
     return " ".join([
         str(q.get("question", "")),
         options,
     ]).strip()
+
+
+def _unsupported_specifics_breakdown(q: dict, source_text: str) -> dict:
+    allowed_terms = _allowed_domain_terms_for_question(str(q.get("topic", "")), source_text)
+    stem_terms = _significant_terms(str(q.get("question", "")))
+    stem_unsupported = stem_terms - allowed_terms
+
+    option_unsupported_terms = []
+    options_with_any_unsupported = 0
+    option_specific_count = 0
+
+    for option_text in (q.get("options", {}) or {}).values():
+        unsupported = _significant_terms(str(option_text)) - allowed_terms
+        option_unsupported_terms.append(unsupported)
+        if unsupported:
+            options_with_any_unsupported += 1
+        if len(unsupported) >= 2:
+            option_specific_count += 1
+
+    distinct_terms = set(stem_unsupported)
+    for terms in option_unsupported_terms:
+        distinct_terms.update(terms)
+
+    total_mentions = len(stem_unsupported) + sum(len(terms) for terms in option_unsupported_terms)
+
+    return {
+        "stem_terms": stem_unsupported,
+        "option_terms": option_unsupported_terms,
+        "distinct_terms": distinct_terms,
+        "options_with_any_unsupported": options_with_any_unsupported,
+        "option_specific_count": option_specific_count,
+        "total_mentions": total_mentions,
+    }
 
 
 def _significant_ngrams(text: str, n: int = 3) -> set[str]:
@@ -1036,24 +1102,32 @@ def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> b
     if difficulty < 4 or not source_text:
         return False
 
-    allowed_terms = (
-        _source_terms(source_text)
-        | set(_topic_terms(str(q.get("topic", ""))))
-        | GENERIC_QUESTION_TERMS
+    breakdown = _unsupported_specifics_breakdown(q, source_text)
+    stem_term_count = len(breakdown["stem_terms"])
+    distinct_count = len(breakdown["distinct_terms"])
+    option_specific_count = breakdown["option_specific_count"]
+    options_with_any_unsupported = breakdown["options_with_any_unsupported"]
+    total_mentions = breakdown["total_mentions"]
+
+    should_reject = (
+        distinct_count >= 8
+        and option_specific_count >= 2
+        and (stem_term_count >= 2 or total_mentions >= 10)
+    ) or (
+        distinct_count >= 10
+        and options_with_any_unsupported >= 3
+        and total_mentions >= 12
     )
 
-    question_terms = _significant_terms(_question_text_blob(q))
-    out_of_source = {
-        term for term in question_terms
-        if term not in allowed_terms
-    }
+    if should_reject:
+        logger.info(
+            "[LLM] Out-of-source specifics topic=%s stem_terms=%s option_count=%s",
+            q.get("topic"),
+            sorted(breakdown["stem_terms"])[:5],
+            option_specific_count,
+        )
 
-    option_specifics = 0
-    for option_text in (q.get("options", {}) or {}).values():
-        if _significant_terms(str(option_text)) - allowed_terms:
-            option_specifics += 1
-
-    return len(out_of_source) >= 7 or (len(out_of_source) >= 6 and option_specifics >= 3)
+    return should_reject
 
 
 def _looks_like_direct_suitability_contrast(question_text: str) -> bool:
