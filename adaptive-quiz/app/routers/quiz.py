@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 import hashlib
 import json
@@ -35,8 +35,13 @@ import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 CACHE_PROMPT_VERSION = "quiz-cache-v2"
+CACHE_UNUSED_TTL_DAYS = 14
+CACHE_USED_TTL_DAYS = 7
 logger = logging.getLogger(__name__)
 _REPLENISH_IN_FLIGHT: set[str] = set()
+RECENT_QUESTION_HISTORY_LIMIT = 40
+RECENT_QUESTION_HISTORY_MAX_AGE = timedelta(days=14)
+LIVE_DEDUPE_MAX_ATTEMPTS = 3
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -67,6 +72,201 @@ def _make_question_hash(question: dict) -> str:
     }
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(timezone.utc)
+
+
+def _prune_recent_question_history(history: list[dict] | None) -> list[dict]:
+    if not isinstance(history, list):
+        return []
+
+    cutoff = datetime.now(timezone.utc) - RECENT_QUESTION_HISTORY_MAX_AGE
+    pruned: list[dict] = []
+
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+
+        question_hash = str(entry.get("question_hash", "")).strip()
+        course_id = str(entry.get("course_id", "")).strip()
+        seen_at = _parse_iso_datetime(entry.get("seen_at"))
+
+        if not question_hash or not course_id or seen_at is None or seen_at < cutoff:
+            continue
+
+        difficulty = entry.get("difficulty")
+        try:
+            difficulty = int(difficulty)
+        except (TypeError, ValueError):
+            difficulty = None
+
+        pruned.append({
+            "question_hash": question_hash,
+            "course_id": course_id,
+            "topic": str(entry.get("topic", "")).strip(),
+            "difficulty": difficulty,
+            "source_scope_key": str(entry.get("source_scope_key", "")).strip(),
+            "prompt_version": str(entry.get("prompt_version", "")).strip(),
+            "seen_at": seen_at.isoformat(),
+        })
+
+    pruned.sort(key=lambda item: item["seen_at"], reverse=True)
+    return pruned[:RECENT_QUESTION_HISTORY_LIMIT]
+
+
+def _recent_seen_hashes_for_course(history: list[dict], course_id: str) -> list[str]:
+    hashes: list[str] = []
+    seen: set[str] = set()
+
+    for entry in history:
+        if entry.get("course_id") != course_id:
+            continue
+
+        question_hash = str(entry.get("question_hash", "")).strip()
+        if not question_hash or question_hash in seen:
+            continue
+
+        seen.add(question_hash)
+        hashes.append(question_hash)
+
+    return hashes
+
+
+def _question_hash_for_tracking(question: dict) -> str:
+    question_hash = str(question.get("question_hash", "")).strip()
+    if question_hash:
+        return question_hash
+    return _make_question_hash(question)
+
+
+def _hash_preview(question_hash: str) -> str:
+    return question_hash[:12] if question_hash else "unknown"
+
+
+def _cache_unused_expires_at(now: datetime) -> datetime:
+    return now + timedelta(days=CACHE_UNUSED_TTL_DAYS)
+
+
+def _cache_used_expires_at(now: datetime) -> datetime:
+    return now + timedelta(days=CACHE_USED_TTL_DAYS)
+
+
+def _prepare_recent_question_history(state: dict) -> list[dict]:
+    history = _prune_recent_question_history(state.get("recent_question_history", []))
+    state["recent_question_history"] = history
+    return history
+
+
+def _recent_seen_hashes_from_state(state: dict, course_id: str) -> list[str]:
+    history = _prepare_recent_question_history(state)
+    hashes = _recent_seen_hashes_for_course(history, course_id)
+    logger.info("[DEDUPE] Recent hashes course=%s count=%s", course_id, len(hashes))
+    return hashes
+
+
+def _record_seen_question(
+    state: dict,
+    question: dict,
+    course_id: str,
+    topic: str,
+    difficulty: int,
+    source_scope_key: str,
+    prompt_version: str,
+) -> str:
+    question_hash = _question_hash_for_tracking(question)
+    history = _prepare_recent_question_history(state)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    history = [
+        entry for entry in history
+        if not (
+            entry.get("course_id") == course_id
+            and entry.get("question_hash") == question_hash
+        )
+    ]
+
+    history.insert(0, {
+        "question_hash": question_hash,
+        "course_id": course_id,
+        "topic": topic,
+        "difficulty": int(difficulty),
+        "source_scope_key": source_scope_key,
+        "prompt_version": prompt_version,
+        "seen_at": now_iso,
+    })
+    state["recent_question_history"] = _prune_recent_question_history(history)
+    logger.info(
+        "[DEDUPE] Recorded seen question course=%s topic=%s hash=%s",
+        course_id,
+        topic,
+        _hash_preview(question_hash),
+    )
+    return question_hash
+
+
+async def _generate_question_with_soft_dedupe(
+    topic: str,
+    difficulty: int,
+    source_text: str,
+    course_id: str,
+    recent_hashes: list[str],
+) -> dict:
+    recent_hash_set = set(recent_hashes)
+    attempts = LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1
+
+    for attempt in range(1, attempts + 1):
+        question = await generate_question(
+            topic=topic,
+            difficulty=difficulty,
+            source_text=source_text,
+        )
+        question_hash = _question_hash_for_tracking(question)
+
+        if question_hash not in recent_hash_set:
+            return question
+
+        logger.info(
+            "[DEDUPE] Live repeat detected course=%s topic=%s difficulty=%s attempt=%s hash=%s",
+            course_id,
+            topic,
+            difficulty,
+            attempt,
+            _hash_preview(question_hash),
+        )
+
+        if attempt < attempts:
+            logger.info(
+                "[DEDUPE] Live repeat retry course=%s topic=%s difficulty=%s attempt=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempt + 1,
+            )
+            continue
+
+        logger.info(
+            "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s",
+            course_id,
+            topic,
+            difficulty,
+            attempts,
+        )
+        return question
+
+    raise RuntimeError("Soft dedupe generation exhausted unexpectedly.")
 
 
 def _cache_bucket_key(
@@ -673,24 +873,64 @@ async def _get_cached_question(
     course_id: str,
     source_scope_key: str,
     prompt_version: str,
+    excluded_hashes: list[str] | None = None,
 ) -> dict | None:
     db = get_db()
-    used_at = datetime.now(timezone.utc).isoformat()
-    question = await db.questions_cache.find_one_and_update(
-        {
-            "topic": topic,
-            "difficulty": difficulty,
-            "course_id": course_id,
-            "source_scope_key": source_scope_key,
-            "prompt_version": prompt_version,
-            "used": False,
-        },
-        {"$set": {"used": True, "used_at": used_at}},
-        sort=[("generated_at", -1)],
-    )
+    now = datetime.now(timezone.utc)
+    used_at = now.isoformat()
+    expires_at = _cache_used_expires_at(now)
+
+    async def _claim(query: dict) -> dict | None:
+        return await db.questions_cache.find_one_and_update(
+            query,
+            {"$set": {"used": True, "used_at": used_at, "expires_at": expires_at}},
+            sort=[("generated_at", -1)],
+        )
+
+    base_query = {
+        "topic": topic,
+        "difficulty": difficulty,
+        "course_id": course_id,
+        "source_scope_key": source_scope_key,
+        "prompt_version": prompt_version,
+        "used": False,
+    }
+
+    question = None
+    if excluded_hashes:
+        question = await _claim({
+            **base_query,
+            "question_hash": {"$nin": excluded_hashes},
+        })
+        if question:
+            logger.info(
+                "[DEDUPE] Cache preferred course=%s topic=%s difficulty=%s",
+                course_id,
+                topic,
+                difficulty,
+            )
+        else:
+            question = await _claim(base_query)
+            if question:
+                logger.info(
+                    "[DEDUPE] Cache relaxed course=%s topic=%s difficulty=%s",
+                    course_id,
+                    topic,
+                    difficulty,
+                )
+    else:
+        question = await _claim(base_query)
+
     if question:
         question["used"] = True
         question["used_at"] = used_at
+        question["expires_at"] = expires_at
+        logger.info(
+            "[CACHE] TTL set used topic=%s difficulty=%s expires_at=%s",
+            topic,
+            difficulty,
+            expires_at.isoformat(),
+        )
         logger.info(
             "[CACHE] Hit topic=%s difficulty=%s prompt_version=%s",
             topic, difficulty, prompt_version
@@ -744,17 +984,26 @@ async def _replenish_cache(
             try:
                 await asyncio.sleep(2)
                 q = await generate_question(topic, difficulty, source_text)
-                generated_at = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(timezone.utc)
+                generated_at = now.isoformat()
+                expires_at = _cache_unused_expires_at(now)
                 q["course_id"] = course_id
                 q["used"] = False
                 q["generated_at"] = generated_at
                 q["used_at"] = None
+                q["expires_at"] = expires_at
                 q["source_scope_key"] = source_scope_key
                 q["prompt_version"] = prompt_version
                 q["question_hash"] = _make_question_hash(q)
 
                 result = await db.questions_cache.insert_one(q)
 
+                logger.info(
+                    "[CACHE] TTL set unused topic=%s difficulty=%s expires_at=%s",
+                    topic,
+                    difficulty,
+                    expires_at.isoformat(),
+                )
                 logger.info(
                     "[CACHE] Replenish inserted topic=%s difficulty=%s cache_id=%s",
                     topic, difficulty, str(result.inserted_id)
@@ -793,6 +1042,7 @@ def _parse_object_id(content_id: str) -> ObjectId:
         raise HTTPException(status_code=400, detail="Invalid content ID.")
     
 async def _generate_first_question(
+    state: dict,
     student_id: str,
     course_id: str,
     topic: str,
@@ -803,12 +1053,14 @@ async def _generate_first_question(
 ) -> dict:
     """Generate (or pull from cache) the first question for a freshly created session."""
     source_scope_key = _make_source_scope_key(source_text)
+    recent_hashes = _recent_seen_hashes_from_state(state, course_id)
     cached = await _get_cached_question(
         topic=topic,
         difficulty=difficulty,
         course_id=course_id,
         source_scope_key=source_scope_key,
         prompt_version=CACHE_PROMPT_VERSION,
+        excluded_hashes=recent_hashes,
     )
     if cached:
         asyncio.create_task(
@@ -829,8 +1081,12 @@ async def _generate_first_question(
             topic, difficulty, CACHE_PROMPT_VERSION
         )
         try:
-            question = await generate_question(
-                topic=topic, difficulty=difficulty, source_text=source_text
+            question = await _generate_question_with_soft_dedupe(
+                topic=topic,
+                difficulty=difficulty,
+                source_text=source_text,
+                course_id=course_id,
+                recent_hashes=recent_hashes,
             )
             generated_difficulty = int(question.get("difficulty", difficulty))
             logger.info(
@@ -852,6 +1108,17 @@ async def _generate_first_question(
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
+
+    _record_seen_question(
+        state=state,
+        question=question,
+        course_id=course_id,
+        topic=str(question.get("topic", topic)),
+        difficulty=int(question.get("difficulty", difficulty)),
+        source_scope_key=source_scope_key,
+        prompt_version=CACHE_PROMPT_VERSION,
+    )
+    await _save_state(state)
 
     return {
         "success":          True,
@@ -880,6 +1147,7 @@ async def generate(req: GenerateRequest):
         state = await _get_state(req.student_id, req.course_id, [req.topic])
         source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
         prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+        recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
 
         # Try cache first
         cached = await _get_cached_question(
@@ -888,6 +1156,7 @@ async def generate(req: GenerateRequest):
             course_id=req.course_id,
             source_scope_key=source_scope_key,
             prompt_version=prompt_version,
+            excluded_hashes=recent_hashes,
         )
         if cached:
             # Fire background replenishment
@@ -902,6 +1171,16 @@ async def generate(req: GenerateRequest):
                     target=1,
                 )
             )
+            _record_seen_question(
+                state=state,
+                question=cached,
+                course_id=req.course_id,
+                topic=str(cached.get("topic", req.topic)),
+                difficulty=int(cached.get("difficulty", req.difficulty)),
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+            )
+            await _save_state(state)
             return cached
 
         # Cache miss — live generation
@@ -909,10 +1188,12 @@ async def generate(req: GenerateRequest):
             "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
             req.topic, req.difficulty, prompt_version
         )
-        question = await generate_question(
+        question = await _generate_question_with_soft_dedupe(
             topic=req.topic,
             difficulty=req.difficulty,
-            source_text=req.source_text
+            source_text=req.source_text,
+            course_id=req.course_id,
+            recent_hashes=recent_hashes,
         )
         generated_difficulty = int(question.get("difficulty", req.difficulty))
         logger.info(
@@ -932,6 +1213,16 @@ async def generate(req: GenerateRequest):
                 target=1,
             )
         )
+        _record_seen_question(
+            state=state,
+            question=question,
+            course_id=req.course_id,
+            topic=str(question.get("topic", req.topic)),
+            difficulty=generated_difficulty,
+            source_scope_key=source_scope_key,
+            prompt_version=prompt_version,
+        )
+        await _save_state(state)
         return question
 
     except ValueError as e:
@@ -1533,6 +1824,7 @@ async def session_finalize(req: SessionFinalizeRequest):
     first_topic = resolved_topics[0]
 
     gen_resp = await _generate_first_question(
+        state=state,
         student_id=req.student_id,
         course_id=req.course_id,
         topic=first_topic,
