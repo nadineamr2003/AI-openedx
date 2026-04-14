@@ -979,6 +979,24 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  function classifyFollowUpOutcome(summary, sessionAccuracy) {
+    var masteryDelta = summary && typeof summary.mastery_delta === 'number'
+      ? summary.mastery_delta
+      : 0;
+    var accuracy = typeof sessionAccuracy === 'number' ? sessionAccuracy : 0;
+
+    if (masteryDelta >= 0.03 && accuracy >= 0.8) {
+      return 'Strongly Reinforced';
+    }
+    if (masteryDelta > 0) {
+      return 'Improved';
+    }
+    if (masteryDelta === 0 && accuracy >= 0.6) {
+      return 'Stabilising';
+    }
+    return 'Still Needs Review';
+  }
+
   function renderSessionInsight(data) {
     var wrap = $('#aq-session-insight');
     if (!wrap) return;
@@ -988,15 +1006,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var weakest = data.weakest_topic_this_session || '';
     var recommendation = data.session_recommendation || '';
     var avgTime = data.avg_time_spent_ms || 0;
+    var sectionTitleEl = $('#aq-results-insight-title');
+    var gridEl = $('#aq-insight-grid');
+    var strongestCardEl = $('#aq-insight-card-strongest');
+    var weakestCardEl = $('#aq-insight-card-weakest');
+    var avgTimeCardEl = $('#aq-insight-card-avg-time');
     var strongestLabelEl = $('#aq-insight-label-strongest');
     var weakestLabelEl = $('#aq-insight-label-weakest');
     var avgTimeLabelEl = $('#aq-insight-label-avg-time');
+    var recommendationCardEl = $('#aq-recommendation-card');
 
     if (focusedFollowUp) {
-      strongest = getFocusedTopicName(data) || '';
-      weakest = typeof data.session_accuracy === 'number'
-        ? Math.round(data.session_accuracy * 100) + '%'
-        : '—';
+      strongest = classifyFollowUpOutcome(
+        data && data.focused_topic_mastery_summary,
+        data && data.session_accuracy
+      );
     }
 
     if (!strongest && !weakest && !recommendation) {
@@ -1009,14 +1033,28 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var avgTimeEl = $('#aq-insight-avg-time');
     var recTextEl = $('#aq-recommendation-text');
 
-    if (strongestLabelEl) strongestLabelEl.textContent = focusedFollowUp ? 'Focus Topic' : 'Best Performed Topic';
-    if (weakestLabelEl) weakestLabelEl.textContent = focusedFollowUp ? 'Session Accuracy' : 'Needs Review';
+    if (sectionTitleEl) sectionTitleEl.textContent = focusedFollowUp ? 'Follow-up Insight' : 'Session Insight';
+    if (gridEl) gridEl.classList.toggle('aq-insight-grid-single', focusedFollowUp);
+    if (strongestCardEl) strongestCardEl.classList.remove('aq-hidden');
+    if (weakestCardEl) weakestCardEl.classList.toggle('aq-hidden', focusedFollowUp);
+    if (avgTimeCardEl) avgTimeCardEl.classList.toggle('aq-hidden', focusedFollowUp);
+
+    if (strongestLabelEl) strongestLabelEl.textContent = focusedFollowUp ? 'Follow-up Outcome' : 'Best Performed Topic';
+    if (weakestLabelEl) weakestLabelEl.textContent = 'Needs Review';
     if (avgTimeLabelEl) avgTimeLabelEl.textContent = 'Avg Response Time';
 
     if (strongestEl) strongestEl.textContent = strongest || '—';
-    if (weakestEl) weakestEl.textContent = weakest || '—';
-    if (avgTimeEl) avgTimeEl.textContent = formatMs(avgTime);
-    if (recTextEl) recTextEl.textContent = recommendation || 'Keep practising to reinforce your learning.';
+    if (weakestEl) weakestEl.textContent = focusedFollowUp ? '—' : (weakest || '—');
+    if (avgTimeEl) avgTimeEl.textContent = focusedFollowUp ? '—' : formatMs(avgTime);
+
+    if (recommendationCardEl) {
+      recommendationCardEl.classList.toggle('aq-hidden', focusedFollowUp && !recommendation);
+    }
+    if (recTextEl) {
+      recTextEl.textContent = focusedFollowUp
+        ? (recommendation || '')
+        : (recommendation || 'Keep practising to reinforce your learning.');
+    }
 
     wrap.classList.remove('aq-hidden');
   }

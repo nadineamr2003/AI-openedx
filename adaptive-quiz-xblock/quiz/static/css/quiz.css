@@ -1414,6 +1414,10 @@
   margin-bottom: 14px;
 }
 
+.aq-insight-grid-single {
+  grid-template-columns: 1fr;
+}
+
 .aq-insight-card {
   background: var(--aq-bg);
   border: 1px solid var(--aq-border);
