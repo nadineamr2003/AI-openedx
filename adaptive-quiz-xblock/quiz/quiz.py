@@ -94,6 +94,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     selected_course_id = String(default="", scope=Scope.user_state)
     active_session_id = String(default="", scope=Scope.user_state)
     selected_session_mode = String(default="normal_practice", scope=Scope.user_state)
+    selected_session_origin = String(default="standard", scope=Scope.user_state)
     # Diagnostic placement fields
     diagnostic_pending          = Boolean(default=False,  scope=Scope.user_state)
     diagnostic_items_json       = String(default="",      scope=Scope.user_state)
@@ -1263,6 +1264,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         selected_course = data.get("selected_course_id") or self._active_course_id()
         content_ids     = data.get("content_ids", [])
         selected_mode   = data.get("mode") or "normal_practice"
+        session_origin  = str(data.get("session_origin") or "standard").strip().lower() or "standard"
         focus_topics    = [
             str(topic).strip()
             for topic in (data.get("focus_topics") or [])
@@ -1271,6 +1273,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
         self.selected_course_id        = selected_course
         self.selected_session_mode     = selected_mode
+        self.selected_session_origin   = session_origin
         self.questions_seen            = 0
         self.session_score             = 0
         self.session_active            = True
@@ -1292,6 +1295,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "content_ids": content_ids,
                 "question_count": requested_q,
                 "mode": selected_mode,
+                "session_origin": session_origin,
                 "focus_topics": focus_topics,
             },
             timeout=SESSION_START_TIMEOUT,
@@ -1500,6 +1504,11 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     def finalize_session(self, data, suffix=""):
         all_content_ids = json.loads(self.diagnostic_all_content_ids_json or "[]")
         selected_mode = data.get("mode") or self.selected_session_mode or "normal_practice"
+        session_origin = str(
+            data.get("session_origin")
+            or self.selected_session_origin
+            or "standard"
+        ).strip().lower() or "standard"
         focus_topics = [
             str(topic).strip()
             for topic in (
@@ -1515,6 +1524,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "content_ids": all_content_ids,
             "question_count": self.diagnostic_question_count or self.max_questions,
             "mode": selected_mode,
+            "session_origin": session_origin,
             "focus_topics": focus_topics,
         }, timeout=45)
 
@@ -1632,9 +1642,11 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "lectures_practised_count": submit_resp.get("lectures_practised_count"),
             "topics_practised_count": submit_resp.get("topics_practised_count"),
             "content_mastery_summaries": submit_resp.get("content_mastery_summaries", []),
+            "focused_topic_mastery_summary": submit_resp.get("focused_topic_mastery_summary"),
             "recommended_review_topic": submit_resp.get("recommended_review_topic"),
             "selected_content_ids": submit_resp.get("selected_content_ids", []),
             "course_id": submit_resp.get("course_id"),
+            "session_origin": submit_resp.get("session_origin", self.selected_session_origin),
             "narrative_bridge": submit_resp.get("narrative_bridge"),
         }
 

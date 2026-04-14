@@ -8,6 +8,7 @@ class GenerateRequest(BaseModel):
     difficulty:    int = Field(default=3, ge=1, le=5)
     source_text:   str
     mode:          str = "normal_practice"
+    session_origin: str | None = None
     content_ids:   list[str] = []
     focus_topics:  list[str] | None = None
     question_count: int = 10
@@ -49,6 +50,8 @@ class SubmitResponse(BaseModel):
     recommended_review_topic:        str | None = None
     selected_content_ids:            list[str] | None = None
     course_id:                       str | None = None
+    session_origin:                  str | None = None
+    focused_topic_mastery_summary:   dict | None = None
     narrative_bridge:                str | None = None
 
 
@@ -139,4 +142,5 @@ class SessionFinalizeRequest(BaseModel):
     content_ids: list[str]
     question_count: int = 10
     mode: str = "normal_practice"
+    session_origin: str | None = None
     focus_topics: list[str] | None = None

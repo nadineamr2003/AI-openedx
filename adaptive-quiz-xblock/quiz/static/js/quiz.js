@@ -623,6 +623,54 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return mode || '—';
   }
 
+  function isFollowUpSession(sessionLike) {
+    return String((sessionLike && sessionLike.session_origin) || '').toLowerCase() === 'followup';
+  }
+
+  function getPracticedTopics(sessionLike) {
+    return normalizeTopicList(
+      Array.isArray(sessionLike && sessionLike.practiced_topics)
+        ? sessionLike.practiced_topics
+        : []
+    );
+  }
+
+  function isSingleTopicFollowUpSession(sessionLike) {
+    if (!isFollowUpSession(sessionLike)) return false;
+
+    var focusedSummary = sessionLike && sessionLike.focused_topic_mastery_summary;
+    if (focusedSummary && String(focusedSummary.topic || '').trim()) return true;
+
+    var topicsPractised = parseInt((sessionLike && sessionLike.topics_practised_count) || 0, 10);
+    if (topicsPractised === 1) return true;
+
+    return getPracticedTopics(sessionLike).length === 1;
+  }
+
+  function getFocusedTopicName(sessionLike) {
+    var focusedSummary = sessionLike && sessionLike.focused_topic_mastery_summary;
+    if (focusedSummary && String(focusedSummary.topic || '').trim()) {
+      return String(focusedSummary.topic).trim();
+    }
+
+    var practicedTopics = getPracticedTopics(sessionLike);
+    if (practicedTopics.length === 1) return practicedTopics[0];
+
+    var recommendationTopic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
+    if (recommendationTopic) return recommendationTopic;
+
+    var strongestTopic = String((sessionLike && sessionLike.strongest_topic_this_session) || '').trim();
+    if (strongestTopic) return strongestTopic;
+
+    var weakestTopic = String((sessionLike && sessionLike.weakest_topic_this_session) || '').trim();
+    return weakestTopic;
+  }
+
+  function getLearnerSessionLabel(sessionLike) {
+    if (isFollowUpSession(sessionLike)) return 'Follow-up Quiz';
+    return formatModeLabel(sessionLike && sessionLike.selected_mode);
+  }
+
   function normalizeTopicList(topics) {
     if (!Array.isArray(topics)) return [];
 
@@ -634,6 +682,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function getFollowUpContext(sessionLike) {
+    if (isFollowUpSession(sessionLike)) {
+      return null;
+    }
+
     var topic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
     var courseId = String((sessionLike && sessionLike.course_id) || '').trim();
     var contentIds = Array.isArray(sessionLike && sessionLike.selected_content_ids)
@@ -662,7 +714,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     startSessionWithIds(context.contentIds, context.courseId, 'weakness_review', {
       focusTopics: [context.topic],
-      questionCount: context.questionCount
+      questionCount: context.questionCount,
+      sessionOrigin: 'followup'
     });
   }
 
@@ -930,10 +983,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var wrap = $('#aq-session-insight');
     if (!wrap) return;
 
+    var focusedFollowUp = isSingleTopicFollowUpSession(data);
     var strongest = data.strongest_topic_this_session || '';
     var weakest = data.weakest_topic_this_session || '';
     var recommendation = data.session_recommendation || '';
     var avgTime = data.avg_time_spent_ms || 0;
+    var strongestLabelEl = $('#aq-insight-label-strongest');
+    var weakestLabelEl = $('#aq-insight-label-weakest');
+    var avgTimeLabelEl = $('#aq-insight-label-avg-time');
+
+    if (focusedFollowUp) {
+      strongest = getFocusedTopicName(data) || '';
+      weakest = typeof data.session_accuracy === 'number'
+        ? Math.round(data.session_accuracy * 100) + '%'
+        : '—';
+    }
 
     if (!strongest && !weakest && !recommendation) {
       wrap.classList.add('aq-hidden');
@@ -945,6 +1009,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var avgTimeEl = $('#aq-insight-avg-time');
     var recTextEl = $('#aq-recommendation-text');
 
+    if (strongestLabelEl) strongestLabelEl.textContent = focusedFollowUp ? 'Focus Topic' : 'Best Performed Topic';
+    if (weakestLabelEl) weakestLabelEl.textContent = focusedFollowUp ? 'Session Accuracy' : 'Needs Review';
+    if (avgTimeLabelEl) avgTimeLabelEl.textContent = 'Avg Response Time';
+
     if (strongestEl) strongestEl.textContent = strongest || '—';
     if (weakestEl) weakestEl.textContent = weakest || '—';
     if (avgTimeEl) avgTimeEl.textContent = formatMs(avgTime);
@@ -953,13 +1021,43 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     wrap.classList.remove('aq-hidden');
   }
 
-  function renderLectureMasterySummary(items) {
+  function renderLectureMasterySummary(data) {
     var wrap = $('#aq-results-lecture-summary');
     var listEl = $('#aq-results-lecture-list');
-    if (!wrap || !listEl) return;
+    var titleEl = $('#aq-results-mastery-title');
+    if (!wrap || !listEl || !titleEl) return;
 
     listEl.innerHTML = '';
+    titleEl.textContent = 'Lecture Mastery Change';
 
+    var focusedSummary = data && data.focused_topic_mastery_summary;
+    if (isSingleTopicFollowUpSession(data) && focusedSummary && focusedSummary.topic) {
+      var beforePct = masteryPct(focusedSummary.mastery_before);
+      var afterPct = masteryPct(focusedSummary.mastery_after);
+      var deltaPct = masteryDeltaFromDisplayed(beforePct, afterPct);
+      var deltaClass = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat';
+      var deltaArrow = deltaPct > 0 ? '↑' : deltaPct < 0 ? '↓' : '→';
+      var deltaLabel = formatMasteryDelta(deltaPct);
+      var focusedCard = document.createElement('div');
+
+      titleEl.textContent = 'Focused Topic Mastery';
+      focusedCard.className = 'aq-lecture-change-card aq-lecture-change-card-followup';
+      focusedCard.innerHTML =
+        '<div class="aq-lecture-change-top">' +
+        '<div>' +
+        '<div class="aq-lecture-change-title">' + escapeHtml(focusedSummary.topic) + '</div>' +
+        '<div class="aq-lecture-change-meta">Single-topic follow-up</div>' +
+        '</div>' +
+        '<span class="aq-lecture-change-delta ' + deltaClass + '">' + deltaArrow + ' ' + deltaLabel + '</span>' +
+        '</div>' +
+        '<div class="aq-lecture-change-values">' + beforePct + '% → ' + afterPct + '%</div>';
+
+      listEl.appendChild(focusedCard);
+      wrap.classList.remove('aq-hidden');
+      return;
+    }
+
+    var items = (data && data.content_mastery_summaries) || [];
     if (!items || items.length === 0) {
       wrap.classList.add('aq-hidden');
       return;
@@ -1068,7 +1166,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (pb) pb.style.width = '100%';
 
     renderSessionInsight(data);
-    renderLectureMasterySummary(lectureSummaries);
+    renderLectureMasterySummary(data);
     renderResultsFollowUp(data);
 
     showScreen('results');
@@ -1148,10 +1246,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     sessions.forEach(function (session, idx) {
       var score = (session.correct_answers || 0) + ' / ' + (session.target_questions || 0);
       var pct = Math.round((session.accuracy || 0) * 100);
-      var modeText = formatModeLabel(session.selected_mode);
+      var modeText = getLearnerSessionLabel(session);
       var lectureTitles = Array.isArray(session.selected_content_titles) && session.selected_content_titles.length
         ? session.selected_content_titles.join(', ')
         : '—';
+      var focusedFollowUp = isSingleTopicFollowUpSession(session);
+      var isFollowUp = isFollowUpSession(session);
+      var primaryLabel = focusedFollowUp ? 'Focus Topic' : 'Best Performed Topic';
+      var primaryValue = focusedFollowUp ? (getFocusedTopicName(session) || '—') : (session.strongest_topic_this_session || '—');
+      var secondaryLabel = focusedFollowUp ? 'Accuracy' : 'Needs Review';
+      var secondaryValue = focusedFollowUp ? (pct + '%') : (session.weakest_topic_this_session || '—');
       var followUp = allowFollowUp ? getFollowUpContext(session) : null;
 
       var actionsHtml = '';
@@ -1179,12 +1283,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       }
 
       var card = document.createElement('div');
-      card.className = 'aq-session-card';
+      card.className = 'aq-session-card' + (isFollowUp ? ' aq-session-card-followup' : '');
       card.innerHTML =
         '<div class="aq-session-card-top">' +
         '<div>' +
         '<div class="aq-session-date">' + formatDateTime(session.ended_at || session.started_at) + '</div>' +
-        '<div class="aq-session-meta">Completed session</div>' +
+        '<div class="aq-session-meta-row">' +
+        '<div class="aq-session-meta">' + (isFollowUp ? 'Completed follow-up quiz' : 'Completed session') + '</div>' +
+        (isFollowUp ? '<span class="aq-session-kind-badge aq-session-kind-badge-followup">Follow-up Quiz</span>' : '') +
+        '</div>' +
         '</div>' +
         '<div class="aq-session-score-badge">' + score + ' · ' + pct + '%</div>' +
         '</div>' +
@@ -1202,12 +1309,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
         '<div class="aq-session-card-grid">' +
         '<div class="aq-session-mini">' +
-        '<span class="aq-session-mini-label">Best Performed Topic</span>' +
-        '<span class="aq-session-mini-value">' + escapeHtml(session.strongest_topic_this_session || '—') + '</span>' +
+        '<span class="aq-session-mini-label">' + primaryLabel + '</span>' +
+        '<span class="aq-session-mini-value">' + escapeHtml(primaryValue) + '</span>' +
         '</div>' +
         '<div class="aq-session-mini">' +
-        '<span class="aq-session-mini-label">Needs Review</span>' +
-        '<span class="aq-session-mini-value">' + escapeHtml(session.weakest_topic_this_session || '—') + '</span>' +
+        '<span class="aq-session-mini-label">' + secondaryLabel + '</span>' +
+        '<span class="aq-session-mini-value">' + escapeHtml(secondaryValue) + '</span>' +
         '</div>' +
         '<div class="aq-session-mini">' +
         '<span class="aq-session-mini-label">Avg Response Time</span>' +
@@ -1489,6 +1596,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       chosenCount = countInput ? parseInt(countInput.value, 10) : MAX_Q;
     }
     var focusTopics = normalizeTopicList(options.focusTopics);
+    var sessionOrigin = String(options.sessionOrigin || 'standard').toLowerCase();
     var normalizedIds = Array.isArray(ids) ? ids.slice() : [];
     var activeCourseId = courseId || selectedCourseId;
 
@@ -1508,6 +1616,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         selected_course_id: activeCourseId,
         content_ids: normalizedIds,
         mode: selectedMode,
+        session_origin: sessionOrigin,
         focus_topics: focusTopics
       }),
       contentType: 'application/json',

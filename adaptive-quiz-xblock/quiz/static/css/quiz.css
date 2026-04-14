@@ -1235,6 +1235,11 @@
   padding: 14px 16px;
 }
 
+.aq-lecture-change-card-followup {
+  background: linear-gradient(135deg, #FFFBEB, #FFFFFF);
+  border-color: #FDE68A;
+}
+
 .aq-lecture-change-top {
   display: flex;
   align-items: flex-start;
@@ -1478,6 +1483,11 @@
   box-shadow: var(--aq-shadow-sm);
 }
 
+.aq-session-card-followup {
+  border-color: #FDE68A;
+  background: linear-gradient(180deg, #FFFDF5 0%, #FFFFFF 100%);
+}
+
 .aq-session-card-top {
   display: flex;
   justify-content: space-between;
@@ -1496,6 +1506,31 @@
   font-size: .76rem;
   color: var(--aq-text-muted);
   margin-top: 3px;
+}
+
+.aq-session-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  flex-wrap: wrap;
+}
+
+.aq-session-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.aq-session-kind-badge-followup {
+  background: #FFFBEB;
+  color: #B45309;
+  border: 1px solid #FDE68A;
 }
 
 .aq-session-score-badge {

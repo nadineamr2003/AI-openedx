@@ -41,6 +41,8 @@ DEFAULT_CACHE_TARGET = 1
 FOCUSED_FOLLOWUP_CACHE_TARGET = 2
 FOCUSED_FOLLOWUP_WAIT_SECONDS = 2.0
 FOCUSED_FOLLOWUP_WAIT_INTERVAL_SECONDS = 0.25
+SESSION_ORIGIN_STANDARD = "standard"
+SESSION_ORIGIN_FOLLOWUP = "followup"
 logger = logging.getLogger(__name__)
 _REPLENISH_IN_FLIGHT: set[str] = set()
 RECENT_QUESTION_HISTORY_LIMIT = 40
@@ -289,13 +291,32 @@ def _cache_bucket_key(
     ])
 
 
-def _is_focused_followup_session(mode: str, focus_topics: list[str] | None) -> bool:
+def _normalize_session_origin(session_origin: str | None) -> str:
+    normalized = str(session_origin or "").strip().lower()
+    if normalized == SESSION_ORIGIN_FOLLOWUP:
+        return SESSION_ORIGIN_FOLLOWUP
+    return SESSION_ORIGIN_STANDARD
+
+
+def _is_followup_origin(session_origin: str | None) -> bool:
+    return _normalize_session_origin(session_origin) == SESSION_ORIGIN_FOLLOWUP
+
+
+def _is_focused_followup_session(
+    mode: str,
+    focus_topics: list[str] | None,
+    session_origin: str | None,
+) -> bool:
     normalized_focus_topics = _dedupe_keep_order([
         str(topic).strip()
         for topic in (focus_topics or [])
         if str(topic).strip()
     ])
-    return mode == "weakness_review" and len(normalized_focus_topics) == 1
+    return (
+        mode == "weakness_review"
+        and _is_followup_origin(session_origin)
+        and len(normalized_focus_topics) == 1
+    )
 
 
 def _state_is_focused_followup(state: dict) -> bool:
@@ -375,6 +396,7 @@ def _build_narrative_bridge(
     current_topic: str,
     next_topic: str,
     next_mode: str,
+    session_origin: str | None,
     current_difficulty: int,
     next_difficulty: int,
     consecutive_wrong: int,
@@ -390,6 +412,44 @@ def _build_narrative_bridge(
         if next_topic == current_topic:
             return "the same topic"
         return next_topic
+
+    if _is_followup_origin(session_origin):
+        if is_correct:
+            if next_topic == current_topic:
+                if next_difficulty > current_difficulty:
+                    return (
+                        f"You are improving on {current_topic}, so this follow-up stays focused there "
+                        f"and raises the challenge from {current_diff_label} to {next_diff_label}."
+                    )
+                return (
+                    f"You answered correctly, and this follow-up keeps reinforcing {current_topic} "
+                    f"so you can stabilise it through focused practice."
+                )
+            return (
+                f"You answered correctly, and this follow-up now continues on {next_topic} "
+                f"to keep reinforcing the same weak area from a slightly different angle."
+            )
+
+        if consecutive_wrong >= 2:
+            return (
+                f"This follow-up keeps the focus on {current_topic} because repeated errors suggest "
+                f"the concept still needs steady, step-by-step reinforcement."
+            )
+
+        if next_topic != current_topic:
+            return (
+                f"This follow-up now shifts to {next_topic} to keep reinforcing the same area of weakness."
+            )
+
+        if next_difficulty < current_difficulty:
+            return (
+                f"This follow-up stays on {current_topic} and lowers the difficulty from "
+                f"{current_diff_label} to {next_diff_label} so you can rebuild confidence."
+            )
+
+        return (
+            f"This follow-up keeps the focus on {current_topic} so you can strengthen it before moving on."
+        )
 
     if mode == "weakness_review":
         if is_correct:
@@ -601,6 +661,7 @@ async def _create_session_history(
     selected_content_ids: list[str],
     selected_content_titles: list[str],
     selected_mode: str,
+    session_origin: str,
 ) -> str:
     db = get_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -632,6 +693,7 @@ async def _create_session_history(
         "recommended_review_topic": None,
         "recommendation": None,
         "selected_mode": selected_mode,
+        "session_origin": session_origin,
     }
 
     await db.student_session_history.insert_one(doc)
@@ -703,7 +765,26 @@ def _build_session_recommendation(
     accuracy: float,
     review_topic: str | None,
     strongest_topic: str | None,
+    session_origin: str | None,
 ) -> str | None:
+    if _is_followup_origin(session_origin):
+        focus_topic = review_topic or strongest_topic
+        if focus_topic:
+            if accuracy >= 0.8:
+                return (
+                    f"Strong follow-up session on {focus_topic}. You can return to normal practice "
+                    f"or try challenge mode when you want a broader test."
+                )
+            if accuracy >= 0.60:
+                return (
+                    f"Good progress on {focus_topic}. A normal practice session would be a good next step "
+                    f"to check whether the improvement holds more broadly."
+                )
+            return (
+                f"This follow-up is still building stability on {focus_topic}. Keep practising it step by step "
+                f"before moving back to a broader session."
+            )
+
     if review_topic:
         if accuracy >= 0.8:
             if strongest_topic and strongest_topic != review_topic:
@@ -801,6 +882,41 @@ async def _build_content_mastery_summaries(doc: dict, topic_mastery_after: dict)
 
     return summaries
 
+
+def _build_focused_topic_mastery_summary(doc: dict, topic_mastery_after: dict) -> dict | None:
+    if not _is_followup_origin(doc.get("session_origin")):
+        return None
+
+    practiced_topics = _dedupe_keep_order([
+        str(entry.get("topic", "")).strip()
+        for entry in (doc.get("question_log") or [])
+        if str(entry.get("topic", "")).strip()
+    ])
+    if not practiced_topics:
+        practiced_topics = _dedupe_keep_order([
+            str(topic).strip()
+            for topic in (doc.get("practiced_topics") or [])
+            if str(topic).strip()
+        ])
+    if len(practiced_topics) != 1:
+        return None
+
+    topic = practiced_topics[0]
+    topic_mastery_before = doc.get("topic_mastery_before", {}) or {}
+
+    if topic not in topic_mastery_before or topic not in topic_mastery_after:
+        return None
+
+    before = float(topic_mastery_before[topic])
+    after = float(topic_mastery_after[topic])
+
+    return {
+        "topic": topic,
+        "mastery_before": round(before, 4),
+        "mastery_after": round(after, 4),
+        "mastery_delta": round(after - before, 4),
+    }
+
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
     db = get_db()
     doc = await db.student_session_history.find_one({"session_id": session_id})
@@ -828,6 +944,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
     lectures_practised_count = len(doc.get("selected_content_ids", []) or [])
     topics_practised_count = len(practiced_topics)
     content_mastery_summaries = await _build_content_mastery_summaries(doc, topic_mastery_after)
+    focused_topic_mastery_summary = _build_focused_topic_mastery_summary(doc, topic_mastery_after)
 
     topic_session_stats = _compute_topic_session_stats(question_log)
 
@@ -870,6 +987,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         accuracy=accuracy,
         review_topic=recommended_review_topic,
         strongest_topic=strongest_topic,
+        session_origin=doc.get("session_origin"),
     )
 
     ended_at = datetime.now(timezone.utc).isoformat()
@@ -886,6 +1004,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "lectures_practised_count": lectures_practised_count,
                 "topics_practised_count": topics_practised_count,
                 "content_mastery_summaries": content_mastery_summaries,
+                "focused_topic_mastery_summary": focused_topic_mastery_summary,
                 "weakest_topic_this_session": weakest_topic,
                 "strongest_topic_this_session": strongest_topic,
                 "recommended_review_topic": recommended_review_topic,
@@ -902,12 +1021,14 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         "lectures_practised_count": lectures_practised_count,
         "topics_practised_count": topics_practised_count,
         "content_mastery_summaries": content_mastery_summaries,
+        "focused_topic_mastery_summary": focused_topic_mastery_summary,
         "weakest_topic_this_session": weakest_topic,
         "strongest_topic_this_session": strongest_topic,
         "recommended_review_topic": recommended_review_topic,
         "selected_content_ids": doc.get("selected_content_ids", []),
         "course_id": doc.get("course_id"),
         "recommendation": recommendation,
+        "session_origin": _normalize_session_origin(doc.get("session_origin")),
     }
 
 
@@ -935,7 +1056,9 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "lectures_practised_count": doc.get("lectures_practised_count"),
         "topics_practised_count": doc.get("topics_practised_count"),
         "content_mastery_summaries": doc.get("content_mastery_summaries", []),
+        "focused_topic_mastery_summary": doc.get("focused_topic_mastery_summary"),
         "selected_mode": doc.get("selected_mode", "normal_practice"),
+        "session_origin": _normalize_session_origin(doc.get("session_origin")),
         "selected_content_ids": doc.get("selected_content_ids", []),
         "selected_content_titles": doc.get("selected_content_titles", []),
     }
@@ -1324,19 +1447,23 @@ def _set_session_followup_state(
     mode: str,
     focus_topics: list[str] | None,
     focused_topic: str | None,
+    session_origin: str | None,
 ) -> bool:
+    normalized_origin = _normalize_session_origin(session_origin)
     is_focused_followup = (
-        _is_focused_followup_session(mode, focus_topics)
+        _is_focused_followup_session(mode, focus_topics, normalized_origin)
         and focused_topic is not None
     )
+    state["current_session_origin"] = normalized_origin
     state["current_is_focused_followup"] = is_focused_followup
     state["current_focus_topic"] = focused_topic if is_focused_followup else None
 
     if is_focused_followup:
         logger.info(
-            "[FOLLOWUP] Focused follow-up detected topic=%s mode=%s",
+            "[FOLLOWUP] Focused follow-up detected topic=%s mode=%s origin=%s",
             focused_topic,
             mode,
+            normalized_origin,
         )
 
     return is_focused_followup
@@ -1560,6 +1687,7 @@ async def submit(req: SubmitRequest):
     next_topic_mastery = state["topic_mastery"].get(next_topic, 0.5)
     next_difficulty = select_difficulty(next_topic_mastery)
     state["current_difficulty"] = next_difficulty
+    current_session_origin = _normalize_session_origin(state.get("current_session_origin"))
 
     updated_mastery = state["topic_mastery"].get(req.topic, 0.5)
 
@@ -1581,6 +1709,7 @@ async def submit(req: SubmitRequest):
         current_topic=req.topic,
         next_topic=next_topic,
         next_mode=next_mode,
+        session_origin=current_session_origin,
         current_difficulty=req.difficulty,
         next_difficulty=next_difficulty,
         consecutive_wrong=consecutive_wrong,
@@ -1656,6 +1785,8 @@ async def submit(req: SubmitRequest):
         recommended_review_topic=session_summary.get("recommended_review_topic"),
         selected_content_ids=session_summary.get("selected_content_ids"),
         course_id=session_summary.get("course_id"),
+        session_origin=session_summary.get("session_origin", current_session_origin),
+        focused_topic_mastery_summary=session_summary.get("focused_topic_mastery_summary"),
         narrative_bridge=narrative_bridge,
     )
 
@@ -1742,6 +1873,7 @@ async def session_start(req: GenerateRequest):
         if req.mode in {"auto", "normal_practice", "weakness_review", "challenge"}
         else "normal_practice"
     )
+    requested_session_origin = _normalize_session_origin(req.session_origin)
 
     # Resolve selected content items by real Mongo _id
     resolved_topics: list[str] = []
@@ -1863,6 +1995,7 @@ async def session_start(req: GenerateRequest):
         mode=requested_mode,
         focus_topics=req.focus_topics,
         focused_topic=focused_topic,
+        session_origin=requested_session_origin,
     )
     state["current_source_scope_key"] = source_scope_key
     state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
@@ -1887,6 +2020,7 @@ async def session_start(req: GenerateRequest):
             "resolved_source_text": resolved_source_text,
             "topics": resolved_topics,
             "selected_mode": requested_mode,
+            "session_origin": requested_session_origin,
             "effective_mode": effective_mode,
             "current_difficulty": state["current_difficulty"],
         }
@@ -1902,6 +2036,7 @@ async def session_start(req: GenerateRequest):
         selected_content_ids=req.content_ids,
         selected_content_titles=resolved_content_titles,
         selected_mode=requested_mode,
+        session_origin=requested_session_origin,
     )
 
     state["session_count"] = state.get("session_count", 0) + 1
@@ -1940,6 +2075,7 @@ async def session_start(req: GenerateRequest):
         "irt_active": state["irt_active"],
         "cache_filling": False,
         "selected_mode": requested_mode,
+        "session_origin": requested_session_origin,
         "effective_mode": effective_mode,
     }
     
@@ -2046,6 +2182,7 @@ async def session_finalize(req: SessionFinalizeRequest):
         if req.mode in {"auto", "normal_practice", "weakness_review", "challenge"}
         else "normal_practice"
     )
+    requested_session_origin = _normalize_session_origin(req.session_origin)
 
     # Re-resolve selected content by real _id
     resolved_topics: list[str] = []
@@ -2150,6 +2287,7 @@ async def session_finalize(req: SessionFinalizeRequest):
         mode=requested_mode,
         focus_topics=req.focus_topics,
         focused_topic=focused_topic,
+        session_origin=requested_session_origin,
     )
     state["current_source_scope_key"] = source_scope_key
     state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
@@ -2174,6 +2312,7 @@ async def session_finalize(req: SessionFinalizeRequest):
         selected_content_ids=req.content_ids,
         selected_content_titles=resolved_content_titles,
         selected_mode=requested_mode,
+        session_origin=requested_session_origin,
     )
 
     state["session_count"] = state.get("session_count", 0) + 1
@@ -2225,6 +2364,7 @@ async def session_finalize(req: SessionFinalizeRequest):
         "irt_active": state["irt_active"],
         "first_question": gen_resp,
         "selected_mode": requested_mode,
+        "session_origin": requested_session_origin,
         "effective_mode": effective_mode,
     }
 
