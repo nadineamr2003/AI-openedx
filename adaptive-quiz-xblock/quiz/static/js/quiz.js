@@ -623,6 +623,49 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return mode || '—';
   }
 
+  function normalizeTopicList(topics) {
+    if (!Array.isArray(topics)) return [];
+
+    return topics
+      .map(function (topic) { return String(topic || '').trim(); })
+      .filter(function (topic, index, arr) {
+        return topic && arr.indexOf(topic) === index;
+      });
+  }
+
+  function getFollowUpContext(sessionLike) {
+    var topic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
+    var courseId = String((sessionLike && sessionLike.course_id) || '').trim();
+    var contentIds = Array.isArray(sessionLike && sessionLike.selected_content_ids)
+      ? sessionLike.selected_content_ids.filter(function (contentId) { return !!contentId; })
+      : [];
+    var questionCount = parseInt((sessionLike && sessionLike.target_questions) || state.maxQuestionsCurrent || MAX_Q, 10) || MAX_Q;
+
+    if (!topic || !courseId || contentIds.length === 0) {
+      return null;
+    }
+
+    return {
+      topic: topic,
+      courseId: courseId,
+      contentIds: contentIds,
+      questionCount: questionCount
+    };
+  }
+
+  function startFocusedFollowUp(context) {
+    if (!context) return;
+
+    selectedCourseId = context.courseId;
+    selectedContentIds = context.contentIds.slice();
+    selectedMode = 'weakness_review';
+
+    startSessionWithIds(context.contentIds, context.courseId, 'weakness_review', {
+      focusTopics: [context.topic],
+      questionCount: context.questionCount
+    });
+  }
+
   function masteryStageClass(label) {
     switch (label) {
       case 'Struggling': return 'struggling';
@@ -949,6 +992,26 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     wrap.classList.remove('aq-hidden');
   }
 
+  function renderResultsFollowUp(data) {
+    var wrap = $('#aq-results-follow-up');
+    var topicEl = $('#aq-results-follow-up-topic');
+    var btn = $('#aq-btn-results-follow-up');
+    if (!wrap || !topicEl || !btn) return;
+
+    var followUp = getFollowUpContext(data);
+    if (!followUp) {
+      wrap.classList.add('aq-hidden');
+      btn.onclick = null;
+      return;
+    }
+
+    topicEl.textContent = 'Focused on: ' + followUp.topic;
+    btn.onclick = function () {
+      startFocusedFollowUp(followUp);
+    };
+    wrap.classList.remove('aq-hidden');
+  }
+
   // ── Results ────────────────────────────────────────────────────────
   function showResults(data) {
     var score = data.session_score || state.sessionScore;
@@ -1006,6 +1069,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     renderSessionInsight(data);
     renderLectureMasterySummary(lectureSummaries);
+    renderResultsFollowUp(data);
 
     showScreen('results');
   }
@@ -1069,6 +1133,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var wrap = options.wrap || $('#aq-session-history-list');
     var empty = options.empty || $('#aq-session-history-empty');
     var showReviewButton = !!options.showReviewButton;
+    var allowFollowUp = !!options.allowFollowUp;
 
     if (!wrap) return;
     wrap.innerHTML = '';
@@ -1087,12 +1152,29 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       var lectureTitles = Array.isArray(session.selected_content_titles) && session.selected_content_titles.length
         ? session.selected_content_titles.join(', ')
         : '—';
+      var followUp = allowFollowUp ? getFollowUpContext(session) : null;
 
       var actionsHtml = '';
+      var actionButtons = [];
       if (showReviewButton && session.question_log && session.question_log.length) {
+        actionButtons.push(
+          '<button class="aq-btn-session aq-btn-session-review" type="button" data-session-index="' + idx + '">Review Session</button>'
+        );
+      }
+      if (followUp) {
+        actionButtons.push(
+          '<button class="aq-btn-session aq-btn-session-follow-up" type="button" data-session-index="' + idx + '">Start Follow-up Quiz</button>'
+        );
+      }
+      if (actionButtons.length) {
         actionsHtml =
+          '<div class="aq-session-actions-wrap">' +
+          (followUp
+            ? '<div class="aq-follow-up-sub aq-follow-up-sub-card">Focused on: ' + escapeHtml(followUp.topic) + '</div>'
+            : '') +
           '<div class="aq-session-actions">' +
-          '<button class="aq-btn-session" type="button" data-session-index="' + idx + '">Review Session</button>' +
+          actionButtons.join('') +
+          '</div>' +
           '</div>';
       }
 
@@ -1143,10 +1225,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
 
     if (showReviewButton) {
-      wrap.querySelectorAll('.aq-btn-session').forEach(function (btn) {
+      wrap.querySelectorAll('.aq-btn-session-review').forEach(function (btn) {
         btn.addEventListener('click', function () {
           var idx = parseInt(btn.getAttribute('data-session-index'), 10);
           openSessionReview(sessions[idx]);
+        });
+      });
+    }
+
+    if (allowFollowUp) {
+      wrap.querySelectorAll('.aq-btn-session-follow-up').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var idx = parseInt(btn.getAttribute('data-session-index'), 10);
+          var followUp = getFollowUpContext(sessions[idx]);
+          if (followUp) startFocusedFollowUp(followUp);
         });
       });
     }
@@ -1183,7 +1275,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     renderSessionHistory(pageSessions, {
       wrap: $('#aq-history-list'),
       empty: $('#aq-history-empty'),
-      showReviewButton: true
+      showReviewButton: true,
+      allowFollowUp: true
     });
 
     updateHistoryPager();
@@ -1306,13 +1399,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           renderSessionHistory(data.sessions || [], {
             wrap: $('#aq-session-history-list'),
             empty: $('#aq-session-history-empty'),
-            showReviewButton: false
+            showReviewButton: false,
+            allowFollowUp: false
           });
         } else {
           renderSessionHistory([], {
             wrap: $('#aq-session-history-list'),
             empty: $('#aq-session-history-empty'),
-            showReviewButton: false
+            showReviewButton: false,
+            allowFollowUp: false
           });
         }
       },
@@ -1320,7 +1415,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         renderSessionHistory([], {
           wrap: $('#aq-session-history-list'),
           empty: $('#aq-session-history-empty'),
-          showReviewButton: false
+          showReviewButton: false,
+          allowFollowUp: false
         });
       }
     });
@@ -1385,9 +1481,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   // ── Session start ───────────────────────────────────────────────────
-  function startSessionWithIds(ids, courseId, mode) {
+  function startSessionWithIds(ids, courseId, mode, options) {
+    options = options || {};
     var countInput = $('#aq-question-count');
-    var chosenCount = countInput ? parseInt(countInput.value, 10) : MAX_Q;
+    var chosenCount = parseInt(options.questionCount, 10);
+    if (!chosenCount) {
+      chosenCount = countInput ? parseInt(countInput.value, 10) : MAX_Q;
+    }
+    var focusTopics = normalizeTopicList(options.focusTopics);
+    var normalizedIds = Array.isArray(ids) ? ids.slice() : [];
+    var activeCourseId = courseId || selectedCourseId;
+
+    selectedCourseId = activeCourseId;
+    selectedContentIds = normalizedIds.slice();
+    selectedMode = mode || 'normal_practice';
     state.questionsSeenSoFar = 0;
     state.sessionScore = 0;
     state.lastTopic = '—';
@@ -1398,9 +1505,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       type: 'POST', url: urlStart,
       data: JSON.stringify({
         question_count: chosenCount,
-        selected_course_id: courseId,
-        content_ids: ids,
-        mode: mode || 'normal_practice'
+        selected_course_id: activeCourseId,
+        content_ids: normalizedIds,
+        mode: selectedMode,
+        focus_topics: focusTopics
       }),
       contentType: 'application/json',
       success: function (data) {

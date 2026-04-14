@@ -37,6 +37,10 @@ router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 CACHE_PROMPT_VERSION = "quiz-cache-v2"
 CACHE_UNUSED_TTL_DAYS = 14
 CACHE_USED_TTL_DAYS = 7
+DEFAULT_CACHE_TARGET = 1
+FOCUSED_FOLLOWUP_CACHE_TARGET = 2
+FOCUSED_FOLLOWUP_WAIT_SECONDS = 2.0
+FOCUSED_FOLLOWUP_WAIT_INTERVAL_SECONDS = 0.25
 logger = logging.getLogger(__name__)
 _REPLENISH_IN_FLIGHT: set[str] = set()
 RECENT_QUESTION_HISTORY_LIMIT = 40
@@ -283,6 +287,67 @@ def _cache_bucket_key(
         source_scope_key,
         prompt_version,
     ])
+
+
+def _is_focused_followup_session(mode: str, focus_topics: list[str] | None) -> bool:
+    normalized_focus_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (focus_topics or [])
+        if str(topic).strip()
+    ])
+    return mode == "weakness_review" and len(normalized_focus_topics) == 1
+
+
+def _state_is_focused_followup(state: dict) -> bool:
+    return bool(state.get("current_is_focused_followup"))
+
+
+def _cache_target_for_state(state: dict, topic: str, difficulty: int) -> int:
+    if _state_is_focused_followup(state):
+        logger.info(
+            "[FOLLOWUP] Focused hot bucket target=%s topic=%s difficulty=%s",
+            FOCUSED_FOLLOWUP_CACHE_TARGET,
+            topic,
+            difficulty,
+        )
+        return FOCUSED_FOLLOWUP_CACHE_TARGET
+
+    return DEFAULT_CACHE_TARGET
+
+
+async def _wait_for_replenished_cache(
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    source_scope_key: str,
+    prompt_version: str,
+) -> bool:
+    bucket_key = _cache_bucket_key(
+        topic=topic,
+        difficulty=difficulty,
+        course_id=course_id,
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
+    )
+    if bucket_key not in _REPLENISH_IN_FLIGHT:
+        return False
+
+    logger.info(
+        "[FOLLOWUP] Waiting for inflight replenish topic=%s difficulty=%s",
+        topic,
+        difficulty,
+    )
+
+    attempts = max(
+        1,
+        int(FOCUSED_FOLLOWUP_WAIT_SECONDS / FOCUSED_FOLLOWUP_WAIT_INTERVAL_SECONDS),
+    )
+    for _ in range(attempts):
+        await asyncio.sleep(FOCUSED_FOLLOWUP_WAIT_INTERVAL_SECONDS)
+        if bucket_key not in _REPLENISH_IN_FLIGHT:
+            break
+
+    return True
 
 def _mastery_label(mastery: float) -> str:
     if mastery < 0.30:
@@ -564,6 +629,7 @@ async def _create_session_history(
         "total_time_spent_ms": 0,
         "weakest_topic_this_session": None,
         "strongest_topic_this_session": None,
+        "recommended_review_topic": None,
         "recommendation": None,
         "selected_mode": selected_mode,
     }
@@ -798,9 +864,11 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 )
             )
 
+    recommended_review_topic = weakest_topic
+
     recommendation = _build_session_recommendation(
         accuracy=accuracy,
-        review_topic=weakest_topic,
+        review_topic=recommended_review_topic,
         strongest_topic=strongest_topic,
     )
 
@@ -820,6 +888,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "content_mastery_summaries": content_mastery_summaries,
                 "weakest_topic_this_session": weakest_topic,
                 "strongest_topic_this_session": strongest_topic,
+                "recommended_review_topic": recommended_review_topic,
                 "recommendation": recommendation,
             }
         }
@@ -835,6 +904,9 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         "content_mastery_summaries": content_mastery_summaries,
         "weakest_topic_this_session": weakest_topic,
         "strongest_topic_this_session": strongest_topic,
+        "recommended_review_topic": recommended_review_topic,
+        "selected_content_ids": doc.get("selected_content_ids", []),
+        "course_id": doc.get("course_id"),
         "recommendation": recommendation,
     }
 
@@ -842,6 +914,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
 def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
     item = {
         "session_id": doc.get("session_id"),
+        "course_id": doc.get("course_id"),
         "started_at": doc.get("started_at"),
         "ended_at": doc.get("ended_at"),
         "target_questions": doc.get("target_questions", 0),
@@ -852,6 +925,10 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "total_time_spent_ms": doc.get("total_time_spent_ms", 0),
         "weakest_topic_this_session": doc.get("weakest_topic_this_session"),
         "strongest_topic_this_session": doc.get("strongest_topic_this_session"),
+        "recommended_review_topic": (
+            doc.get("recommended_review_topic")
+            or doc.get("weakest_topic_this_session")
+        ),
         "recommendation": doc.get("recommendation"),
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
@@ -859,6 +936,7 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "topics_practised_count": doc.get("topics_practised_count"),
         "content_mastery_summaries": doc.get("content_mastery_summaries", []),
         "selected_mode": doc.get("selected_mode", "normal_practice"),
+        "selected_content_ids": doc.get("selected_content_ids", []),
         "selected_content_titles": doc.get("selected_content_titles", []),
     }
 
@@ -874,6 +952,7 @@ async def _get_cached_question(
     source_scope_key: str,
     prompt_version: str,
     excluded_hashes: list[str] | None = None,
+    allow_relaxed_fallback: bool = True,
 ) -> dict | None:
     db = get_db()
     now = datetime.now(timezone.utc)
@@ -909,7 +988,7 @@ async def _get_cached_question(
                 topic,
                 difficulty,
             )
-        else:
+        elif allow_relaxed_fallback:
             question = await _claim(base_query)
             if question:
                 logger.info(
@@ -946,7 +1025,7 @@ async def _replenish_cache(
     source_text: str,
     source_scope_key: str,
     prompt_version: str,
-    target: int = 1,
+    target: int = DEFAULT_CACHE_TARGET,
 ):
     bucket_key = _cache_bucket_key(
         topic=topic,
@@ -1054,6 +1133,8 @@ async def _generate_first_question(
     """Generate (or pull from cache) the first question for a freshly created session."""
     source_scope_key = _make_source_scope_key(source_text)
     recent_hashes = _recent_seen_hashes_from_state(state, course_id)
+    cache_target = _cache_target_for_state(state, topic, difficulty)
+    preferred_only = _state_is_focused_followup(state)
     cached = await _get_cached_question(
         topic=topic,
         difficulty=difficulty,
@@ -1061,6 +1142,7 @@ async def _generate_first_question(
         source_scope_key=source_scope_key,
         prompt_version=CACHE_PROMPT_VERSION,
         excluded_hashes=recent_hashes,
+        allow_relaxed_fallback=not preferred_only,
     )
     if cached:
         asyncio.create_task(
@@ -1071,43 +1153,119 @@ async def _generate_first_question(
                 source_text=source_text,
                 source_scope_key=source_scope_key,
                 prompt_version=CACHE_PROMPT_VERSION,
-                target=1,
+                target=cache_target,
             )
         )
         question = cached
     else:
-        logger.info(
-            "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
-            topic, difficulty, CACHE_PROMPT_VERSION
-        )
-        try:
-            question = await _generate_question_with_soft_dedupe(
+        question = None
+        if _state_is_focused_followup(state):
+            waited_for_cache = await _wait_for_replenished_cache(
                 topic=topic,
                 difficulty=difficulty,
-                source_text=source_text,
                 course_id=course_id,
-                recent_hashes=recent_hashes,
+                source_scope_key=source_scope_key,
+                prompt_version=CACHE_PROMPT_VERSION,
             )
-            generated_difficulty = int(question.get("difficulty", difficulty))
-            logger.info(
-                "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
-                topic,
-                difficulty,
-                generated_difficulty,
-            )
-            asyncio.create_task(
-                _replenish_cache(
+            if waited_for_cache:
+                logger.info(
+                    "[FOLLOWUP] Retrying preferred cache after wait topic=%s difficulty=%s",
+                    topic,
+                    difficulty,
+                )
+                question = await _get_cached_question(
                     topic=topic,
-                    difficulty=generated_difficulty,
+                    difficulty=difficulty,
                     course_id=course_id,
-                    source_text=source_text,
                     source_scope_key=source_scope_key,
                     prompt_version=CACHE_PROMPT_VERSION,
-                    target=1,
+                    excluded_hashes=recent_hashes,
+                    allow_relaxed_fallback=False,
                 )
+                if question:
+                    logger.info(
+                        "[FOLLOWUP] Cache recovered after wait topic=%s difficulty=%s",
+                        topic,
+                        difficulty,
+                    )
+                else:
+                    logger.info(
+                        "[FOLLOWUP] Preferred cache unavailable after wait topic=%s difficulty=%s",
+                        topic,
+                        difficulty,
+                    )
+                    logger.info(
+                        "[FOLLOWUP] Trying relaxed cache after wait topic=%s difficulty=%s",
+                        topic,
+                        difficulty,
+                    )
+                    question = await _get_cached_question(
+                        topic=topic,
+                        difficulty=difficulty,
+                        course_id=course_id,
+                        source_scope_key=source_scope_key,
+                        prompt_version=CACHE_PROMPT_VERSION,
+                        excluded_hashes=None,
+                    )
+                    if question:
+                        logger.info(
+                            "[FOLLOWUP] Relaxed cache recovered after wait topic=%s difficulty=%s",
+                            topic,
+                            difficulty,
+                        )
+
+            if question:
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=topic,
+                        difficulty=difficulty,
+                        course_id=course_id,
+                        source_text=source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=CACHE_PROMPT_VERSION,
+                        target=cache_target,
+                    )
+                )
+
+        if question is None:
+            if _state_is_focused_followup(state):
+                logger.info(
+                    "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
+                    topic,
+                    difficulty,
+                )
+            logger.info(
+                "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
+                topic, difficulty, CACHE_PROMPT_VERSION
             )
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
+            try:
+                question = await _generate_question_with_soft_dedupe(
+                    topic=topic,
+                    difficulty=difficulty,
+                    source_text=source_text,
+                    course_id=course_id,
+                    recent_hashes=recent_hashes,
+                )
+                generated_difficulty = int(question.get("difficulty", difficulty))
+                logger.info(
+                    "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
+                    topic,
+                    difficulty,
+                    generated_difficulty,
+                )
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=topic,
+                        difficulty=generated_difficulty,
+                        course_id=course_id,
+                        source_text=source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=CACHE_PROMPT_VERSION,
+                        target=cache_target,
+                    )
+                )
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
 
     _record_seen_question(
         state=state,
@@ -1138,6 +1296,51 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
             out.append(value)
     return out
 
+
+def _apply_focus_topics(
+    resolved_topics: list[str],
+    focus_topics: list[str] | None,
+) -> tuple[list[str], str | None]:
+    normalized_focus_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (focus_topics or [])
+        if str(topic).strip()
+    ])
+    if not normalized_focus_topics:
+        return resolved_topics, None
+
+    focused_topic = next(
+        (topic for topic in normalized_focus_topics if topic in resolved_topics),
+        None,
+    )
+    if not focused_topic:
+        return resolved_topics, None
+
+    return [focused_topic], focused_topic
+
+
+def _set_session_followup_state(
+    state: dict,
+    mode: str,
+    focus_topics: list[str] | None,
+    focused_topic: str | None,
+) -> bool:
+    is_focused_followup = (
+        _is_focused_followup_session(mode, focus_topics)
+        and focused_topic is not None
+    )
+    state["current_is_focused_followup"] = is_focused_followup
+    state["current_focus_topic"] = focused_topic if is_focused_followup else None
+
+    if is_focused_followup:
+        logger.info(
+            "[FOLLOWUP] Focused follow-up detected topic=%s mode=%s",
+            focused_topic,
+            mode,
+        )
+
+    return is_focused_followup
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/generate")
@@ -1148,6 +1351,8 @@ async def generate(req: GenerateRequest):
         source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
         prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
         recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
+        cache_target = _cache_target_for_state(state, req.topic, req.difficulty)
+        preferred_only = _state_is_focused_followup(state)
 
         # Try cache first
         cached = await _get_cached_question(
@@ -1157,6 +1362,7 @@ async def generate(req: GenerateRequest):
             source_scope_key=source_scope_key,
             prompt_version=prompt_version,
             excluded_hashes=recent_hashes,
+            allow_relaxed_fallback=not preferred_only,
         )
         if cached:
             # Fire background replenishment
@@ -1168,7 +1374,7 @@ async def generate(req: GenerateRequest):
                     source_text=req.source_text,
                     source_scope_key=source_scope_key,
                     prompt_version=prompt_version,
-                    target=1,
+                    target=cache_target,
                 )
             )
             _record_seen_question(
@@ -1183,7 +1389,93 @@ async def generate(req: GenerateRequest):
             await _save_state(state)
             return cached
 
+        if _state_is_focused_followup(state):
+            waited_for_cache = await _wait_for_replenished_cache(
+                topic=req.topic,
+                difficulty=req.difficulty,
+                course_id=req.course_id,
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+            )
+            recovered = None
+            if waited_for_cache:
+                logger.info(
+                    "[FOLLOWUP] Retrying preferred cache after wait topic=%s difficulty=%s",
+                    req.topic,
+                    req.difficulty,
+                )
+                recovered = await _get_cached_question(
+                    topic=req.topic,
+                    difficulty=req.difficulty,
+                    course_id=req.course_id,
+                    source_scope_key=source_scope_key,
+                    prompt_version=prompt_version,
+                    excluded_hashes=recent_hashes,
+                    allow_relaxed_fallback=False,
+                )
+                if recovered:
+                    logger.info(
+                        "[FOLLOWUP] Cache recovered after wait topic=%s difficulty=%s",
+                        req.topic,
+                        req.difficulty,
+                    )
+                else:
+                    logger.info(
+                        "[FOLLOWUP] Preferred cache unavailable after wait topic=%s difficulty=%s",
+                        req.topic,
+                        req.difficulty,
+                    )
+                    logger.info(
+                        "[FOLLOWUP] Trying relaxed cache after wait topic=%s difficulty=%s",
+                        req.topic,
+                        req.difficulty,
+                    )
+                    recovered = await _get_cached_question(
+                        topic=req.topic,
+                        difficulty=req.difficulty,
+                        course_id=req.course_id,
+                        source_scope_key=source_scope_key,
+                        prompt_version=prompt_version,
+                        excluded_hashes=None,
+                    )
+                    if recovered:
+                        logger.info(
+                            "[FOLLOWUP] Relaxed cache recovered after wait topic=%s difficulty=%s",
+                            req.topic,
+                            req.difficulty,
+                        )
+
+            if recovered:
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=req.topic,
+                        difficulty=req.difficulty,
+                        course_id=req.course_id,
+                        source_text=req.source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=prompt_version,
+                        target=cache_target,
+                    )
+                )
+                _record_seen_question(
+                    state=state,
+                    question=recovered,
+                    course_id=req.course_id,
+                    topic=str(recovered.get("topic", req.topic)),
+                    difficulty=int(recovered.get("difficulty", req.difficulty)),
+                    source_scope_key=source_scope_key,
+                    prompt_version=prompt_version,
+                )
+                await _save_state(state)
+                return recovered
+
         # Cache miss — live generation
+        if _state_is_focused_followup(state):
+            logger.info(
+                "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
+                req.topic,
+                req.difficulty,
+            )
         logger.info(
             "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
             req.topic, req.difficulty, prompt_version
@@ -1210,7 +1502,7 @@ async def generate(req: GenerateRequest):
                 source_text=req.source_text,
                 source_scope_key=source_scope_key,
                 prompt_version=prompt_version,
-                target=1,
+                target=cache_target,
             )
         )
         _record_seen_question(
@@ -1361,6 +1653,9 @@ async def submit(req: SubmitRequest):
         lectures_practised_count=session_summary.get("lectures_practised_count"),
         topics_practised_count=session_summary.get("topics_practised_count"),
         content_mastery_summaries=session_summary.get("content_mastery_summaries"),
+        recommended_review_topic=session_summary.get("recommended_review_topic"),
+        selected_content_ids=session_summary.get("selected_content_ids"),
+        course_id=session_summary.get("course_id"),
         narrative_bridge=narrative_bridge,
     )
 
@@ -1510,6 +1805,20 @@ async def session_start(req: GenerateRequest):
             detail="No active content found for the selected items.",
         )
 
+    resolved_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
+    if focused_topic:
+        logger.info(
+            "[SESSION] Focus topic applied topic=%s mode=%s",
+            focused_topic,
+            requested_mode,
+        )
+    elif req.focus_topics:
+        logger.info(
+            "[SESSION] Focus topic unavailable requested=%s mode=%s",
+            req.focus_topics,
+            requested_mode,
+        )
+
     # Load or create state
     state = await _get_state(req.student_id, req.course_id, resolved_topics)
 
@@ -1549,6 +1858,12 @@ async def session_start(req: GenerateRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    is_focused_followup = _set_session_followup_state(
+        state=state,
+        mode=requested_mode,
+        focus_topics=req.focus_topics,
+        focused_topic=focused_topic,
+    )
     state["current_source_scope_key"] = source_scope_key
     state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
     state["current_difficulty"] = select_session_start_difficulty(
@@ -1591,6 +1906,29 @@ async def session_start(req: GenerateRequest):
 
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
+
+    if is_focused_followup:
+        cache_target = _cache_target_for_state(
+            state,
+            resolved_topics[0],
+            state["current_difficulty"],
+        )
+        logger.info(
+            "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
+            resolved_topics[0],
+            state["current_difficulty"],
+        )
+        asyncio.create_task(
+            _replenish_cache(
+                topic=resolved_topics[0],
+                difficulty=state["current_difficulty"],
+                course_id=req.course_id,
+                source_text=resolved_source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=CACHE_PROMPT_VERSION,
+                target=cache_target,
+            )
+        )
 
     return {
         "diagnostic_needed": False,
@@ -1756,6 +2094,20 @@ async def session_finalize(req: SessionFinalizeRequest):
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
 
+    resolved_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
+    if focused_topic:
+        logger.info(
+            "[SESSION] Focus topic applied topic=%s mode=%s",
+            focused_topic,
+            requested_mode,
+        )
+    elif req.focus_topics:
+        logger.info(
+            "[SESSION] Focus topic unavailable requested=%s mode=%s",
+            req.focus_topics,
+            requested_mode,
+        )
+
     state = await _get_state(req.student_id, req.course_id, resolved_topics)
 
     if "topic_mastery_source" not in state:
@@ -1793,6 +2145,12 @@ async def session_finalize(req: SessionFinalizeRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    is_focused_followup = _set_session_followup_state(
+        state=state,
+        mode=requested_mode,
+        focus_topics=req.focus_topics,
+        focused_topic=focused_topic,
+    )
     state["current_source_scope_key"] = source_scope_key
     state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
     state["current_difficulty"] = select_session_start_difficulty(
@@ -1820,6 +2178,29 @@ async def session_finalize(req: SessionFinalizeRequest):
 
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
+
+    if is_focused_followup:
+        cache_target = _cache_target_for_state(
+            state,
+            resolved_topics[0],
+            state["current_difficulty"],
+        )
+        logger.info(
+            "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
+            resolved_topics[0],
+            state["current_difficulty"],
+        )
+        asyncio.create_task(
+            _replenish_cache(
+                topic=resolved_topics[0],
+                difficulty=state["current_difficulty"],
+                course_id=req.course_id,
+                source_text=resolved_source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=CACHE_PROMPT_VERSION,
+                target=cache_target,
+            )
+        )
 
     first_topic = resolved_topics[0]
 

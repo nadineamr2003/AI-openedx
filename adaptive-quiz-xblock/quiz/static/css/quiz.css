@@ -1202,6 +1202,22 @@
   flex-wrap: wrap;
 }
 
+.aq-results-follow-up {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-md);
+  background: #FCFDFF;
+  text-align: center;
+}
+
+.aq-follow-up-sub {
+  margin: 0 0 10px;
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--aq-text-muted);
+}
+
 .aq-results-lecture-summary {
   margin-bottom: 24px;
   text-align: left;
@@ -1701,7 +1717,15 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.aq-session-actions-wrap {
   margin-top: 12px;
+}
+
+.aq-follow-up-sub-card {
+  margin-bottom: 8px;
+  text-align: left;
 }
 
 .aq-btn-session {

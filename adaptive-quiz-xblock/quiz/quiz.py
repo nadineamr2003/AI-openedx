@@ -21,6 +21,11 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_BACKEND_URL = "http://host.docker.internal:8100"
 
+QUESTION_GENERATE_TIMEOUT = 120
+SIMILAR_QUESTION_TIMEOUT = 120
+SESSION_START_TIMEOUT = 60
+ANSWER_SUBMIT_TIMEOUT = 45
+
 
 class AdaptiveQuizXBlock(XBlock):
     """
@@ -98,6 +103,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     diagnostic_all_content_ids_json = String(default="",  scope=Scope.user_state)
     diagnostic_question_count   = Integer(default=10,     scope=Scope.user_state)
     diagnostic_resolved_source_text = String(default="",  scope=Scope.user_state)
+    pending_focus_topics_json   = String(default="",      scope=Scope.user_state)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
@@ -1257,6 +1263,11 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         selected_course = data.get("selected_course_id") or self._active_course_id()
         content_ids     = data.get("content_ids", [])
         selected_mode   = data.get("mode") or "normal_practice"
+        focus_topics    = [
+            str(topic).strip()
+            for topic in (data.get("focus_topics") or [])
+            if str(topic).strip()
+        ]
 
         self.selected_course_id        = selected_course
         self.selected_session_mode     = selected_mode
@@ -1266,19 +1277,25 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         self.session_source_text       = ""
         self.session_topics_json       = json.dumps([])
         self.session_target_questions  = requested_q
+        self.pending_focus_topics_json = json.dumps(focus_topics)
 
         if not content_ids:
             return {"success": False, "error": "Please select at least one content item."}
 
-        start_resp = self._api("/api/quiz/session/start", payload={
-            "student_id": self._student_id(),
-            "course_id": selected_course,
-            "topic": "",
-            "source_text": "",
-            "content_ids": content_ids,
-            "question_count": requested_q,
-            "mode": selected_mode,
-        })
+        start_resp = self._api(
+            "/api/quiz/session/start",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": selected_course,
+                "topic": "",
+                "source_text": "",
+                "content_ids": content_ids,
+                "question_count": requested_q,
+                "mode": selected_mode,
+                "focus_topics": focus_topics,
+            },
+            timeout=SESSION_START_TIMEOUT,
+        )
 
         if not start_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
@@ -1307,6 +1324,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             }
 
         self.diagnostic_pending       = False
+        self.pending_focus_topics_json = ""
         self.active_session_id        = start_resp.get("session_id", "")
         self.session_topics_json      = json.dumps(start_resp.get("topics", []))
         self.session_source_text      = start_resp.get("resolved_source_text", "")
@@ -1482,6 +1500,14 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     def finalize_session(self, data, suffix=""):
         all_content_ids = json.loads(self.diagnostic_all_content_ids_json or "[]")
         selected_mode = data.get("mode") or self.selected_session_mode or "normal_practice"
+        focus_topics = [
+            str(topic).strip()
+            for topic in (
+                data.get("focus_topics")
+                or json.loads(self.pending_focus_topics_json or "[]")
+            )
+            if str(topic).strip()
+        ]
 
         resp = self._api("/api/quiz/session/finalize", payload={
             "student_id": self._student_id(),
@@ -1489,6 +1515,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "content_ids": all_content_ids,
             "question_count": self.diagnostic_question_count or self.max_questions,
             "mode": selected_mode,
+            "focus_topics": focus_topics,
         }, timeout=45)
 
         if not resp or not resp.get("success"):
@@ -1500,6 +1527,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         self.diagnostic_all_content_ids_json  = ""
         self.diagnostic_item_index            = 0
         self.diagnostic_question_index        = 0
+        self.pending_focus_topics_json        = ""
 
         self.active_session_id   = resp.get("session_id", "")
         self.session_topics_json = json.dumps(resp.get("topics", []))
@@ -1557,7 +1585,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         "time_spent_ms": time_spent_ms,
         "time_context": time_context,
         "session_id": self.active_session_id or None,
-        })
+        },timeout=ANSWER_SUBMIT_TIMEOUT,)
 
         if not submit_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
@@ -1604,6 +1632,9 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "lectures_practised_count": submit_resp.get("lectures_practised_count"),
             "topics_practised_count": submit_resp.get("topics_practised_count"),
             "content_mastery_summaries": submit_resp.get("content_mastery_summaries", []),
+            "recommended_review_topic": submit_resp.get("recommended_review_topic"),
+            "selected_content_ids": submit_resp.get("selected_content_ids", []),
+            "course_id": submit_resp.get("course_id"),
             "narrative_bridge": submit_resp.get("narrative_bridge"),
         }
 
@@ -1623,13 +1654,17 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     @XBlock.json_handler
     def similar_question(self, data, suffix=""):
         """Proxy to /api/quiz/support/similar for one-more-like-this."""
-        resp = self._api("/api/quiz/support/similar", payload={
-            "student_id": self._student_id(),
-            "course_id": self._active_course_id(),
-            "topic": self.current_topic,
-            "difficulty": self.current_difficulty,
-            "source_text": self.session_source_text,
-        })
+        resp = self._api(
+            "/api/quiz/support/similar",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "topic": self.current_topic,
+                "difficulty": self.current_difficulty,
+                "source_text": self.session_source_text,
+            },
+            timeout=SIMILAR_QUESTION_TIMEOUT,
+        )
         if resp:
             self.current_question_json = json.dumps(resp)
             return {"success": True, "question": resp}
@@ -1864,13 +1899,17 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         if topic not in topics:
             topic = topics[0]
             self.current_topic = topic
-        resp = self._api("/api/quiz/generate", payload={
-            "student_id": self._student_id(),
-            "course_id": self._active_course_id(),
-            "topic": topic,
-            "difficulty": self.current_difficulty,
-            "source_text": self.session_source_text,
-        })
+        resp = self._api(
+            "/api/quiz/generate",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "topic": self.current_topic,
+                "difficulty": self.current_difficulty,
+                "source_text": self.session_source_text,
+            },
+            timeout=QUESTION_GENERATE_TIMEOUT,
+        )
 
         if not resp:
             return {"success": False, "error": "Could not generate question. Try again."}
