@@ -589,6 +589,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  function masteryPct(value) {
+    var numeric = Number(value);
+    if (!isFinite(numeric)) numeric = 0;
+    return Math.round(numeric * 100);
+  }
+
+  function masteryDeltaFromDisplayed(beforePct, afterPct) {
+    return afterPct - beforePct;
+  }
+
+  function formatMasteryDelta(deltaPct) {
+    if (deltaPct > 0) return '+' + deltaPct + '%';
+    if (deltaPct < 0) return deltaPct + '%';
+    return '0%';
+  }
+
   function formatMs(ms) {
     if (!ms || ms <= 0) return '—';
     var seconds = Math.round(ms / 1000);
@@ -907,12 +923,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     items.forEach(function (item) {
-      var beforePct = Math.round((item.avg_mastery_before || 0) * 100);
-      var afterPct = Math.round((item.avg_mastery_after || 0) * 100);
-      var deltaPct = Math.round((item.mastery_delta || 0) * 100);
+      var beforePct = masteryPct(item.avg_mastery_before);
+      var afterPct = masteryPct(item.avg_mastery_after);
+      var deltaPct = masteryDeltaFromDisplayed(beforePct, afterPct);
       var deltaClass = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat';
       var deltaArrow = deltaPct > 0 ? '↑' : deltaPct < 0 ? '↓' : '→';
-      var deltaLabel = deltaPct > 0 ? '+' + deltaPct + '%' : deltaPct + '%';
+      var deltaLabel = formatMasteryDelta(deltaPct);
       var topicCount = item.topic_count || 0;
 
       var card = document.createElement('div');
