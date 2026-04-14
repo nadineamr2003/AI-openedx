@@ -19,6 +19,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 
 # =========================
 # HELPERS
@@ -31,13 +32,14 @@ def _csv_env(name: str, default: List[str]) -> List[str]:
 
 PROVIDER_ORDER = _csv_env(
     "PROVIDER_ORDER",
-    ["gemini", "groq", "openrouter", "huggingface"]
+    ["gemini", "groq", "cerebras", "openrouter", "huggingface"]
 )
 
 # Keep provider model lists in env so you can tune them without editing code.
 PROVIDER_MODELS = {
     "gemini": _csv_env("GEMINI_MODELS", ["gemini-3-flash-preview"]),
     "groq": _csv_env("GROQ_MODELS", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
+    "cerebras": _csv_env("CEREBRAS_MODELS", ["llama3.1-8b", "gpt-oss-120b"]),
     "openrouter": _csv_env(
         "OPENROUTER_MODELS",
         [
@@ -60,6 +62,10 @@ PROVIDERS = {
     "groq": {
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
         "api_key": GROQ_API_KEY,
+    },
+    "cerebras": {
+        "endpoint": "https://api.cerebras.ai/v1/chat/completions",
+        "api_key": CEREBRAS_API_KEY,
     },
     "openrouter": {
         "endpoint": "https://openrouter.ai/api/v1/chat/completions",

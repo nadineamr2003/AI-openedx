@@ -36,6 +36,7 @@ import asyncio
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
 CACHE_PROMPT_VERSION = "quiz-cache-v2"
 logger = logging.getLogger(__name__)
+_REPLENISH_IN_FLIGHT: set[str] = set()
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -66,6 +67,22 @@ def _make_question_hash(question: dict) -> str:
     }
     serialized = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _cache_bucket_key(
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    source_scope_key: str,
+    prompt_version: str,
+) -> str:
+    return "|".join([
+        course_id,
+        topic,
+        str(difficulty),
+        source_scope_key,
+        prompt_version,
+    ])
 
 def _mastery_label(mastery: float) -> str:
     if mastery < 0.30:
@@ -658,7 +675,8 @@ async def _get_cached_question(
     prompt_version: str,
 ) -> dict | None:
     db = get_db()
-    question = await db.questions_cache.find_one(
+    used_at = datetime.now(timezone.utc).isoformat()
+    question = await db.questions_cache.find_one_and_update(
         {
             "topic": topic,
             "difficulty": difficulty,
@@ -667,13 +685,15 @@ async def _get_cached_question(
             "prompt_version": prompt_version,
             "used": False,
         },
+        {"$set": {"used": True, "used_at": used_at}},
         sort=[("generated_at", -1)],
     )
     if question:
-        used_at = datetime.now(timezone.utc).isoformat()
-        await db.questions_cache.update_one(
-            {"_id": question["_id"]},
-            {"$set": {"used": True, "used_at": used_at}}
+        question["used"] = True
+        question["used_at"] = used_at
+        logger.info(
+            "[CACHE] Hit topic=%s difficulty=%s prompt_version=%s",
+            topic, difficulty, prompt_version
         )
         question.pop("_id", None)
     return question
@@ -688,48 +708,66 @@ async def _replenish_cache(
     prompt_version: str,
     target: int = 1,
 ):
-    db = get_db()
-    count = await db.questions_cache.count_documents({
-        "topic": topic,
-        "difficulty": difficulty,
-        "course_id": course_id,
-        "source_scope_key": source_scope_key,
-        "prompt_version": prompt_version,
-        "used": False
-    })
-    needed = max(0, target - count)
-
-    logger.info(
-        "[CACHE] Replenish start topic=%s difficulty=%s current_unused=%s target=%s needed=%s",
-        topic, difficulty, count, target, needed
+    bucket_key = _cache_bucket_key(
+        topic=topic,
+        difficulty=difficulty,
+        course_id=course_id,
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
     )
+    if bucket_key in _REPLENISH_IN_FLIGHT:
+        logger.info(
+            "[CACHE] Replenish skipped inflight topic=%s difficulty=%s",
+            topic, difficulty
+        )
+        return
 
-    for _ in range(needed):
-        try:
-            await asyncio.sleep(2)
-            q = await generate_question(topic, difficulty, source_text)
-            generated_at = datetime.now(timezone.utc).isoformat()
-            q["course_id"] = course_id
-            q["used"] = False
-            q["generated_at"] = generated_at
-            q["used_at"] = None
-            q["source_scope_key"] = source_scope_key
-            q["prompt_version"] = prompt_version
-            q["question_hash"] = _make_question_hash(q)
+    _REPLENISH_IN_FLIGHT.add(bucket_key)
+    db = get_db()
+    try:
+        count = await db.questions_cache.count_documents({
+            "topic": topic,
+            "difficulty": difficulty,
+            "course_id": course_id,
+            "source_scope_key": source_scope_key,
+            "prompt_version": prompt_version,
+            "used": False
+        })
+        needed = max(0, target - count)
 
-            result = await db.questions_cache.insert_one(q)
+        logger.info(
+            "[CACHE] Replenish start topic=%s difficulty=%s current_unused=%s target=%s needed=%s",
+            topic, difficulty, count, target, needed
+        )
 
-            logger.info(
-                "[CACHE] Replenish inserted topic=%s difficulty=%s cache_id=%s",
-                topic, difficulty, str(result.inserted_id)
-            )
+        for _ in range(needed):
+            try:
+                await asyncio.sleep(2)
+                q = await generate_question(topic, difficulty, source_text)
+                generated_at = datetime.now(timezone.utc).isoformat()
+                q["course_id"] = course_id
+                q["used"] = False
+                q["generated_at"] = generated_at
+                q["used_at"] = None
+                q["source_scope_key"] = source_scope_key
+                q["prompt_version"] = prompt_version
+                q["question_hash"] = _make_question_hash(q)
 
-        except Exception as e:
-            logger.warning(
-                "[CACHE] Replenish failed topic=%s difficulty=%s error=%r",
-                topic, difficulty, e
-            )
-            break
+                result = await db.questions_cache.insert_one(q)
+
+                logger.info(
+                    "[CACHE] Replenish inserted topic=%s difficulty=%s cache_id=%s",
+                    topic, difficulty, str(result.inserted_id)
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "[CACHE] Replenish failed topic=%s difficulty=%s error=%r",
+                    topic, difficulty, e
+                )
+                break
+    finally:
+        _REPLENISH_IN_FLIGHT.discard(bucket_key)
         
 def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dict:
     item = {
@@ -786,6 +824,10 @@ async def _generate_first_question(
         )
         question = cached
     else:
+        logger.info(
+            "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
+            topic, difficulty, CACHE_PROMPT_VERSION
+        )
         try:
             question = await generate_question(
                 topic=topic, difficulty=difficulty, source_text=source_text
@@ -863,6 +905,10 @@ async def generate(req: GenerateRequest):
             return cached
 
         # Cache miss — live generation
+        logger.info(
+            "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
+            req.topic, req.difficulty, prompt_version
+        )
         question = await generate_question(
             topic=req.topic,
             difficulty=req.difficulty,
