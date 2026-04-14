@@ -1,7 +1,9 @@
+import asyncio
 import httpx
 import os
 import json
 import logging
+import math
 import re
 import time
 from dotenv import load_dotenv
@@ -39,7 +41,7 @@ PROVIDER_ORDER = _csv_env(
 PROVIDER_MODELS = {
     "gemini": _csv_env("GEMINI_MODELS", ["gemini-3-flash-preview"]),
     "groq": _csv_env("GROQ_MODELS", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
-    "cerebras": _csv_env("CEREBRAS_MODELS", ["llama3.1-8b", "gpt-oss-120b"]),
+    "cerebras": _csv_env("CEREBRAS_MODELS", ["llama3.1-8b"]),
     "openrouter": _csv_env(
         "OPENROUTER_MODELS",
         [
@@ -80,6 +82,7 @@ PROVIDERS = {
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "").strip()
 _PROVIDER_COOLDOWNS: dict[str, float] = {}
+_MODEL_COOLDOWNS: dict[str, float] = {}
 _PROVIDER_503_FAILURES: dict[str, list[float]] = {}
 
 VERY_EASY_EASY_ANGLES = [
@@ -465,32 +468,175 @@ def _provider_cooldown_remaining(provider_name: str) -> float:
     return expires_at - now
 
 
-def _set_provider_cooldown(provider_name: str, seconds: int) -> None:
-    _PROVIDER_COOLDOWNS[provider_name] = time.time() + seconds
+def _provider_model_key(provider_name: str, model: str) -> str:
+    return f"{provider_name}:{model}"
 
 
-def _record_provider_throttle(provider_name: str, status_code: int) -> None:
-    if provider_name != "gemini":
-        return
-
+def _model_cooldown_remaining(provider_name: str, model: str) -> float:
     now = time.time()
+    key = _provider_model_key(provider_name, model)
+    expires_at = _MODEL_COOLDOWNS.get(key, 0.0)
+    if expires_at <= now:
+        _MODEL_COOLDOWNS.pop(key, None)
+        return 0.0
+    return expires_at - now
+
+
+def _set_provider_cooldown(provider_name: str, seconds: int) -> None:
+    seconds = max(1, int(seconds))
+    now = time.time()
+    _PROVIDER_COOLDOWNS[provider_name] = max(
+        _PROVIDER_COOLDOWNS.get(provider_name, 0.0),
+        now + seconds,
+    )
+
+
+def _set_model_cooldown(provider_name: str, model: str, seconds: int, reason: str) -> None:
+    seconds = max(1, int(seconds))
+    now = time.time()
+    key = _provider_model_key(provider_name, model)
+    expires_at = max(_MODEL_COOLDOWNS.get(key, 0.0), now + seconds)
+    _MODEL_COOLDOWNS[key] = expires_at
+    logger.info(
+        "[LLM] Cooldown set provider=%s model=%s seconds=%s reason=%s",
+        provider_name,
+        model,
+        int(expires_at - now),
+        reason,
+    )
+
+
+def _extract_retry_after_seconds(message: str) -> int | None:
+    if not message:
+        return None
+
+    match = re.search(
+        r"\bin\s+(?:(?P<minutes>\d+(?:\.\d+)?)m)?\s*(?P<seconds>\d+(?:\.\d+)?)s\b",
+        message,
+        re.IGNORECASE,
+    )
+    if match:
+        minutes = float(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0)
+        total_seconds = minutes * 60 + seconds
+        return max(1, math.ceil(total_seconds))
+
+    match = re.search(r"\bin\s+(?P<minutes>\d+(?:\.\d+)?)m\b", message, re.IGNORECASE)
+    if match:
+        minutes = float(match.group("minutes"))
+        return max(1, math.ceil(minutes * 60))
+
+    return None
+
+
+def _is_openrouter_daily_limit(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "free-models-per-day",
+            "free models per day",
+            "daily limit",
+            "daily quota",
+            "quota exceeded",
+            "per day",
+        )
+    )
+
+
+def _record_failure_cooldown(
+    provider_name: str,
+    model: str,
+    status_code: int,
+    message: str,
+) -> None:
+    retry_after = _extract_retry_after_seconds(message)
+    lowered = message.lower()
+
+    if provider_name == "gemini":
+        now = time.time()
+        if status_code == 429:
+            _set_provider_cooldown(provider_name, 600)
+            logger.info(
+                "[LLM] Provider cooldown set provider=%s seconds=%s reason=%s",
+                provider_name,
+                600,
+                "rate_limit_429",
+            )
+            return
+
+        if status_code != 503:
+            return
+
+        failures = _PROVIDER_503_FAILURES.get(provider_name, [])
+        failures = [stamp for stamp in failures if now - stamp <= 120]
+        failures.append(now)
+        _PROVIDER_503_FAILURES[provider_name] = failures
+        if len(failures) >= 2:
+            _set_provider_cooldown(provider_name, 120)
+            logger.info(
+                "[LLM] Provider cooldown set provider=%s seconds=%s reason=%s",
+                provider_name,
+                120,
+                "repeated_503",
+            )
+        return
+
+    if provider_name == "cerebras" and status_code == 404 and (
+        "model_not_found" in lowered or "not found" in lowered
+    ):
+        logger.info(
+            "[LLM] Long model cooldown provider=%s model=%s seconds=%s reason=%s",
+            provider_name,
+            model,
+            86400,
+            "model_not_found",
+        )
+        _set_model_cooldown(provider_name, model, 86400, "model_not_found")
+        return
+
     if status_code == 429:
-        _set_provider_cooldown(provider_name, 600)
+        if provider_name == "groq":
+            if model == "llama-3.3-70b-versatile":
+                seconds = retry_after if retry_after is not None else 900
+                logger.info(
+                    "[LLM] Long model cooldown provider=%s model=%s seconds=%s reason=%s",
+                    provider_name,
+                    model,
+                    seconds,
+                    "rate_limit_429",
+                )
+            elif model == "llama-3.1-8b-instant":
+                seconds = retry_after if retry_after is not None else 30
+            else:
+                seconds = retry_after if retry_after is not None else 60
+            _set_model_cooldown(provider_name, model, seconds, "rate_limit_429")
+            return
+
+        if provider_name == "openrouter":
+            if _is_openrouter_daily_limit(message):
+                seconds = retry_after if retry_after is not None else 21600
+                logger.info(
+                    "[LLM] Long model cooldown provider=%s model=%s seconds=%s reason=%s",
+                    provider_name,
+                    model,
+                    seconds,
+                    "daily_limit_429",
+                )
+                _set_model_cooldown(provider_name, model, seconds, "daily_limit_429")
+            else:
+                seconds = retry_after if retry_after is not None else 120
+                _set_model_cooldown(provider_name, model, seconds, "rate_limit_429")
+            return
+
+        seconds = retry_after if retry_after is not None else 60
+        _set_model_cooldown(provider_name, model, seconds, "rate_limit_429")
         return
 
-    if status_code != 503:
+    if status_code == 503:
+        seconds = retry_after if retry_after is not None else 60
+        _set_model_cooldown(provider_name, model, seconds, "upstream_503")
         return
-
-    failures = _PROVIDER_503_FAILURES.get(provider_name, [])
-    failures = [stamp for stamp in failures if now - stamp <= 120]
-    failures.append(now)
-    _PROVIDER_503_FAILURES[provider_name] = failures
-    if len(failures) >= 2:
-        _set_provider_cooldown(provider_name, 120)
-
-
-def _is_retryable_status(status_code: int) -> bool:
-    return status_code in {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 def _strip_markdown_fences(raw: str) -> str:
@@ -546,28 +692,55 @@ async def _call_model(
 
     headers = _build_headers(provider_name, api_key)
 
-    logger.info(f"[LLM] Request -> provider={provider_name} model={model}")
-
-    resp = await client.post(endpoint, headers=headers, json=payload)
-
-    try:
-        data = resp.json()
-    except Exception:
-        data = {}
-
-    if resp.status_code >= 400:
-        msg = _extract_error_message(data)
-        excerpt = _response_excerpt(resp)
-        raise ProviderHTTPError(
-            provider=provider_name,
-            model=model,
-            status_code=resp.status_code,
-            message=f"{msg} | body={excerpt}",
+    for attempt in range(2):
+        logger.info(
+            "[LLM] Request -> provider=%s model=%s attempt=%s",
+            provider_name,
+            model,
+            attempt + 1,
         )
 
-    content = _extract_message_content(data)
-    logger.info(f"[LLM] Response OK <- provider={provider_name} model={model}")
-    return content
+        resp = await client.post(endpoint, headers=headers, json=payload)
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+
+        if resp.status_code >= 400:
+            msg = _extract_error_message(data)
+            excerpt = _response_excerpt(resp)
+            full_message = f"{msg} | body={excerpt}"
+            retry_after = _extract_retry_after_seconds(full_message)
+
+            if (
+                attempt == 0
+                and resp.status_code in {429, 503}
+                and retry_after is not None
+                and retry_after <= 8
+            ):
+                logger.info(
+                    "[LLM] Short retry provider=%s model=%s wait=%ss status=%s",
+                    provider_name,
+                    model,
+                    retry_after,
+                    resp.status_code,
+                )
+                await asyncio.sleep(retry_after)
+                continue
+
+            raise ProviderHTTPError(
+                provider=provider_name,
+                model=model,
+                status_code=resp.status_code,
+                message=full_message,
+            )
+
+        content = _extract_message_content(data)
+        logger.info(f"[LLM] Response OK <- provider={provider_name} model={model}")
+        return content
+
+    raise RuntimeError(f"Model call unexpectedly exhausted retries for {provider_name}/{model}")
 
 ADMIN_MARKERS = [
     "communication rules",
@@ -1422,6 +1595,16 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
             logger.info(f"[LLM] Trying provider={provider_name} models={models}")
 
             for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
                 try:
                     raw = await _call_model(client, provider_name, model, prompt)
                     raw = _strip_markdown_fences(raw)
@@ -1456,7 +1639,7 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
                         continue
 
                 except ProviderHTTPError as e:
-                    _record_provider_throttle(e.provider, e.status_code)
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
                     msg = f"[LLM] HTTP failure provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -1552,12 +1735,35 @@ Respond with ONLY the simpler explanation text, no preamble.
     async with httpx.AsyncClient(timeout=30) as client:
         for provider_name in PROVIDER_ORDER:
             provider_cfg = PROVIDERS.get(provider_name)
-            if not provider_cfg or not provider_cfg["api_key"]:
+            if not provider_cfg:
+                logger.info(f"[LLM] Skipping provider={provider_name} for simpler explanation")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss for simpler explanation",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
+                continue
+
+            if not provider_cfg["api_key"]:
                 logger.info(f"[LLM] Skipping provider={provider_name} for simpler explanation")
                 continue
 
             models = PROVIDER_MODELS.get(provider_name, [])
             for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss for simpler explanation",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
                 try:
                     raw = await _call_model(client, provider_name, model, prompt)
                     raw = _strip_markdown_fences(raw).strip()
@@ -1571,6 +1777,7 @@ Respond with ONLY the simpler explanation text, no preamble.
                     all_failures.append(msg)
 
                 except ProviderHTTPError as e:
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
                     msg = f"[LLM] HTTP failure simpler_explanation provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -1603,12 +1810,35 @@ async def extract_content_metadata(sample_text: str) -> dict:
     async with httpx.AsyncClient(timeout=60) as client:
         for provider_name in PROVIDER_ORDER:
             provider_cfg = PROVIDERS.get(provider_name)
-            if not provider_cfg or not provider_cfg["api_key"]:
+            if not provider_cfg:
+                logger.info(f"[LLM] Skipping provider={provider_name} for content metadata")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss for content metadata",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
+                continue
+
+            if not provider_cfg["api_key"]:
                 logger.info(f"[LLM] Skipping provider={provider_name} for content metadata")
                 continue
 
             models = PROVIDER_MODELS.get(provider_name, [])
             for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss for content metadata",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
                 try:
                     raw = await _call_model(client, provider_name, model, prompt)
                     raw = _strip_markdown_fences(raw).strip()
@@ -1653,6 +1883,7 @@ async def extract_content_metadata(sample_text: str) -> dict:
                     continue
 
                 except ProviderHTTPError as e:
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
                     msg = f"[LLM] HTTP failure metadata_extraction provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
