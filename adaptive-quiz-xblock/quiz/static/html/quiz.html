@@ -32,6 +32,17 @@
           </svg>
         </button>
         <button class="aq-btn aq-btn-ghost" id="aq-btn-progress-start">View My Progress</button>
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-start">
+          <span>Session History</span>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M8 4.5v3.75l2.5 1.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+              stroke-linejoin="round" />
+            <path d="M13 8a5 5 0 1 1-1.46-3.54" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+              stroke-linejoin="round" />
+            <path d="M11.4 1.9V4.6H14.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+              stroke-linejoin="round" />
+          </svg>
+        </button>
       </div>
     </div>
   </div>
@@ -503,6 +514,12 @@
       </p>
 
       <div id="aq-history-list" class="aq-session-history-list"></div>
+
+      <div class="aq-history-pager aq-history-pager-bottom" id="aq-history-pager-wrap-bottom">
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-prev-bottom">← Previous</button>
+        <span class="aq-history-page-info" id="aq-history-page-info-bottom">Page 1 of 1</span>
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-history-next-bottom">Next →</button>
+      </div>
 
       <div class="aq-panel-actions">
         <button class="aq-btn aq-btn-ghost" id="aq-btn-history-back">← Back to Dashboard</button>

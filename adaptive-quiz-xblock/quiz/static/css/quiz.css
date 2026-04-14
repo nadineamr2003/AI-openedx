@@ -2000,6 +2000,11 @@ body.aq-modal-open {
   flex-wrap: wrap;
 }
 
+.aq-history-pager-bottom {
+  margin-top: 16px;
+  margin-bottom: 0;
+}
+
 .aq-history-page-info {
   font-size: .82rem;
   font-weight: 700;

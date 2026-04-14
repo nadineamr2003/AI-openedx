@@ -30,6 +30,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     lastDifficulty: 3,
     maxQuestionsCurrent: initArgs.max_questions || 10,
     dashboardOrigin: 'start',
+    historyOrigin: 'dashboard',
     historySessions: [],
     historyPage: 0,
     historyPageSize: 3,
@@ -86,6 +87,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       step: '',
       title: 'Choose a course',
       subtitle: 'Select the course whose progress you want to view.'
+    },
+    history: {
+      step: '',
+      title: 'Choose a course',
+      subtitle: 'Select the course whose session history you want to view.'
     }
   };
 
@@ -1390,26 +1396,35 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function updateHistoryPager() {
-    var pagerWrap = $('#aq-history-pager-wrap');
-    var pageInfo = $('#aq-history-page-info');
-    var prevBtn = $('#aq-btn-history-prev');
-    var nextBtn = $('#aq-btn-history-next');
-
     var total = state.historySessions.length;
     var pageSize = state.historyPageSize;
     var totalPages = total > 0 ? Math.ceil(total / pageSize) : 1;
     var currentPage = state.historyPage + 1;
+    var pagerConfigs = [
+      {
+        wrap: $('#aq-history-pager-wrap'),
+        info: $('#aq-history-page-info'),
+        prev: $('#aq-btn-history-prev'),
+        next: $('#aq-btn-history-next')
+      },
+      {
+        wrap: $('#aq-history-pager-wrap-bottom'),
+        info: $('#aq-history-page-info-bottom'),
+        prev: $('#aq-btn-history-prev-bottom'),
+        next: $('#aq-btn-history-next-bottom')
+      }
+    ];
 
-    if (pagerWrap) {
-      pagerWrap.classList.toggle('aq-hidden', total === 0);
-    }
-
-    if (pageInfo) {
-      pageInfo.textContent = 'Page ' + currentPage + ' of ' + totalPages;
-    }
-
-    if (prevBtn) prevBtn.disabled = state.historyPage <= 0;
-    if (nextBtn) nextBtn.disabled = state.historyPage >= totalPages - 1;
+    pagerConfigs.forEach(function (pager) {
+      if (pager.wrap) {
+        pager.wrap.classList.toggle('aq-hidden', total === 0);
+      }
+      if (pager.info) {
+        pager.info.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+      }
+      if (pager.prev) pager.prev.disabled = state.historyPage <= 0;
+      if (pager.next) pager.next.disabled = state.historyPage >= totalPages - 1;
+    });
   }
 
   function renderHistoryPage() {
@@ -1567,8 +1582,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
-  function loadFullSessionHistory(courseId) {
+  function loadFullSessionHistory(courseId, origin) {
     setLoading('Loading session history…');
+    state.historyOrigin = origin || 'dashboard';
+    var backBtn = $('#aq-btn-history-back');
+    if (backBtn) {
+      backBtn.textContent = state.historyOrigin === 'start'
+        ? '← Back to Home'
+        : '← Back to Dashboard';
+    }
 
     jQuery.ajax({
       type: 'POST',
@@ -2017,6 +2039,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var progressStartBtn = $('#aq-btn-progress-start');
   if (progressStartBtn) progressStartBtn.onclick = function () { pickerMode = 'progress'; loadCoursePicker(); };
 
+  var historyStartBtn = $('#aq-btn-history-start');
+  if (historyStartBtn) historyStartBtn.onclick = function () { pickerMode = 'history'; loadCoursePicker(); };
+
   [
     '#aq-btn-results-home',
     '#aq-btn-course-home',
@@ -2044,6 +2069,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       selectedCourseId = checked.value;
       selectedCourseName = checked.getAttribute('data-course-name') || checked.value;
       if (pickerMode === 'progress') loadDashboard('start', selectedCourseId, selectedCourseName);
+      else if (pickerMode === 'history') loadFullSessionHistory(selectedCourseId, 'start');
       else loadContentPicker(selectedCourseId);
     };
   }
@@ -2089,14 +2115,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var viewAllSessionsBtn = $('#aq-btn-view-all-sessions');
   if (viewAllSessionsBtn) {
     viewAllSessionsBtn.onclick = function () {
-      loadFullSessionHistory(selectedCourseId);
+      loadFullSessionHistory(selectedCourseId, 'dashboard');
     };
   }
 
   var historyBackBtn = $('#aq-btn-history-back');
   if (historyBackBtn) {
     historyBackBtn.onclick = function () {
-      showScreen('dashboard');
+      showScreen(state.historyOrigin === 'start' ? 'start' : 'dashboard');
     };
   }
 
@@ -2148,6 +2174,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var historyNextBtn = $('#aq-btn-history-next');
   if (historyNextBtn) {
     historyNextBtn.onclick = function () {
+      var totalPages = Math.ceil(state.historySessions.length / state.historyPageSize);
+      if (state.historyPage < totalPages - 1) {
+        state.historyPage += 1;
+        renderHistoryPage();
+      }
+    };
+  }
+
+  var historyPrevBottomBtn = $('#aq-btn-history-prev-bottom');
+  if (historyPrevBottomBtn) {
+    historyPrevBottomBtn.onclick = function () {
+      if (state.historyPage > 0) {
+        state.historyPage -= 1;
+        renderHistoryPage();
+      }
+    };
+  }
+
+  var historyNextBottomBtn = $('#aq-btn-history-next-bottom');
+  if (historyNextBottomBtn) {
+    historyNextBottomBtn.onclick = function () {
       var totalPages = Math.ceil(state.historySessions.length / state.historyPageSize);
       if (state.historyPage < totalPages - 1) {
         state.historyPage += 1;
