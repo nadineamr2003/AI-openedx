@@ -2243,6 +2243,23 @@ body.aq-modal-open {
   transform: translateY(-2px);
 }
 
+.aq-mode-card:disabled,
+.aq-mode-card-disabled {
+  cursor: not-allowed;
+  border-color: var(--aq-border);
+  background: linear-gradient(180deg, #FAFBFD 0%, #F5F7FB 100%);
+  box-shadow: none;
+  transform: none;
+  opacity: .78;
+}
+
+.aq-mode-card:disabled:hover,
+.aq-mode-card-disabled:hover {
+  border-color: var(--aq-border);
+  box-shadow: none;
+  transform: none;
+}
+
 .aq-mode-card-selected {
   border-color: var(--aq-primary);
   background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFF 100%);
@@ -2306,6 +2323,14 @@ body.aq-modal-open {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.aq-mode-lock {
+  margin: 14px 0 0;
+  font-size: .78rem;
+  font-weight: 700;
+  color: var(--aq-text-muted);
+  line-height: 1.45;
 }
 
 .aq-mode-point {

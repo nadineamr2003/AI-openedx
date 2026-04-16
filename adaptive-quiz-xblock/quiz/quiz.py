@@ -1304,6 +1304,13 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         if not start_resp:
             return {"success": False, "error": "Could not reach quiz backend."}
 
+        if start_resp.get("success") is False:
+            return {
+                "success": False,
+                "error": start_resp.get("error", "Could not start quiz."),
+                "message": start_resp.get("message", ""),
+            }
+
         if start_resp.get("diagnostic_needed"):
             items = start_resp.get("diagnostic_items", [])
             self.diagnostic_pending               = True
@@ -1529,7 +1536,11 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         }, timeout=45)
 
         if not resp or not resp.get("success"):
-            return {"success": False, "error": "Could not finalize session."}
+            return {
+                "success": False,
+                "error": (resp or {}).get("error", "Could not finalize session."),
+                "message": (resp or {}).get("message", ""),
+            }
 
         self.diagnostic_pending               = False
         self.diagnostic_items_json            = ""

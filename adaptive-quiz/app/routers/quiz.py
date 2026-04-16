@@ -23,6 +23,7 @@ from app.services.adaptation import (
     diagnostic_coverage_goal,
     plan_diagnostic_question,
     select_session_start_difficulty,
+    TARGET_BAND,
 )
 from app.services.ai_engine import (
     generate_question,
@@ -48,6 +49,8 @@ _REPLENISH_IN_FLIGHT: set[str] = set()
 RECENT_QUESTION_HISTORY_LIMIT = 40
 RECENT_QUESTION_HISTORY_MAX_AGE = timedelta(days=14)
 LIVE_DEDUPE_MAX_ATTEMPTS = 3
+CHALLENGE_READY_AVG_MASTERY = TARGET_BAND[0]
+CHALLENGE_NOT_READY_ERROR = "challenge_not_ready"
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -380,6 +383,58 @@ def _mastery_label(mastery: float) -> str:
     if mastery < 0.80:
         return "Proficient"
     return "Mastered"
+
+
+def _build_challenge_readiness(topic_mastery: dict, scoped_topics: list[str]) -> dict:
+    normalized_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (scoped_topics or [])
+        if str(topic).strip()
+    ])
+    if not normalized_topics:
+        return {
+            "ready": False,
+            "scoped_topic_count": 0,
+            "avg_mastery": 0.0,
+            "proficient_topic_count": 0,
+            "required_proficient_topics": 0,
+        }
+
+    scoped_scores = [
+        float(topic_mastery.get(topic, 0.5))
+        for topic in normalized_topics
+    ]
+    avg_mastery = sum(scoped_scores) / len(scoped_scores)
+    proficient_topic_count = sum(
+        1 for score in scoped_scores
+        if _mastery_label(score) in {"Proficient", "Mastered"}
+    )
+    required_proficient_topics = 1 if len(normalized_topics) == 1 else (len(normalized_topics) + 1) // 2
+
+    if len(normalized_topics) == 1:
+        ready = scoped_scores[0] >= CHALLENGE_READY_AVG_MASTERY
+    else:
+        ready = (
+            avg_mastery >= CHALLENGE_READY_AVG_MASTERY
+            and proficient_topic_count >= required_proficient_topics
+        )
+
+    return {
+        "ready": ready,
+        "scoped_topic_count": len(normalized_topics),
+        "avg_mastery": round(avg_mastery, 4),
+        "proficient_topic_count": proficient_topic_count,
+        "required_proficient_topics": required_proficient_topics,
+    }
+
+
+def _challenge_not_ready_response(readiness: dict) -> dict:
+    return {
+        "success": False,
+        "error": CHALLENGE_NOT_READY_ERROR,
+        "message": "Challenge mode is not available for this lecture yet.",
+        "challenge_readiness": readiness,
+    }
 
 def _difficulty_label(diff: int) -> str:
     return {
@@ -2032,6 +2087,7 @@ async def session_start(req: GenerateRequest):
             detail="No active content found for the selected items.",
         )
 
+    scoped_topics = list(resolved_topics)
     resolved_topics, applied_focus_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
     if applied_focus_topics:
         logger.info(
@@ -2057,6 +2113,29 @@ async def session_start(req: GenerateRequest):
             state["topic_mastery"][topic] = 0.5
         if topic not in state["topic_mastery_source"]:
             state["topic_mastery_source"][topic] = "default_prior"
+
+    for topic in scoped_topics:
+        if topic not in state["topic_mastery"]:
+            state["topic_mastery"][topic] = 0.5
+        if topic not in state["topic_mastery_source"]:
+            state["topic_mastery_source"][topic] = "default_prior"
+
+    if requested_mode == "challenge":
+        challenge_readiness = _build_challenge_readiness(
+            topic_mastery=state.get("topic_mastery", {}),
+            scoped_topics=scoped_topics,
+        )
+        if not challenge_readiness["ready"]:
+            await _save_state(state)
+            logger.info(
+                "[CHALLENGE] Blocked start course=%s topics=%s avg=%.3f proficient=%s/%s",
+                req.course_id,
+                len(scoped_topics),
+                challenge_readiness["avg_mastery"],
+                challenge_readiness["proficient_topic_count"],
+                challenge_readiness["required_proficient_topics"],
+            )
+            return _challenge_not_ready_response(challenge_readiness)
 
     # Determine which selected items still need diagnostic
     items_needing_diagnostic = [
@@ -2173,7 +2252,43 @@ async def session_start(req: GenerateRequest):
         "session_origin": requested_session_origin,
         "effective_mode": effective_mode,
     }
-    
+
+
+async def _generate_diagnostic_question_with_fallback(
+    topic: str,
+    difficulty: int,
+    source_text: str,
+) -> dict:
+    try:
+        return await generate_question(
+            topic=topic,
+            difficulty=difficulty,
+            source_text=source_text,
+        )
+    except ValueError:
+        lower_difficulty = max(1, int(difficulty) - 1)
+        if lower_difficulty >= int(difficulty):
+            raise
+
+        logger.info(
+            "[DIAG] Retry lower difficulty topic=%s from=%s to=%s",
+            topic,
+            difficulty,
+            lower_difficulty,
+        )
+        question = await generate_question(
+            topic=topic,
+            difficulty=lower_difficulty,
+            source_text=source_text,
+        )
+        logger.info(
+            "[DIAG] Lower-difficulty fallback succeeded topic=%s difficulty=%s",
+            topic,
+            int(question.get("difficulty", lower_difficulty)),
+        )
+        return question
+
+
 @router.post("/diagnostic/generate")
 async def diagnostic_generate(req: DiagnosticGenerateRequest):
     """
@@ -2195,7 +2310,7 @@ async def diagnostic_generate(req: DiagnosticGenerateRequest):
             target_questions=req.target_questions,
         )
 
-        question = await generate_question(
+        question = await _generate_diagnostic_question_with_fallback(
             topic=plan["topic"],
             difficulty=plan["difficulty"],
             source_text=req.source_text,
@@ -2208,7 +2323,7 @@ async def diagnostic_generate(req: DiagnosticGenerateRequest):
         "question": question,
         "question_index": req.question_index,
         "topic": plan["topic"],
-        "difficulty": plan["difficulty"],
+        "difficulty": int(question.get("difficulty", plan["difficulty"])),
         "total_questions": plan["target_questions"],
         "coverage_goal": plan["coverage_goal"],
         "phase": plan["phase"],
@@ -2326,6 +2441,7 @@ async def session_finalize(req: SessionFinalizeRequest):
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
 
+    scoped_topics = list(resolved_topics)
     resolved_topics, applied_focus_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
     if applied_focus_topics:
         logger.info(
@@ -2350,6 +2466,29 @@ async def session_finalize(req: SessionFinalizeRequest):
             state["topic_mastery"][topic] = 0.5
         if topic not in state["topic_mastery_source"]:
             state["topic_mastery_source"][topic] = "default_prior"
+
+    for topic in scoped_topics:
+        if topic not in state["topic_mastery"]:
+            state["topic_mastery"][topic] = 0.5
+        if topic not in state["topic_mastery_source"]:
+            state["topic_mastery_source"][topic] = "default_prior"
+
+    if requested_mode == "challenge":
+        challenge_readiness = _build_challenge_readiness(
+            topic_mastery=state.get("topic_mastery", {}),
+            scoped_topics=scoped_topics,
+        )
+        if not challenge_readiness["ready"]:
+            await _save_state(state)
+            logger.info(
+                "[CHALLENGE] Blocked finalize course=%s topics=%s avg=%.3f proficient=%s/%s",
+                req.course_id,
+                len(scoped_topics),
+                challenge_readiness["avg_mastery"],
+                challenge_readiness["proficient_topic_count"],
+                challenge_readiness["required_proficient_topics"],
+            )
+            return _challenge_not_ready_response(challenge_readiness)
 
     # Enforce that every selected content item is diagnosed at its current version
     for item in resolved_items:

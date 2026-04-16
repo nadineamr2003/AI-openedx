@@ -37,6 +37,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     explainSimplerPending: false,
     pendingAnswerKey: null,
     pendingTimeSpentMs: null,
+    challengeReadiness: {
+      ready: false,
+      loading: false,
+      message: 'Challenge unlocks when this lecture has a stronger foundation.',
+      avgMastery: null,
+      scopedTopicCount: 0
+    }
   };
 
   var reviewState = {
@@ -162,6 +169,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var pickerMode = 'quiz';
   var allContentItems = [];
   var selectedMode = 'normal_practice';
+  var CHALLENGE_READY_AVG_MASTERY = 0.70;
+  var CHALLENGE_PROFICIENT_MASTERY = 0.65;
 
   function configureCoursePickerForMode() {
     var modeConfig = COURSE_PICKER_COPY[pickerMode] || COURSE_PICKER_COPY.quiz;
@@ -299,6 +308,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function setSelectedMode(mode) {
+    if (mode === 'challenge' && !state.challengeReadiness.ready) {
+      return;
+    }
     selectedMode = mode || 'normal_practice';
 
     element.querySelectorAll('.aq-mode-card').forEach(function (card) {
@@ -306,15 +318,139 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  function getSelectedContentScopeTopics() {
+    var selectedLookup = {};
+    selectedContentIds.forEach(function (id) {
+      selectedLookup[String(id)] = true;
+    });
+
+    var seen = {};
+    var topics = [];
+    allContentItems.forEach(function (item) {
+      if (!selectedLookup[String(item.id)]) return;
+      (item.topics || []).forEach(function (topic) {
+        var normalized = String(topic || '').trim();
+        if (!normalized || seen[normalized]) return;
+        seen[normalized] = true;
+        topics.push(normalized);
+      });
+    });
+    return topics;
+  }
+
+  function buildChallengeReadiness(progressData) {
+    var topics = getSelectedContentScopeTopics();
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    var scopedScores = topics.map(function (topic) {
+      var value = Number(mastery[topic]);
+      return isFinite(value) ? value : 0.5;
+    });
+    var avgMastery = scopedScores.length
+      ? scopedScores.reduce(function (sum, score) { return sum + score; }, 0) / scopedScores.length
+      : 0;
+    var proficientTopicCount = scopedScores.filter(function (score) {
+      return score >= CHALLENGE_PROFICIENT_MASTERY;
+    }).length;
+    var requiredProficientTopics = topics.length <= 1 ? 1 : Math.ceil(topics.length / 2);
+    var ready = false;
+
+    if (topics.length === 1) {
+      ready = scopedScores[0] >= CHALLENGE_READY_AVG_MASTERY;
+    } else if (topics.length > 1) {
+      ready = avgMastery >= CHALLENGE_READY_AVG_MASTERY && proficientTopicCount >= requiredProficientTopics;
+    }
+
+    return {
+      ready: ready,
+      avgMastery: scopedScores.length ? avgMastery : null,
+      scopedTopicCount: topics.length,
+      proficientTopicCount: proficientTopicCount,
+      requiredProficientTopics: scopedScores.length ? requiredProficientTopics : 0,
+      message: ready
+        ? ''
+        : 'Challenge unlocks when this lecture has a stronger foundation.'
+    };
+  }
+
+  function applyChallengeReadinessUi() {
+    var card = element.querySelector('.aq-mode-card[data-mode="challenge"]');
+    var noteEl = $('#aq-mode-challenge-lock');
+    if (!card || !noteEl) return;
+
+    var readiness = state.challengeReadiness || {};
+    var disabled = readiness.loading || !readiness.ready;
+
+    card.disabled = disabled;
+    card.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    card.classList.toggle('aq-mode-card-disabled', disabled);
+
+    if (disabled && selectedMode === 'challenge') {
+      setSelectedMode('normal_practice');
+    }
+
+    if (readiness.loading) {
+      noteEl.textContent = 'Checking challenge readiness for this lecture...';
+      noteEl.classList.remove('aq-hidden');
+      return;
+    }
+
+    if (!readiness.ready) {
+      noteEl.textContent = readiness.message || 'Challenge unlocks when this lecture has a stronger foundation.';
+      noteEl.classList.remove('aq-hidden');
+      return;
+    }
+
+    noteEl.textContent = '';
+    noteEl.classList.add('aq-hidden');
+  }
+
+  function refreshChallengeReadiness() {
+    state.challengeReadiness = {
+      ready: false,
+      loading: true,
+      message: 'Challenge unlocks when this lecture has a stronger foundation.',
+      avgMastery: null,
+      scopedTopicCount: 0
+    };
+    applyChallengeReadinessUi();
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlProgress,
+      data: JSON.stringify({ selected_course_id: selectedCourseId }),
+      contentType: 'application/json',
+      success: function (data) {
+        var readiness = buildChallengeReadiness((data && data.success) ? data : null);
+        readiness.loading = false;
+        state.challengeReadiness = readiness;
+        applyChallengeReadinessUi();
+      },
+      error: function () {
+        state.challengeReadiness = {
+          ready: false,
+          loading: false,
+          message: 'Build more proficiency in this lecture first.',
+          avgMastery: null,
+          scopedTopicCount: getSelectedContentScopeTopics().length
+        };
+        applyChallengeReadinessUi();
+      }
+    });
+  }
+
   function initModePicker() {
     var cards = element.querySelectorAll('.aq-mode-card');
     cards.forEach(function (card) {
       card.addEventListener('click', function () {
+        if (card.disabled || card.classList.contains('aq-mode-card-disabled')) {
+          return;
+        }
         setSelectedMode(card.getAttribute('data-mode'));
       });
     });
 
     setSelectedMode('normal_practice');
+    applyChallengeReadinessUi();
   }
 
   // ── Question rendering ──────────────────────────────────────────────
@@ -1820,6 +1956,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       }),
       contentType: 'application/json',
       success: function (data) {
+        if (data && data.success === false) {
+          if (data.error === 'challenge_not_ready') {
+            alert(data.message || 'Challenge mode is not available for this lecture yet.');
+            showScreen('mode');
+            refreshChallengeReadiness();
+            return;
+          }
+          alert((data && data.message) || (data && data.error) || 'Could not start quiz.');
+          showScreen('mode');
+          return;
+        }
         if (data && data.diagnostic_needed) {
           state.maxQuestionsCurrent = chosenCount;
           startDiagnosticFlow(data);
@@ -2108,7 +2255,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({}), contentType: 'application/json',
       success: function (data) {
         if (!data.success) {
-          alert('Could not start quiz. Please try again.');
+          if (data.error === 'challenge_not_ready') {
+            alert(data.message || 'Challenge mode is not available for this lecture yet.');
+            showScreen('mode');
+            refreshChallengeReadiness();
+            return;
+          }
+          alert(data.message || data.error || 'Could not start quiz. Please try again.');
           showScreen('start');
           return;
         }
@@ -2216,6 +2369,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       }
 
       showScreen('mode');
+      refreshChallengeReadiness();
     };
   }
 
@@ -2232,6 +2386,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       if (!selectedContentIds || selectedContentIds.length === 0) {
         alert('Please select at least one content item.');
         showScreen('content');
+        return;
+      }
+
+      if (selectedMode === 'challenge' && !state.challengeReadiness.ready) {
+        alert(state.challengeReadiness.message || 'Challenge mode is not available for this lecture yet.');
+        refreshChallengeReadiness();
         return;
       }
 

@@ -755,6 +755,24 @@ ADMIN_MARKERS = [
     "weekly dilbert",
     "self study",
     "exercise",
+    "attendance policy",
+    "submission instructions",
+    "grading policy",
+    "grading weight",
+    "exam date",
+]
+
+ADMIN_LINE_MARKERS = [
+    "office hours",
+    "attendance policy",
+    "submission instructions",
+    "submission deadline",
+    "due date",
+    "grading weight",
+    "grading policy",
+    "exam date",
+    "instructor email",
+    "ta email",
 ]
 
 FORBIDDEN_QUESTION_MARKERS = [
@@ -858,6 +876,12 @@ DOMAIN_GENERAL_ALLOWED_TERMS = {
     "traffic", "transport", "transmission", "video",
 }
 
+GENERIC_REASONING_TERMS = {
+    "approach", "approaches", "between", "characteristic", "characteristics",
+    "comparing", "considering", "dependency", "dependencies", "despite",
+    "primary", "relationship", "relationships", "tradeoff", "tradeoffs",
+}
+
 
 def _sanitize_source_text_for_questions(source_text: str) -> str:
     """
@@ -888,6 +912,15 @@ def _sanitize_source_text_for_questions(source_text: str) -> str:
             if lowered.startswith("http://") or lowered.startswith("https://"):
                 continue
             if lowered.startswith("dr."):
+                continue
+            if any(marker in lowered for marker in ADMIN_LINE_MARKERS):
+                continue
+            if (
+                ("submission" in lowered or "submit" in lowered)
+                and any(marker in lowered for marker in ("assignment", "project", "quiz", "exam", "report"))
+            ):
+                continue
+            if ("grading" in lowered or "weight" in lowered) and "%" in lowered:
                 continue
             if re.match(r"^(Dr\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}$", stripped):
                 continue
@@ -1213,32 +1246,43 @@ def _unsupported_specifics_breakdown(q: dict, source_text: str) -> dict:
     allowed_terms = _allowed_domain_terms_for_question(str(q.get("topic", "")), source_text)
     stem_terms = _significant_terms(str(q.get("question", "")))
     stem_unsupported = stem_terms - allowed_terms
+    stem_filtered_generic = stem_unsupported & GENERIC_REASONING_TERMS
+    counted_stem_terms = stem_unsupported - GENERIC_REASONING_TERMS
 
     option_unsupported_terms = []
+    option_filtered_generic_terms = []
     options_with_any_unsupported = 0
     option_specific_count = 0
 
     for option_text in (q.get("options", {}) or {}).values():
         unsupported = _significant_terms(str(option_text)) - allowed_terms
-        option_unsupported_terms.append(unsupported)
-        if unsupported:
+        filtered_generic = unsupported & GENERIC_REASONING_TERMS
+        counted_terms = unsupported - GENERIC_REASONING_TERMS
+        option_unsupported_terms.append(counted_terms)
+        option_filtered_generic_terms.append(filtered_generic)
+        if counted_terms:
             options_with_any_unsupported += 1
-        if len(unsupported) >= 2:
+        if len(counted_terms) >= 2:
             option_specific_count += 1
 
-    distinct_terms = set(stem_unsupported)
+    distinct_terms = set(counted_stem_terms)
     for terms in option_unsupported_terms:
         distinct_terms.update(terms)
 
-    total_mentions = len(stem_unsupported) + sum(len(terms) for terms in option_unsupported_terms)
+    filtered_generic_terms = set(stem_filtered_generic)
+    for terms in option_filtered_generic_terms:
+        filtered_generic_terms.update(terms)
+
+    total_mentions = len(counted_stem_terms) + sum(len(terms) for terms in option_unsupported_terms)
 
     return {
-        "stem_terms": stem_unsupported,
+        "stem_terms": counted_stem_terms,
         "option_terms": option_unsupported_terms,
         "distinct_terms": distinct_terms,
         "options_with_any_unsupported": options_with_any_unsupported,
         "option_specific_count": option_specific_count,
         "total_mentions": total_mentions,
+        "filtered_generic_terms": filtered_generic_terms,
     }
 
 
@@ -1300,9 +1344,10 @@ def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> b
 
     if should_reject:
         logger.info(
-            "[LLM] Out-of-source specifics topic=%s stem_terms=%s option_count=%s",
+            "[LLM] Out-of-source specifics topic=%s filtered_generic=%s counted_terms=%s option_count=%s",
             q.get("topic"),
-            sorted(breakdown["stem_terms"])[:5],
+            sorted(breakdown["filtered_generic_terms"])[:5],
+            sorted(breakdown["distinct_terms"])[:5],
             option_specific_count,
         )
 
