@@ -9,7 +9,8 @@ from app.models.quiz import (
     GenerateRequest, SubmitRequest, SubmitResponse, MasteryResponse,
     ContentItem, ContentListResponse, ContentUpdateRequest, ContentToggleRequest,
     DiagnosticGenerateRequest, DiagnosticCompleteRequest,
-    DiagnosticItem, SessionFinalizeRequest,
+    DiagnosticItem, SessionFinalizeRequest, RecoveryStartRequest,
+    RecoveryDeclineRequest, RecoverySubmitRequest,
 )
 from app.services.adaptation import (
     get_initial_student_state,
@@ -53,6 +54,14 @@ LIVE_DEDUPE_MAX_ATTEMPTS = 3
 CHALLENGE_READY_AVG_MASTERY = TARGET_BAND[0]
 CHALLENGE_NOT_READY_ERROR = "challenge_not_ready"
 DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS = 3
+RECOVERY_SUPPORT_MESSAGE = (
+    "You seem to be struggling with this concept. I can simplify it and give you one focused "
+    "recovery question before we continue."
+)
+RECOVERY_THOUGHTFUL_RESPONSE_MS = 90_000
+RECOVERY_REASON_THOUGHTFUL = "thoughtful_wrong_answer"
+RECOVERY_REASON_REPEATED = "repeated_wrong_topic"
+RECOVERY_REVIEW_PRESSURE_THRESHOLD = 1.0
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -305,6 +314,138 @@ def _normalize_session_origin(session_origin: str | None) -> str:
 
 def _is_followup_origin(session_origin: str | None) -> bool:
     return _normalize_session_origin(session_origin) == SESSION_ORIGIN_FOLLOWUP
+
+
+def _clear_recovery_state(state: dict) -> None:
+    state["pending_recovery_offer"] = None
+    state["active_recovery_step"] = None
+
+
+def _normalize_recovery_time_context(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"thinking", "distracted", "unknown"}:
+        return normalized
+    return None
+
+
+def _is_recovery_supported_session(mode: str | None, session_origin: str | None) -> bool:
+    normalized_mode = str(mode or "").strip().lower()
+    return (
+        _normalize_session_origin(session_origin) == SESSION_ORIGIN_STANDARD
+        and normalized_mode in {"normal_practice", "weakness_review"}
+    )
+
+
+def _session_wrong_attempt_count(question_log: list[dict] | None, topic: str) -> int:
+    if not question_log:
+        return 0
+    return sum(
+        1
+        for entry in question_log
+        if (
+            entry.get("topic") == topic
+            and not entry.get("is_recovery_step")
+            and not entry.get("is_correct")
+        )
+    )
+
+
+def _session_has_recovery_for_topic(question_log: list[dict] | None, topic: str) -> bool:
+    if not question_log:
+        return False
+    return any(
+        (
+            entry.get("topic") == topic or entry.get("recovery_for_topic") == topic
+        )
+        and (
+            entry.get("is_recovery_step")
+            or entry.get("recovery_step_available")
+        )
+        for entry in question_log
+    )
+
+
+def _detect_recovery_trigger(
+    *,
+    current_mode: str | None,
+    session_origin: str | None,
+    session_complete: bool,
+    is_correct: bool,
+    topic: str,
+    time_spent_ms: int,
+    time_context: str | None,
+    question_log: list[dict] | None,
+) -> str | None:
+    if is_correct or session_complete or not _is_recovery_supported_session(current_mode, session_origin):
+        return None
+
+    normalized_mode = str(current_mode or "").strip().lower()
+    if normalized_mode == "weakness_review" and _session_has_recovery_for_topic(question_log, topic):
+        return None
+
+    if _session_wrong_attempt_count(question_log, topic) >= 1:
+        return RECOVERY_REASON_REPEATED
+
+    normalized_time_context = _normalize_recovery_time_context(time_context)
+    if normalized_time_context == "distracted":
+        return None
+
+    if normalized_time_context == "thinking":
+        return RECOVERY_REASON_THOUGHTFUL
+
+    if time_spent_ms >= RECOVERY_THOUGHTFUL_RESPONSE_MS:
+        return RECOVERY_REASON_THOUGHTFUL
+
+    return None
+
+
+def _set_pending_recovery_offer(
+    state: dict,
+    *,
+    session_id: str,
+    topic: str,
+    difficulty: int,
+    trigger_reason: str,
+    question_id: str | None,
+) -> None:
+    state["pending_recovery_offer"] = {
+        "session_id": session_id,
+        "topic": topic,
+        "difficulty": int(difficulty),
+        "trigger_reason": trigger_reason,
+        "question_id": str(question_id or "").strip(),
+        "status": "offered",
+        "offered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    state["active_recovery_step"] = None
+
+
+def _activate_recovery_step(
+    state: dict,
+    *,
+    session_id: str,
+    topic: str,
+    trigger_reason: str,
+    recovery_difficulty: int,
+    recovery_question_id: str,
+) -> None:
+    state["pending_recovery_offer"] = None
+    state["active_recovery_step"] = {
+        "session_id": session_id,
+        "topic": topic,
+        "trigger_reason": trigger_reason,
+        "recovery_difficulty": int(recovery_difficulty),
+        "recovery_question_id": recovery_question_id,
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _recovery_reason_label(reason: str | None) -> str | None:
+    if reason == RECOVERY_REASON_REPEATED:
+        return "repeated same-topic errors"
+    if reason == RECOVERY_REASON_THOUGHTFUL:
+        return "long thoughtful struggle"
+    return None
 
 
 def _is_focused_followup_session(
@@ -749,6 +890,7 @@ async def _create_session_history(
         "strongest_topic_this_session": None,
         "recommended_review_topic": None,
         "recommended_review_topics": [],
+        "review_pressure_by_topic": {},
         "followup_topics_practised": [],
         "followup_topic_mastery_summaries": [],
         "recommendation": None,
@@ -767,31 +909,38 @@ async def _append_question_log(
     time_spent_ms: int,
     question_difficulty: int,
     end_difficulty: int,
+    counts_toward_session: bool = True,
 ):
     db = get_db()
+    update_doc: dict = {
+        "$push": {
+            "question_log": question_entry,
+        },
+        "$set": {
+            "end_difficulty": end_difficulty,
+        }
+    }
+
+    if counts_toward_session:
+        update_doc["$push"]["difficulty_path"] = question_difficulty
+        update_doc["$inc"] = {
+            "questions_answered": 1,
+            "correct_answers": 1 if is_correct else 0,
+            "total_time_spent_ms": time_spent_ms,
+        }
 
     await db.student_session_history.update_one(
         {"session_id": session_id},
-        {
-            "$push": {
-                "question_log": question_entry,
-                "difficulty_path": question_difficulty,
-            },
-            "$inc": {
-                "questions_answered": 1,
-                "correct_answers": 1 if is_correct else 0,
-                "total_time_spent_ms": time_spent_ms,
-            },
-            "$set": {
-                "end_difficulty": end_difficulty,
-            }
-        }
+        update_doc,
     )
     
 def _compute_topic_session_stats(question_log: list[dict]) -> dict[str, dict]:
     stats: dict[str, dict] = {}
 
     for entry in question_log:
+        if entry.get("is_recovery_step") or entry.get("counts_toward_session_score") is False:
+            continue
+
         topic = entry.get("topic")
         if not topic:
             continue
@@ -822,29 +971,93 @@ def _compute_topic_session_stats(question_log: list[dict]) -> dict[str, dict]:
     return stats
 
 
+def _compute_topic_review_pressure(question_log: list[dict]) -> dict[str, dict]:
+    pressure_by_topic: dict[str, dict] = {}
+
+    for entry in question_log:
+        topic = (
+            str(entry.get("recovery_for_topic") or "").strip()
+            if entry.get("is_recovery_step")
+            else str(entry.get("topic") or "").strip()
+        )
+        if not topic:
+            continue
+
+        topic_pressure = pressure_by_topic.setdefault(topic, {
+            "pressure": 0.0,
+            "recovery_attempted": False,
+            "recovery_successes": 0,
+            "recovery_failures": 0,
+            "weak_events": 0,
+        })
+
+        if entry.get("is_recovery_step"):
+            topic_pressure["recovery_attempted"] = True
+            if entry.get("is_correct"):
+                topic_pressure["recovery_successes"] += 1
+                topic_pressure["pressure"] = max(0.0, topic_pressure["pressure"] - 1.0)
+            else:
+                topic_pressure["recovery_failures"] += 1
+                topic_pressure["pressure"] += 1.0
+            continue
+
+        if entry.get("is_correct"):
+            continue
+
+        base_pressure = 1.0
+        if _normalize_recovery_time_context(entry.get("time_context")) == "thinking":
+            base_pressure += 0.25
+        if entry.get("recovery_trigger_reason") == RECOVERY_REASON_REPEATED:
+            base_pressure += 0.5
+        elif entry.get("recovery_trigger_reason") == RECOVERY_REASON_THOUGHTFUL:
+            base_pressure += 0.25
+
+        topic_pressure["pressure"] += base_pressure
+        topic_pressure["weak_events"] += 1
+
+    for topic_data in pressure_by_topic.values():
+        topic_data["pressure"] = round(max(0.0, topic_data["pressure"]), 4)
+
+    return pressure_by_topic
+
+
 def _select_recommended_review_topics(
     topic_session_stats: dict[str, dict],
+    review_pressure_by_topic: dict[str, dict] | None = None,
     max_topics: int = 2,
 ) -> list[str]:
-    if not topic_session_stats:
+    review_pressure_by_topic = review_pressure_by_topic or {}
+    all_topics = set(topic_session_stats) | set(review_pressure_by_topic)
+    if not all_topics:
         return []
 
-    review_candidates = [
-        topic for topic, stats in topic_session_stats.items()
-        if (
-            (stats["attempts"] >= 2 and stats["accuracy"] < 0.6) or
-            (stats["wrong"] >= 2) or
-            (stats["attempts"] == 1 and stats["accuracy"] == 0.0)
+    review_candidates = []
+    for topic in all_topics:
+        stats = topic_session_stats.get(topic, {})
+        pressure = (review_pressure_by_topic.get(topic) or {}).get("pressure", 0.0)
+        recovery_failures = (review_pressure_by_topic.get(topic) or {}).get("recovery_failures", 0)
+        multiple_weak_signals = (
+            stats.get("wrong", 0) >= 2
+            or (stats.get("attempts", 0) >= 2 and stats.get("accuracy", 1.0) < 0.6)
+            or recovery_failures >= 1
         )
-    ]
+        isolated_weak_signal = stats.get("wrong", 0) >= 1 or pressure >= RECOVERY_REVIEW_PRESSURE_THRESHOLD
+
+        if (
+            pressure >= 1.5
+            or (pressure >= RECOVERY_REVIEW_PRESSURE_THRESHOLD and isolated_weak_signal)
+            or (multiple_weak_signals and pressure >= 0.75)
+        ):
+            review_candidates.append(topic)
 
     ranked = sorted(
         review_candidates,
         key=lambda topic: (
-            topic_session_stats[topic]["accuracy"],
-            -topic_session_stats[topic]["wrong"],
-            -topic_session_stats[topic]["attempts"],
-            -topic_session_stats[topic]["avg_time_spent_ms"],
+            -float((review_pressure_by_topic.get(topic) or {}).get("pressure", 0.0)),
+            topic_session_stats.get(topic, {}).get("accuracy", 1.0),
+            -topic_session_stats.get(topic, {}).get("wrong", 0),
+            -topic_session_stats.get(topic, {}).get("attempts", 0),
+            -topic_session_stats.get(topic, {}).get("avg_time_spent_ms", 0),
             topic,
         ),
     )
@@ -1097,6 +1310,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
     followup_topics_practised = [summary["topic"] for summary in followup_topic_mastery_summaries]
 
     topic_session_stats = _compute_topic_session_stats(question_log)
+    review_pressure_by_topic = _compute_topic_review_pressure(question_log)
 
     weakest_topic = None
     strongest_topic = None
@@ -1113,7 +1327,10 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
             )
         )
 
-        recommended_review_topics = _select_recommended_review_topics(topic_session_stats)
+        recommended_review_topics = _select_recommended_review_topics(
+            topic_session_stats,
+            review_pressure_by_topic=review_pressure_by_topic,
+        )
         if recommended_review_topics:
             weakest_topic = recommended_review_topics[0]
 
@@ -1149,6 +1366,7 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "recommended_review_topic": recommended_review_topic,
                 "recommended_review_topics": recommended_review_topics,
                 "recommendation": recommendation,
+                "review_pressure_by_topic": review_pressure_by_topic,
             }
         }
     )
@@ -1804,9 +2022,16 @@ async def submit(req: SubmitRequest):
 
     # Load state from MongoDB
     state = await _get_state(req.student_id, req.course_id, [req.topic])
+    current_session_origin = _normalize_session_origin(state.get("current_session_origin"))
+    current_mode = state.get("current_session_mode", "normal_practice")
+    db = get_db()
+    session_doc_before = None
 
     if req.topic not in state["topic_mastery"]:
         state["topic_mastery"][req.topic] = 0.5
+
+    if req.session_id:
+        session_doc_before = await db.student_session_history.find_one({"session_id": req.session_id})
 
     # Run adaptive logic
     state = process_answer(
@@ -1836,13 +2061,10 @@ async def submit(req: SubmitRequest):
     next_topic_mastery = state["topic_mastery"].get(next_topic, 0.5)
     next_difficulty = select_difficulty(next_topic_mastery)
     state["current_difficulty"] = next_difficulty
-    current_session_origin = _normalize_session_origin(state.get("current_session_origin"))
 
     updated_mastery = state["topic_mastery"].get(req.topic, 0.5)
 
-    await _save_state(state)
-
-        # Support features
+    # Support features
     support_features = []
     recent = state["recent_answers"]
 
@@ -1875,20 +2097,42 @@ async def submit(req: SubmitRequest):
 
     session_complete = False
     session_summary = {}
+    recovery_step_available = False
+    recovery_reason = None
+    recovery_topic = None
+    recovery_message = None
 
     if req.session_id:
+        prior_question_log = (session_doc_before or {}).get("question_log", [])
+        answered_after_submission = int((session_doc_before or {}).get("questions_answered", 0)) + 1
+        target_questions = int((session_doc_before or {}).get("target_questions", 10))
+        recovery_reason = _detect_recovery_trigger(
+            current_mode=current_mode,
+            session_origin=current_session_origin,
+            session_complete=answered_after_submission >= target_questions,
+            is_correct=is_correct,
+            topic=req.topic,
+            time_spent_ms=req.time_spent_ms,
+            time_context=req.time_context,
+            question_log=prior_question_log,
+        )
         question_entry = {
-        "question_id": req.question_id,
-        "question_text": req.question_text or req.question_id,
-        "options": req.options or {},
-        "explanation": req.explanation or "",
-        "topic": req.topic,
-        "difficulty": req.difficulty,
-        "selected_answer": req.selected_answer,
-        "correct_answer": req.correct_answer,
-        "is_correct": is_correct,
-        "time_spent_ms": req.time_spent_ms,
-        "support_features_shown": support_features,
+            "question_id": req.question_id,
+            "question_text": req.question_text or req.question_id,
+            "options": req.options or {},
+            "explanation": req.explanation or "",
+            "topic": req.topic,
+            "difficulty": req.difficulty,
+            "selected_answer": req.selected_answer,
+            "correct_answer": req.correct_answer,
+            "is_correct": is_correct,
+            "time_spent_ms": req.time_spent_ms,
+            "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
+            "support_features_shown": support_features,
+            "is_recovery_step": False,
+            "counts_toward_session_score": True,
+            "recovery_step_available": bool(recovery_reason),
+            "recovery_trigger_reason": recovery_reason,
         }
 
         await _append_question_log(
@@ -1898,9 +2142,9 @@ async def submit(req: SubmitRequest):
             time_spent_ms=req.time_spent_ms,
             question_difficulty=req.difficulty,
             end_difficulty=next_difficulty,
+            counts_toward_session=True,
         )
 
-        db = get_db()
         session_doc = await db.student_session_history.find_one({"session_id": req.session_id})
         if session_doc:
             answered = session_doc.get("questions_answered", 0)
@@ -1908,11 +2152,32 @@ async def submit(req: SubmitRequest):
             session_complete = answered >= target
 
             if session_complete:
+                _clear_recovery_state(state)
                 topic_mastery_after = {
                     topic: state["topic_mastery"].get(topic, 0.5)
                     for topic in allowed_topics
                 }
                 session_summary = await _finalize_session_history(req.session_id, topic_mastery_after)
+            else:
+                _clear_recovery_state(state)
+                if recovery_reason:
+                    _set_pending_recovery_offer(
+                        state,
+                        session_id=req.session_id,
+                        topic=req.topic,
+                        difficulty=req.difficulty,
+                        trigger_reason=recovery_reason,
+                        question_id=req.question_id,
+                    )
+                    recovery_step_available = True
+                    recovery_topic = req.topic
+                    recovery_message = RECOVERY_SUPPORT_MESSAGE
+        else:
+            _clear_recovery_state(state)
+    else:
+        _clear_recovery_state(state)
+
+    await _save_state(state)
 
     return SubmitResponse(
         is_correct=is_correct,
@@ -1940,6 +2205,10 @@ async def submit(req: SubmitRequest):
         followup_topics_practised=session_summary.get("followup_topics_practised"),
         followup_topic_mastery_summaries=session_summary.get("followup_topic_mastery_summaries"),
         narrative_bridge=narrative_bridge,
+        recovery_step_available=recovery_step_available,
+        recovery_message=recovery_message,
+        recovery_reason=recovery_reason,
+        recovery_topic=recovery_topic,
     )
 
 
@@ -2166,6 +2435,7 @@ async def session_start(req: GenerateRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    _clear_recovery_state(state)
     is_focused_followup = _set_session_followup_state(
         state=state,
         mode=requested_mode,
@@ -2269,6 +2539,7 @@ async def _generate_diagnostic_question_with_fallback(
                 source_text=source_text,
                 max_provider_model_attempts=DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS,
                 allow_internal_fallback=False,
+                generation_profile="diagnostic",
             )
         except ValueError:
             logger.info(
@@ -2557,6 +2828,7 @@ async def session_finalize(req: SessionFinalizeRequest):
 
     state["session_topics"] = resolved_topics
     state["current_session_mode"] = requested_mode
+    _clear_recovery_state(state)
     is_focused_followup = _set_session_followup_state(
         state=state,
         mode=requested_mode,
@@ -2642,6 +2914,178 @@ async def session_finalize(req: SessionFinalizeRequest):
         "session_origin": requested_session_origin,
         "effective_mode": effective_mode,
     }
+
+@router.post("/support/recovery/start")
+async def support_recovery_start(req: RecoveryStartRequest):
+    if not req.session_id:
+        raise HTTPException(status_code=400, detail="Recovery step requires an active session.")
+
+    state = await _get_state(req.student_id, req.course_id, [req.topic])
+    offer = state.get("pending_recovery_offer") or {}
+    if (
+        offer.get("session_id") != req.session_id
+        or offer.get("topic") != req.topic
+        or offer.get("status") != "offered"
+    ):
+        raise HTTPException(status_code=409, detail="Recovery step is not available for this question.")
+
+    simpler_explanation = req.explanation
+    try:
+        simpler_explanation = await generate_simple_explanation(
+            topic=req.topic,
+            question=req.question_text,
+            explanation=req.explanation,
+        )
+    except Exception:
+        simpler_explanation = req.explanation + "\n\n(Tip: Try breaking this concept into smaller steps.)"
+
+    recovery_difficulty = max(1, int(offer.get("difficulty", req.difficulty)) - 1)
+    source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
+    prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+    recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
+
+    try:
+        question = await _generate_question_with_soft_dedupe(
+            topic=req.topic,
+            difficulty=recovery_difficulty,
+            source_text=req.source_text,
+            course_id=req.course_id,
+            recent_hashes=recent_hashes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    generated_difficulty = min(
+        int(question.get("difficulty", recovery_difficulty)),
+        int(offer.get("difficulty", req.difficulty)),
+    )
+    question["difficulty"] = generated_difficulty
+    question["is_recovery_step"] = True
+    question["recovery_for_topic"] = req.topic
+    question["recovery_trigger_reason"] = offer.get("trigger_reason")
+    question["recovery_intro_title"] = "Guided recovery step"
+    question["recovery_intro_text"] = simpler_explanation
+
+    _record_seen_question(
+        state=state,
+        question=question,
+        course_id=req.course_id,
+        topic=req.topic,
+        difficulty=generated_difficulty,
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
+    )
+    _activate_recovery_step(
+        state,
+        session_id=req.session_id,
+        topic=req.topic,
+        trigger_reason=offer.get("trigger_reason", RECOVERY_REASON_THOUGHTFUL),
+        recovery_difficulty=generated_difficulty,
+        recovery_question_id=str(question.get("question", ""))[:80],
+    )
+    await _save_state(state)
+
+    logger.info(
+        "[RECOVERY] Started session=%s topic=%s difficulty=%s reason=%s",
+        req.session_id,
+        req.topic,
+        generated_difficulty,
+        offer.get("trigger_reason"),
+    )
+
+    return {
+        "success": True,
+        "simpler_explanation": simpler_explanation,
+        "question": question,
+        "recovery_topic": req.topic,
+        "recovery_reason": offer.get("trigger_reason"),
+        "recovery_reason_label": _recovery_reason_label(offer.get("trigger_reason")),
+    }
+
+
+@router.post("/support/recovery/decline")
+async def support_recovery_decline(req: RecoveryDeclineRequest):
+    state = await _get_state(req.student_id, req.course_id, [req.topic])
+    offer = state.get("pending_recovery_offer") or {}
+    if offer.get("session_id") == req.session_id and offer.get("topic") == req.topic:
+        _clear_recovery_state(state)
+        await _save_state(state)
+        logger.info("[RECOVERY] Declined session=%s topic=%s", req.session_id, req.topic)
+
+    return {"success": True}
+
+
+@router.post("/support/recovery/submit")
+async def support_recovery_submit(req: RecoverySubmitRequest):
+    if not req.session_id:
+        raise HTTPException(status_code=400, detail="Recovery answer requires an active session.")
+
+    recovery_topic = str(req.recovery_for_topic or req.topic).strip()
+    state = await _get_state(req.student_id, req.course_id, [recovery_topic or req.topic])
+    active_recovery = state.get("active_recovery_step") or {}
+    if (
+        active_recovery.get("session_id") != req.session_id
+        or active_recovery.get("topic") != recovery_topic
+    ):
+        raise HTTPException(status_code=409, detail="No active recovery step is available.")
+
+    is_correct = req.selected_answer == req.correct_answer
+    question_entry = {
+        "question_id": req.question_id,
+        "question_text": req.question_text or req.question_id,
+        "options": req.options or {},
+        "explanation": req.explanation or "",
+        "topic": req.topic,
+        "difficulty": req.difficulty,
+        "selected_answer": req.selected_answer,
+        "correct_answer": req.correct_answer,
+        "is_correct": is_correct,
+        "time_spent_ms": req.time_spent_ms,
+        "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
+        "support_features_shown": [],
+        "is_recovery_step": True,
+        "recovery_for_topic": recovery_topic,
+        "recovery_trigger_reason": active_recovery.get("trigger_reason"),
+        "recovery_outcome": "recovered" if is_correct else "still_needs_review",
+        "counts_toward_session_score": False,
+    }
+    await _append_question_log(
+        session_id=req.session_id,
+        question_entry=question_entry,
+        is_correct=is_correct,
+        time_spent_ms=req.time_spent_ms,
+        question_difficulty=req.difficulty,
+        end_difficulty=state.get("current_difficulty", req.difficulty),
+        counts_toward_session=False,
+    )
+
+    _clear_recovery_state(state)
+    await _save_state(state)
+
+    logger.info(
+        "[RECOVERY] Completed session=%s topic=%s correct=%s",
+        req.session_id,
+        recovery_topic,
+        is_correct,
+    )
+
+    return {
+        "success": True,
+        "is_correct": is_correct,
+        "correct_answer": req.correct_answer,
+        "explanation": req.explanation or "",
+        "support_features": ["explain_simpler"],
+        "session_complete": False,
+        "recovery_step_result": True,
+        "recovery_result_message": (
+            "That recovery step showed the concept is starting to click. We'll return to the normal quiz now."
+            if is_correct
+            else "That recovery step still showed some difficulty. We'll return to the quiz and keep this topic in view."
+        ),
+        "recovery_topic": recovery_topic,
+        "recovery_outcome": "recovered" if is_correct else "still_needs_review",
+    }
+
 
 @router.post("/support/explain")
 async def support_explain(data: dict):

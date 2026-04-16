@@ -56,6 +56,46 @@ class SubmitResponse(BaseModel):
     followup_topics_practised:       list[str] | None = None
     followup_topic_mastery_summaries: list[dict] | None = None
     narrative_bridge:                str | None = None
+    recovery_step_available:         bool = False
+    recovery_message:                str | None = None
+    recovery_reason:                 str | None = None
+    recovery_topic:                  str | None = None
+
+
+class RecoveryStartRequest(BaseModel):
+    student_id: str
+    course_id: str
+    session_id: str
+    question_id: str | None = None
+    question_text: str
+    explanation: str
+    topic: str
+    difficulty: int = Field(default=3, ge=1, le=5)
+    source_text: str
+
+
+class RecoveryDeclineRequest(BaseModel):
+    student_id: str
+    course_id: str
+    session_id: str
+    topic: str
+
+
+class RecoverySubmitRequest(BaseModel):
+    student_id: str
+    course_id: str
+    session_id: str
+    question_id: str
+    question_text: str | None = None
+    options: dict[str, str] | None = None
+    explanation: str | None = None
+    selected_answer: str
+    correct_answer: str
+    topic: str
+    difficulty: int
+    time_spent_ms: int
+    time_context: str | None = None
+    recovery_for_topic: str | None = None
 
 
 class MasteryResponse(BaseModel):

@@ -37,6 +37,8 @@ PROVIDER_ORDER = _csv_env(
     ["gemini", "groq", "cerebras", "openrouter", "huggingface"]
 )
 
+DIAGNOSTIC_PROVIDER_PRIORITY = ["cerebras", "huggingface", "groq"]
+
 # Keep provider model lists in env so you can tune them without editing code.
 PROVIDER_MODELS = {
     "gemini": _csv_env("GEMINI_MODELS", ["gemini-3-flash-preview"]),
@@ -77,6 +79,10 @@ PROVIDERS = {
         "endpoint": "https://router.huggingface.co/v1/chat/completions",
         "api_key": HF_TOKEN,
     },
+}
+
+DIAGNOSTIC_PROVIDER_MODEL_PREFERENCES = {
+    "groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
 }
 
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()
@@ -287,7 +293,11 @@ class NoValidQuestionError(ValueError):
     pass
 
 
-def validate_question(q: dict, source_text: str | None = None) -> tuple[bool, list[str]]:
+def validate_question(
+    q: dict,
+    source_text: str | None = None,
+    validation_profile: str = "default",
+) -> tuple[bool, list[str]]:
     reasons = []
     required = ["question", "options", "correct_answer", "explanation", "topic", "difficulty"]
     if not all(k in q for k in required):
@@ -309,7 +319,7 @@ def validate_question(q: dict, source_text: str | None = None) -> tuple[bool, li
         reasons.append("admin_question")
     if _looks_like_misframed_misconception_question(q):
         reasons.append("misframed_misconception")
-    reasons.extend(_difficulty_mismatch_reasons(q, source_text))
+    reasons.extend(_difficulty_mismatch_reasons(q, source_text, validation_profile=validation_profile))
     return len(reasons) == 0, reasons
 
 def validate_question_core_only(q: dict) -> tuple[bool, list[str]]:
@@ -783,7 +793,9 @@ FORBIDDEN_QUESTION_MARKERS = [
     "course grade",
     "final exam",
     "midterm exam",
-    "project",
+    "project submission",
+    "project deadline",
+    "project report",
     "thank you",
 ]
 
@@ -882,6 +894,45 @@ GENERIC_REASONING_TERMS = {
     "primary", "relationship", "relationships", "tradeoff", "tradeoffs",
 }
 
+DIAGNOSTIC_GENERIC_REASONING_TERMS = GENERIC_REASONING_TERMS | {
+    "applied", "benefit", "benefits", "commitment", "commitments",
+    "completed", "consideration", "considerations", "describe",
+    "describes", "flexible",
+}
+
+
+def _provider_order_for_generation(generation_profile: str = "default") -> list[str]:
+    if generation_profile != "diagnostic":
+        return list(PROVIDER_ORDER)
+
+    ordered = []
+    seen = set()
+    for provider_name in DIAGNOSTIC_PROVIDER_PRIORITY + PROVIDER_ORDER:
+        if provider_name in seen:
+            continue
+        seen.add(provider_name)
+        ordered.append(provider_name)
+    return ordered
+
+
+def _provider_models_for_generation(provider_name: str, generation_profile: str = "default") -> list[str]:
+    models = list(PROVIDER_MODELS.get(provider_name, []))
+    if generation_profile != "diagnostic":
+        return models
+
+    preferred = DIAGNOSTIC_PROVIDER_MODEL_PREFERENCES.get(provider_name, [])
+    if not preferred:
+        return models
+
+    ordered = []
+    seen = set()
+    for model in preferred + models:
+        if model in seen or model not in models:
+            continue
+        seen.add(model)
+        ordered.append(model)
+    return ordered
+
 
 def _sanitize_source_text_for_questions(source_text: str) -> str:
     """
@@ -920,7 +971,21 @@ def _sanitize_source_text_for_questions(source_text: str) -> str:
                 and any(marker in lowered for marker in ("assignment", "project", "quiz", "exam", "report"))
             ):
                 continue
+            if (
+                any(marker in lowered for marker in ("deadline", "due date", "late penalty", "late submission"))
+                and any(marker in lowered for marker in ("assignment", "project", "quiz", "exam", "report", "submission"))
+            ):
+                continue
             if ("grading" in lowered or "weight" in lowered) and "%" in lowered:
+                continue
+            if any(marker in lowered for marker in ("grading rubric", "grading breakdown", "attendance is mandatory")):
+                continue
+            if (
+                any(marker in lowered for marker in ("exam", "quiz"))
+                and any(marker in lowered for marker in ("scheduled", "opens", "closes", "room", "location"))
+            ):
+                continue
+            if any(marker in lowered for marker in ("contact the instructor", "contact your instructor", "contact the ta")):
                 continue
             if re.match(r"^(Dr\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}$", stripped):
                 continue
@@ -1242,12 +1307,18 @@ def _question_text_blob(q: dict) -> str:
     ]).strip()
 
 
-def _unsupported_specifics_breakdown(q: dict, source_text: str) -> dict:
+def _unsupported_specifics_breakdown(
+    q: dict,
+    source_text: str,
+    *,
+    generic_terms: set[str] | None = None,
+) -> dict:
+    generic_terms = generic_terms or GENERIC_REASONING_TERMS
     allowed_terms = _allowed_domain_terms_for_question(str(q.get("topic", "")), source_text)
     stem_terms = _significant_terms(str(q.get("question", "")))
     stem_unsupported = stem_terms - allowed_terms
-    stem_filtered_generic = stem_unsupported & GENERIC_REASONING_TERMS
-    counted_stem_terms = stem_unsupported - GENERIC_REASONING_TERMS
+    stem_filtered_generic = stem_unsupported & generic_terms
+    counted_stem_terms = stem_unsupported - generic_terms
 
     option_unsupported_terms = []
     option_filtered_generic_terms = []
@@ -1256,8 +1327,8 @@ def _unsupported_specifics_breakdown(q: dict, source_text: str) -> dict:
 
     for option_text in (q.get("options", {}) or {}).values():
         unsupported = _significant_terms(str(option_text)) - allowed_terms
-        filtered_generic = unsupported & GENERIC_REASONING_TERMS
-        counted_terms = unsupported - GENERIC_REASONING_TERMS
+        filtered_generic = unsupported & generic_terms
+        counted_terms = unsupported - generic_terms
         option_unsupported_terms.append(counted_terms)
         option_filtered_generic_terms.append(filtered_generic)
         if counted_terms:
@@ -1316,7 +1387,12 @@ def _introduces_unsupported_numeric_detail(q: dict, source_text: str) -> bool:
     return any(token not in source_numbers for token in question_numbers)
 
 
-def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> bool:
+def _introduces_too_many_out_of_source_specifics(
+    q: dict,
+    source_text: str,
+    *,
+    validation_profile: str = "default",
+) -> bool:
     try:
         difficulty = int(q.get("difficulty", 3))
     except Exception:
@@ -1325,14 +1401,19 @@ def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> b
     if difficulty < 4 or not source_text:
         return False
 
-    breakdown = _unsupported_specifics_breakdown(q, source_text)
+    generic_terms = (
+        DIAGNOSTIC_GENERIC_REASONING_TERMS
+        if validation_profile == "diagnostic"
+        else GENERIC_REASONING_TERMS
+    )
+    breakdown = _unsupported_specifics_breakdown(q, source_text, generic_terms=generic_terms)
     stem_term_count = len(breakdown["stem_terms"])
     distinct_count = len(breakdown["distinct_terms"])
     option_specific_count = breakdown["option_specific_count"]
     options_with_any_unsupported = breakdown["options_with_any_unsupported"]
     total_mentions = breakdown["total_mentions"]
 
-    should_reject = (
+    default_should_reject = (
         distinct_count >= 8
         and option_specific_count >= 2
         and (stem_term_count >= 2 or total_mentions >= 10)
@@ -1341,6 +1422,25 @@ def _introduces_too_many_out_of_source_specifics(q: dict, source_text: str) -> b
         and options_with_any_unsupported >= 3
         and total_mentions >= 12
     )
+
+    if validation_profile == "diagnostic":
+        should_reject = (
+            distinct_count >= 9
+            and option_specific_count >= 2
+            and (stem_term_count >= 3 or total_mentions >= 11)
+        ) or (
+            distinct_count >= 11
+            and options_with_any_unsupported >= 3
+            and total_mentions >= 13
+        )
+        if default_should_reject and not should_reject:
+            logger.info(
+                "[DIAG] Diagnostic-specific leniency applied validator=%s topic=%s",
+                "too_many_out_of_source_specifics",
+                q.get("topic"),
+            )
+    else:
+        should_reject = default_should_reject
 
     if should_reject:
         logger.info(
@@ -1508,6 +1608,43 @@ def _high_difficulty_distractors_look_too_weak(q: dict) -> bool:
     return weak_overlap >= 2
 
 
+def _diagnostic_allows_borderline_distractors(q: dict) -> bool:
+    options = q.get("options", {}) or {}
+    correct_letter = q.get("correct_answer")
+    correct_text = str(options.get(correct_letter, "")).strip()
+    distractors = [
+        str(text).strip()
+        for letter, text in options.items()
+        if letter != correct_letter and str(text).strip()
+    ]
+
+    if len(distractors) != 3 or not correct_text:
+        return False
+
+    correct_len = len(correct_text)
+    anchor_terms = (
+        set(_topic_terms(str(q.get("topic", ""))))
+        | _significant_terms(str(q.get("question", "")))
+        | _significant_terms(correct_text)
+    )
+    anchored_distractors = sum(
+        1
+        for distractor in distractors
+        if anchor_terms & _significant_terms(distractor)
+    )
+    short_distractors = sum(
+        1
+        for distractor in distractors
+        if len(distractor.split()) <= 3 or len(distractor) < max(12, int(correct_len * 0.45))
+    )
+
+    if anchored_distractors >= 2 and short_distractors <= 2:
+        return True
+
+    average_length = sum(len(text) for text in distractors) / len(distractors)
+    return anchored_distractors >= 1 and average_length >= correct_len * 0.55
+
+
 def _looks_like_admin_question(q: dict) -> bool:
     combined = " ".join([
         str(q.get("question", "")),
@@ -1537,7 +1674,12 @@ def _looks_like_reasoning_question(question_text: str) -> bool:
     return any(marker in text for marker in REASONING_MARKERS)
 
 
-def _difficulty_mismatch_reasons(q: dict, source_text: str | None = None) -> list[str]:
+def _difficulty_mismatch_reasons(
+    q: dict,
+    source_text: str | None = None,
+    *,
+    validation_profile: str = "default",
+) -> list[str]:
     question_text = str(q.get("question", ""))
     reasons = []
 
@@ -1553,12 +1695,23 @@ def _difficulty_mismatch_reasons(q: dict, source_text: str | None = None) -> lis
         reasons.append("too_direct_high_difficulty")
 
     if difficulty >= 4 and _high_difficulty_distractors_look_too_weak(q):
-        reasons.append("weak_distractors_high_difficulty")
+        if validation_profile == "diagnostic" and _diagnostic_allows_borderline_distractors(q):
+            logger.info(
+                "[DIAG] Diagnostic-specific leniency applied validator=%s topic=%s",
+                "weak_distractors_high_difficulty",
+                q.get("topic"),
+            )
+        else:
+            reasons.append("weak_distractors_high_difficulty")
 
     if source_text and difficulty >= 4 and _introduces_unsupported_numeric_detail(q, source_text):
         reasons.append("unsupported_numeric_detail")
 
-    if source_text and difficulty >= 4 and _introduces_too_many_out_of_source_specifics(q, source_text):
+    if source_text and difficulty >= 4 and _introduces_too_many_out_of_source_specifics(
+        q,
+        source_text,
+        validation_profile=validation_profile,
+    ):
         reasons.append("too_many_out_of_source_specifics")
 
     if source_text and difficulty >= 4 and _high_difficulty_is_too_close_to_source(q, source_text):
@@ -1576,6 +1729,7 @@ async def _generate_question_once(
     source_text: str,
     return_metadata: bool = False,
     max_provider_model_attempts: int | None = None,
+    generation_profile: str = "default",
 ) -> dict | tuple[dict, dict]:
     difficulty_label = {
     1: "very easy",
@@ -1587,6 +1741,12 @@ async def _generate_question_once(
     variation, variation_bucket = _choose_variation_angle(difficulty)
 
     clean_source_text = _sanitize_source_text_for_questions(source_text) or source_text
+    if generation_profile == "diagnostic":
+        original_nonempty_lines = sum(1 for line in source_text.splitlines() if line.strip())
+        cleaned_nonempty_lines = sum(1 for line in clean_source_text.splitlines() if line.strip())
+        removed_lines = max(0, original_nonempty_lines - cleaned_nonempty_lines)
+        if removed_lines:
+            logger.info("[DIAG] Sanitized admin boilerplate topic=%s removed_lines=%s", topic, removed_lines)
     selected_context, context_mode, selected_chunk_count = _select_question_context(
         clean_source_text,
         topic,
@@ -1639,7 +1799,10 @@ async def _generate_question_once(
         return payload
 
     async with httpx.AsyncClient(timeout=30) as client:
-        for provider_name in PROVIDER_ORDER:
+        provider_order = _provider_order_for_generation(generation_profile)
+        if generation_profile == "diagnostic":
+            logger.info("[DIAG] Provider preference order active topic=%s order=%s", topic, provider_order)
+        for provider_name in provider_order:
             provider_cfg = PROVIDERS.get(provider_name)
             if not provider_cfg:
                 logger.warning(f"[LLM] Unknown provider in PROVIDER_ORDER: {provider_name}")
@@ -1658,7 +1821,7 @@ async def _generate_question_once(
                 logger.info(f"[LLM] Skipping provider={provider_name} (missing API key)")
                 continue
 
-            models = PROVIDER_MODELS.get(provider_name, [])
+            models = _provider_models_for_generation(provider_name, generation_profile)
             if not models:
                 logger.info(f"[LLM] Skipping provider={provider_name} (no models configured)")
                 continue
@@ -1696,7 +1859,12 @@ async def _generate_question_once(
 
                     q = json.loads(raw)
 
-                    is_valid, reasons = validate_question(q, selected_context)
+                    validation_profile = "diagnostic" if generation_profile == "diagnostic" else "default"
+                    is_valid, reasons = validate_question(
+                        q,
+                        selected_context,
+                        validation_profile=validation_profile,
+                    )
                     if is_valid:
                         q = _shuffle_question_options(q)
                         logger.info(f"[LLM] SUCCESS provider={provider_name} model={model} topic={topic} difficulty={difficulty}")
@@ -1788,6 +1956,7 @@ async def generate_question_with_metadata(
     *,
     max_provider_model_attempts: int | None = None,
     allow_internal_fallback: bool = True,
+    generation_profile: str = "default",
 ) -> tuple[dict, dict]:
     try:
         question, metadata = await _generate_question_once(
@@ -1796,6 +1965,7 @@ async def generate_question_with_metadata(
             source_text,
             return_metadata=True,
             max_provider_model_attempts=max_provider_model_attempts,
+            generation_profile=generation_profile,
         )
         metadata = dict(metadata)
         metadata["requested_difficulty"] = difficulty
@@ -1828,6 +1998,7 @@ async def generate_question_with_metadata(
                 source_text,
                 return_metadata=True,
                 max_provider_model_attempts=max_provider_model_attempts,
+                generation_profile=generation_profile,
             )
             metadata = dict(metadata)
             metadata["requested_difficulty"] = difficulty

@@ -1664,6 +1664,10 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "followup_topics_practised": submit_resp.get("followup_topics_practised", []),
             "followup_topic_mastery_summaries": submit_resp.get("followup_topic_mastery_summaries", []),
             "narrative_bridge": submit_resp.get("narrative_bridge"),
+            "recovery_step_available": submit_resp.get("recovery_step_available", False),
+            "recovery_message": submit_resp.get("recovery_message"),
+            "recovery_reason": submit_resp.get("recovery_reason"),
+            "recovery_topic": submit_resp.get("recovery_topic"),
         }
 
     @XBlock.json_handler
@@ -1697,6 +1701,115 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             self.current_question_json = json.dumps(resp)
             return {"success": True, "question": resp}
         return {"success": False, "error": "Could not generate similar question."}
+
+    @XBlock.json_handler
+    def start_recovery_step(self, data, suffix=""):
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        if not question or not self.active_session_id:
+            return {"success": False, "error": "Recovery step is not available right now."}
+
+        resp = self._api(
+            "/api/quiz/support/recovery/start",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "session_id": self.active_session_id,
+                "question_id": question.get("question", "")[:80],
+                "question_text": question.get("question", ""),
+                "explanation": question.get("explanation", ""),
+                "topic": question.get("topic", self.current_topic),
+                "difficulty": question.get("difficulty", self.current_difficulty),
+                "source_text": self.session_source_text,
+            },
+            timeout=SIMILAR_QUESTION_TIMEOUT,
+        )
+        if not resp or not resp.get("success", True):
+            return {
+                "success": False,
+                "error": (resp or {}).get("error", "Could not start the guided recovery step."),
+            }
+
+        recovery_question = resp.get("question")
+        if recovery_question:
+            self.current_question_json = json.dumps(recovery_question)
+
+        return {
+            "success": True,
+            "question": recovery_question,
+            "simpler_explanation": resp.get("simpler_explanation", ""),
+            "recovery_topic": resp.get("recovery_topic"),
+            "recovery_reason": resp.get("recovery_reason"),
+            "recovery_reason_label": resp.get("recovery_reason_label"),
+        }
+
+    @XBlock.json_handler
+    def decline_recovery_step(self, data, suffix=""):
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        topic = question.get("topic", self.current_topic)
+        resp = self._api(
+            "/api/quiz/support/recovery/decline",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "session_id": self.active_session_id or "",
+                "topic": topic,
+            },
+            timeout=ANSWER_SUBMIT_TIMEOUT,
+        )
+        if resp:
+            return {"success": True}
+        return {"success": False, "error": "Could not continue normally right now."}
+
+    @XBlock.json_handler
+    def submit_recovery_answer(self, data, suffix=""):
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        if not question or not self.active_session_id:
+            return {"success": False, "error": "No active recovery question found."}
+
+        time_spent_ms = int(data.get("time_spent_ms", 15000))
+        time_context = data.get("time_context")
+        selected = data.get("selected_answer", "")
+        resp = self._api(
+            "/api/quiz/support/recovery/submit",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "session_id": self.active_session_id,
+                "question_id": question.get("question", "")[:80],
+                "question_text": question.get("question", ""),
+                "options": question.get("options", {}),
+                "explanation": question.get("explanation", ""),
+                "selected_answer": selected,
+                "correct_answer": question.get("correct_answer", ""),
+                "topic": question.get("topic", self.current_topic),
+                "difficulty": question.get("difficulty", self.current_difficulty),
+                "time_spent_ms": time_spent_ms,
+                "time_context": time_context,
+                "recovery_for_topic": question.get("recovery_for_topic") or question.get("topic", self.current_topic),
+            },
+            timeout=ANSWER_SUBMIT_TIMEOUT,
+        )
+        if not resp or not resp.get("success", True):
+            return {
+                "success": False,
+                "error": (resp or {}).get("error", "Could not submit recovery answer."),
+            }
+
+        return {
+            "success": True,
+            "is_correct": resp.get("is_correct", False),
+            "correct_answer": question.get("correct_answer", ""),
+            "explanation": question.get("explanation", ""),
+            "support_features": resp.get("support_features", ["explain_simpler"]),
+            "questions_seen": self.questions_seen,
+            "session_score": self.session_score,
+            "max_questions": self.session_target_questions or self.max_questions,
+            "session_complete": False,
+            "recovery_step_result": True,
+            "recovery_result_message": resp.get("recovery_result_message"),
+            "recovery_topic": resp.get("recovery_topic"),
+            "recovery_outcome": resp.get("recovery_outcome"),
+        }
     
     @XBlock.json_handler
     def get_progress(self, data, suffix=""):

@@ -8,8 +8,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var urlStart = runtime.handlerUrl(element, 'start_session');
   var urlSubmit = runtime.handlerUrl(element, 'submit_answer');
+  var urlSubmitRecovery = runtime.handlerUrl(element, 'submit_recovery_answer');
   var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
+  var urlStartRecovery = runtime.handlerUrl(element, 'start_recovery_step');
+  var urlDeclineRecovery = runtime.handlerUrl(element, 'decline_recovery_step');
   var urlProgress = runtime.handlerUrl(element, 'get_progress');
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
   var urlGetCourses = runtime.handlerUrl(element, 'get_courses');
@@ -35,6 +38,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     historyPage: 0,
     historyPageSize: 3,
     explainSimplerPending: false,
+    recoveryStartPending: false,
+    lastFeedbackContext: null,
     pendingAnswerKey: null,
     pendingTimeSpentMs: null,
     challengeReadiness: {
@@ -460,7 +465,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var counter = $('#aq-counter');
     var progress = $('#aq-progress-bar');
     if (topicBadge) topicBadge.textContent = question.topic || 'General';
-    if (counter) counter.textContent = (seenNow + 1) + ' / ' + state.maxQuestionsCurrent;
+    if (counter) {
+      counter.textContent = question.is_recovery_step
+        ? 'Guided step'
+        : (seenNow + 1) + ' / ' + state.maxQuestionsCurrent;
+    }
     if (diffBadge) {
       var d = question.difficulty || 3;
       diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
@@ -468,6 +477,94 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
     if (progress)
       progress.style.width = Math.round((seenNow / state.maxQuestionsCurrent) * 100) + '%';
+  }
+
+  function renderRecoveryIntro(question) {
+    var wrap = $('#aq-recovery-intro');
+    var label = $('#aq-recovery-intro-label');
+    var text = $('#aq-recovery-intro-text');
+    if (!wrap || !label || !text) return;
+
+    if (question && question.is_recovery_step) {
+      label.textContent = question.recovery_intro_title || 'Guided recovery step';
+      text.textContent = question.recovery_intro_text || 'Let\'s simplify the idea before one focused recovery question.';
+      wrap.classList.remove('aq-hidden');
+      return;
+    }
+
+    label.textContent = 'Guided recovery step';
+    text.textContent = 'Let\'s simplify the idea before one focused recovery question.';
+    wrap.classList.add('aq-hidden');
+  }
+
+  function hideRecoveryCard() {
+    var card = $('#aq-recovery-card');
+    var nextBtn = $('#aq-btn-next');
+    if (card) {
+      card.classList.add('aq-hidden');
+      card.classList.remove('aq-recovery-card-loading');
+    }
+    if (nextBtn) nextBtn.classList.remove('aq-hidden');
+    state.recoveryStartPending = false;
+  }
+
+  function showRecoveryCard(data) {
+    var card = $('#aq-recovery-card');
+    var text = $('#aq-recovery-card-text');
+    var nextBtn = $('#aq-btn-next');
+    var startBtn = $('#aq-btn-recovery-start');
+    var skipBtn = $('#aq-btn-recovery-skip');
+    if (!card || !text) return;
+
+    text.textContent = data.recovery_message || 'You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.';
+    card.classList.remove('aq-hidden');
+    card.classList.remove('aq-recovery-card-loading');
+    if (startBtn) {
+      startBtn.disabled = false;
+      startBtn.textContent = 'Try guided step';
+    }
+    if (skipBtn) skipBtn.disabled = false;
+    if (nextBtn) nextBtn.classList.add('aq-hidden');
+    state.recoveryStartPending = false;
+  }
+
+  function setRecoveryCardLoading(isLoading) {
+    var card = $('#aq-recovery-card');
+    var startBtn = $('#aq-btn-recovery-start');
+    var skipBtn = $('#aq-btn-recovery-skip');
+    if (card) card.classList.toggle('aq-recovery-card-loading', !!isLoading);
+    if (startBtn) {
+      startBtn.disabled = !!isLoading;
+      startBtn.textContent = isLoading ? 'Preparing guided step…' : 'Try guided step';
+    }
+    if (skipBtn) skipBtn.disabled = !!isLoading;
+    state.recoveryStartPending = !!isLoading;
+  }
+
+  function cloneFeedbackContextData(data) {
+    if (!data) return null;
+    return JSON.parse(JSON.stringify(data));
+  }
+
+  function restoreFeedbackAfterRecoveryDecline() {
+    if (!state.lastFeedbackContext || !state.lastFeedbackContext.data) {
+      hideRecoveryCard();
+      return;
+    }
+
+    var explanationEl = $('#aq-explanation');
+    var preservedExplanation = explanationEl ? explanationEl.textContent : '';
+    var restoredData = Object.assign({}, cloneFeedbackContextData(state.lastFeedbackContext.data), {
+      recovery_step_available: false,
+      recovery_message: null,
+      recovery_reason: null,
+      recovery_topic: null
+    });
+
+    renderFeedback(restoredData, state.lastFeedbackContext.selectedKey, {
+      isRestoredFeedback: true,
+      preserveExplanationText: preservedExplanation
+    });
   }
 
   function renderQuestion(resp) {
@@ -482,8 +579,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.currentQuestion = q;
     state.answered = false;
     state.questionStart = Date.now();
+    state.lastFeedbackContext = null;
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
+    renderRecoveryIntro(q);
 
     var qtEl = $('#aq-question-text');
     if (qtEl) qtEl.textContent = q.question;
@@ -500,6 +599,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var fb = $('#aq-feedback');
     if (fb) fb.classList.add('aq-hidden');
+    hideRecoveryCard();
     hideTimeContextPrompt();
 
     showScreen('question');
@@ -528,8 +628,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function submitAnswer(selectedKey, timeSpentMs, timeContext) {
     hideTimeContextPrompt();
+    var submitUrl = (state.currentQuestion && state.currentQuestion.is_recovery_step)
+      ? urlSubmitRecovery
+      : urlSubmit;
     jQuery.ajax({
-      type: 'POST', url: urlSubmit,
+      type: 'POST', url: submitUrl,
       data: JSON.stringify({
         selected_answer: selectedKey,
         time_spent_ms: timeSpentMs,
@@ -563,19 +666,34 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     submitAnswer(selectedKey, timeSpentMs, timeContext);
   }
 
-  function renderFeedback(data, selectedKey) {
+  function renderFeedback(data, selectedKey, options) {
+    options = options || {};
+
     if (!data || !data.success) {
       alert('Error: ' + (data && data.error ? data.error : 'Unknown'));
       return;
     }
 
-    state.questionsSeenSoFar = data.questions_seen;
-    state.sessionScore = data.session_score;
+    if (typeof data.questions_seen === 'number') state.questionsSeenSoFar = data.questions_seen;
+    if (typeof data.session_score === 'number') state.sessionScore = data.session_score;
     if (data.max_questions) state.maxQuestionsCurrent = data.max_questions;
 
     state.lastTopic = (state.currentQuestion && state.currentQuestion.topic) || 'General';
-    state.lastMasteryPct = Math.round((data.updated_mastery || 0.5) * 100);
-    state.lastDifficulty = data.next_difficulty || 3;
+    if (typeof data.updated_mastery === 'number') {
+      state.lastMasteryPct = Math.round(data.updated_mastery * 100);
+    }
+    if (typeof data.next_difficulty === 'number') {
+      state.lastDifficulty = data.next_difficulty;
+    }
+
+    if (data.recovery_step_result) {
+      state.lastFeedbackContext = null;
+    } else if (!options.isRestoredFeedback) {
+      state.lastFeedbackContext = {
+        data: cloneFeedbackContextData(data),
+        selectedKey: selectedKey || null
+      };
+    }
 
     var correct = data.correct_answer;
     ['A', 'B', 'C', 'D'].forEach(function (k) {
@@ -593,18 +711,38 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       banner.className = 'aq-feedback-banner ' + (data.is_correct ? 'correct' : 'incorrect');
     }
     if (icon) icon.textContent = data.is_correct ? '✓' : '✕';
-    if (label) label.textContent = data.is_correct ? 'Correct!' : 'Incorrect';
+    if (label) {
+      label.textContent = data.recovery_step_result
+        ? (data.is_correct ? 'Recovery step complete' : 'Recovery step checked')
+        : (data.is_correct ? 'Correct!' : 'Incorrect');
+    }
 
     var expEl = $('#aq-explanation');
-    if (expEl) expEl.textContent = data.explanation || '';
+    if (expEl) {
+      expEl.textContent = options.preserveExplanationText != null
+        ? options.preserveExplanationText
+        : (data.explanation || '');
+    }
     hideExplainStatus();
+
+    var recoveryOfferVisible = !!(
+      data.recovery_step_available &&
+      !data.session_complete &&
+      !data.recovery_step_result
+    );
 
     var bridgeWrap = $('#aq-narrative-bridge');
     var bridgeText = $('#aq-narrative-text');
     var bridgeLabel = $('#aq-narrative-label');
 
     if (bridgeWrap && bridgeText && bridgeLabel) {
-      if (data.session_complete) {
+      if (recoveryOfferVisible) {
+        bridgeWrap.classList.add('aq-hidden');
+      } else if (data.recovery_step_result) {
+        bridgeLabel.textContent = 'Recovery step';
+        bridgeText.textContent = data.recovery_result_message || 'We\'ll return to the normal quiz now.';
+        bridgeWrap.classList.remove('aq-hidden');
+      } else if (data.session_complete) {
         bridgeLabel.textContent = 'What happens next?';
         bridgeText.textContent =
           'You’ve finished this session. Open your results to see which topic to reinforce next and how your performance shaped the recommendation.';
@@ -618,7 +756,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       }
     }
 
-    var pct = Math.round((data.updated_mastery || 0.5) * 100);
+    var pct = typeof data.updated_mastery === 'number'
+      ? Math.round(data.updated_mastery * 100)
+      : state.lastMasteryPct;
     var fillEl = $('#aq-mastery-fill');
     var pctEl = $('#aq-mastery-pct');
     if (fillEl) fillEl.style.width = pct + '%';
@@ -638,7 +778,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       // IMPORTANT:
       // Do not allow "one more like this" after the session is already complete,
       // otherwise the frontend score can diverge from finalized backend session history.
-      if (!data.session_complete && features.indexOf('one_more_like_this') !== -1) {
+      if (!recoveryOfferVisible && !data.recovery_step_result && !data.session_complete && features.indexOf('one_more_like_this') !== -1) {
         supportRow.appendChild(
           makeSupportBtn('🔄 One more question like this', handleSimilarQuestion)
         );
@@ -647,10 +787,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var nextBtn = $('#aq-btn-next');
     if (nextBtn) {
-      nextBtn.textContent = data.session_complete ? 'See Results →' : 'Next Question →';
-      nextBtn.onclick = data.session_complete
+      nextBtn.textContent = data.recovery_step_result
+        ? 'Continue Quiz →'
+        : (data.session_complete ? 'See Results →' : 'Next Question →');
+      nextBtn.onclick = data.recovery_step_result
+        ? function () { loadNextQuestion(); }
+        : data.session_complete
         ? function () { showResults(data); }
         : function () { loadNextQuestion(); };
+    }
+
+    if (recoveryOfferVisible) {
+      showRecoveryCard(data);
+    } else {
+      hideRecoveryCard();
     }
 
     var fb = $('#aq-feedback');
@@ -709,6 +859,69 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (!statusEl) return;
     statusEl.textContent = '';
     statusEl.classList.add('aq-hidden');
+  }
+
+  function handleStartRecoveryStep() {
+    if (state.recoveryStartPending) return;
+
+    setRecoveryCardLoading(true);
+    hideExplainStatus();
+    setExplanationLoading('Preparing your guided recovery step...');
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlStartRecovery,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
+      success: function (data) {
+        if (!(data && data.success && data.question)) {
+          setRecoveryCardLoading(false);
+          setExplanationText((state.currentQuestion && state.currentQuestion.explanation) || '');
+          showExplainStatus('Could not start the guided recovery step just now.');
+          return;
+        }
+
+        setExplanationText(data.simpler_explanation || '');
+        hideExplainStatus();
+        setTimeout(function () {
+          renderQuestion({
+            success: true,
+            question: data.question,
+            questions_seen: state.questionsSeenSoFar,
+            max_questions: state.maxQuestionsCurrent
+          });
+        }, 180);
+      },
+      error: function () {
+        setRecoveryCardLoading(false);
+        setExplanationText((state.currentQuestion && state.currentQuestion.explanation) || '');
+        showExplainStatus('Could not start the guided recovery step just now.');
+      }
+    });
+  }
+
+  function handleDeclineRecoveryStep() {
+    if (state.recoveryStartPending) return;
+
+    setRecoveryCardLoading(true);
+    jQuery.ajax({
+      type: 'POST',
+      url: urlDeclineRecovery,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
+      success: function (data) {
+        setRecoveryCardLoading(false);
+        if (!(data && data.success)) {
+          showExplainStatus('Could not continue normally just now.');
+          return;
+        }
+        restoreFeedbackAfterRecoveryDecline();
+      },
+      error: function () {
+        setRecoveryCardLoading(false);
+        showExplainStatus('Could not continue normally just now.');
+      }
+    });
   }
 
   function setExplainSimplerButtonState(btn, isLoading) {
@@ -1724,6 +1937,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return text ? (key + ' — ' + text) : key;
   }
 
+  function formatRecoveryTriggerReason(reason) {
+    if (reason === 'thoughtful_wrong_answer') return 'thoughtful struggle';
+    if (reason === 'repeated_wrong_topic') return 'repeated difficulty';
+    return 'guided support';
+  }
+
+  function formatRecoveryOutcome(question) {
+    if (!question) return 'still needs review';
+    if (question.recovery_outcome === 'recovered') return 'recovered';
+    if (question.recovery_outcome === 'still_needs_review') return 'still needs review';
+    return question.is_correct ? 'recovered' : 'still needs review';
+  }
+
   function renderReviewQuestion() {
     var session = reviewState.session;
     if (!session || !session.question_log || !session.question_log.length) return;
@@ -1787,6 +2013,26 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     $('#aq-review-time-chip').textContent = 'Time: ' + formatMs(q.time_spent_ms || 0);
+    var recoveryChip = $('#aq-review-recovery-chip');
+    if (recoveryChip) {
+      recoveryChip.textContent = 'Guided Recovery';
+      recoveryChip.classList.add('aq-session-meta-chip-recovery');
+      recoveryChip.classList.toggle('aq-hidden', !q.is_recovery_step);
+    }
+    var recoveryMeta = $('#aq-review-recovery-meta');
+    var recoveryTrigger = $('#aq-review-recovery-trigger');
+    var recoveryTopic = $('#aq-review-recovery-topic');
+    var recoveryOutcome = $('#aq-review-recovery-outcome');
+    if (recoveryMeta && recoveryTrigger && recoveryTopic && recoveryOutcome) {
+      if (q.is_recovery_step) {
+        recoveryTrigger.textContent = formatRecoveryTriggerReason(q.recovery_trigger_reason);
+        recoveryTopic.textContent = q.recovery_for_topic || q.topic || 'General';
+        recoveryOutcome.textContent = formatRecoveryOutcome(q);
+        recoveryMeta.classList.remove('aq-hidden');
+      } else {
+        recoveryMeta.classList.add('aq-hidden');
+      }
+    }
     $('#aq-review-explanation').textContent = q.explanation || 'No explanation stored for this question.';
 
     var prevBtn = $('#aq-btn-review-prev');
@@ -2312,6 +2558,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var timeSkipBtn = $('#aq-time-skip');
   if (timeSkipBtn) timeSkipBtn.onclick = function () { handleTimeContextChoice('unknown'); };
+
+  var recoveryStartBtn = $('#aq-btn-recovery-start');
+  if (recoveryStartBtn) recoveryStartBtn.onclick = handleStartRecoveryStep;
+
+  var recoverySkipBtn = $('#aq-btn-recovery-skip');
+  if (recoverySkipBtn) recoverySkipBtn.onclick = handleDeclineRecoveryStep;
 
   var dashRetryBtn = $('#aq-btn-dashboard-retry');
   if (dashRetryBtn) dashRetryBtn.onclick = function () { pickerMode = 'quiz'; loadCoursePicker(); };

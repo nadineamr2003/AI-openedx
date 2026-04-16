@@ -293,6 +293,11 @@
       <span class="aq-tag aq-tag-diff" id="aq-badge-diff">Medium</span>
     </div>
 
+    <div class="aq-recovery-intro aq-hidden" id="aq-recovery-intro">
+      <span class="aq-recovery-intro-label" id="aq-recovery-intro-label">Guided recovery step</span>
+      <p class="aq-recovery-intro-text" id="aq-recovery-intro-text">Let's simplify the idea before one focused recovery question.</p>
+    </div>
+
     <!-- Question card -->
     <div class="aq-q-card">
       <p class="aq-q-text" id="aq-question-text">Loading…</p>
@@ -339,6 +344,17 @@
         <div class="aq-narrative-bridge aq-hidden" id="aq-narrative-bridge">
           <span class="aq-narrative-label" id="aq-narrative-label">Why and what is the next step?</span>
           <p class="aq-narrative-text" id="aq-narrative-text">—</p>
+        </div>
+
+        <div class="aq-recovery-card aq-hidden" id="aq-recovery-card">
+          <div class="aq-recovery-card-title">Need a guided step?</div>
+          <p class="aq-recovery-card-text" id="aq-recovery-card-text">
+            You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.
+          </p>
+          <div class="aq-recovery-card-actions">
+            <button class="aq-btn aq-btn-primary" id="aq-btn-recovery-start" type="button">Try guided step</button>
+            <button class="aq-btn aq-btn-ghost" id="aq-btn-recovery-skip" type="button">Continue normally</button>
+          </div>
         </div>
 
         <button class="aq-btn aq-btn-primary" id="aq-btn-next">Next Question →</button>
@@ -565,6 +581,22 @@
 
           <div class="aq-session-question-meta" style="margin-bottom:12px;">
             <span class="aq-session-meta-chip" id="aq-review-time-chip">Time: —</span>
+            <span class="aq-session-meta-chip aq-hidden" id="aq-review-recovery-chip">Recovery step</span>
+          </div>
+
+          <div class="aq-review-recovery-meta aq-hidden" id="aq-review-recovery-meta">
+            <div class="aq-review-recovery-row">
+              <span class="aq-review-recovery-key">Triggered by</span>
+              <span class="aq-review-recovery-value" id="aq-review-recovery-trigger">—</span>
+            </div>
+            <div class="aq-review-recovery-row">
+              <span class="aq-review-recovery-key">Topic</span>
+              <span class="aq-review-recovery-value" id="aq-review-recovery-topic">—</span>
+            </div>
+            <div class="aq-review-recovery-row">
+              <span class="aq-review-recovery-key">Outcome</span>
+              <span class="aq-review-recovery-value" id="aq-review-recovery-outcome">—</span>
+            </div>
           </div>
 
           <div class="aq-review-explanation-wrap">

@@ -213,6 +213,8 @@ def get_initial_student_state(student_id: str, course_id: str, topics: list) -> 
         "diagnostic_status_by_content": {},
         "last_updated":                None,
         "current_session_mode": "normal_practice",
+        "pending_recovery_offer":      None,
+        "active_recovery_step":        None,
     }
 
 

@@ -958,6 +958,32 @@
   margin-bottom: 16px;
 }
 
+.aq-recovery-intro {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(15, 118, 110, .16);
+  background: linear-gradient(135deg, rgba(15, 118, 110, .06), rgba(16, 185, 129, .08));
+  border-radius: var(--aq-radius-sm);
+}
+
+.aq-recovery-intro-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.aq-recovery-intro-text {
+  margin: 0;
+  font-size: .86rem;
+  line-height: 1.6;
+  color: #134e4a;
+  font-weight: 500;
+}
+
 .aq-btn-support {
   display: inline-flex;
   align-items: center;
@@ -998,6 +1024,39 @@
 .aq-btn-support:disabled:hover {
   background: transparent;
   color: var(--aq-primary);
+}
+
+.aq-recovery-card {
+  margin: 0 0 16px;
+  padding: 14px 15px;
+  border: 1px solid rgba(15, 118, 110, .16);
+  background: linear-gradient(135deg, rgba(15, 118, 110, .05), rgba(16, 185, 129, .07));
+  border-radius: var(--aq-radius-sm);
+}
+
+.aq-recovery-card-title {
+  font-size: .9rem;
+  font-weight: 800;
+  color: var(--aq-text);
+  margin-bottom: 6px;
+}
+
+.aq-recovery-card-text {
+  margin: 0 0 12px;
+  font-size: .84rem;
+  line-height: 1.6;
+  color: var(--aq-text-muted);
+}
+
+.aq-recovery-card-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.aq-recovery-card-loading {
+  opacity: .75;
+  pointer-events: none;
 }
 
 /* narrative bridge */
@@ -1862,6 +1921,13 @@
   color: var(--aq-text-muted);
 }
 
+.aq-session-meta-chip-recovery {
+  background: linear-gradient(135deg, #FFF7ED, #FFFBEB);
+  border-color: rgba(245, 158, 11, .35);
+  color: #B45309;
+  font-weight: 800;
+}
+
 .aq-session-answer-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1979,6 +2045,41 @@ body.aq-modal-open {
 
 .aq-review-explanation-wrap {
   margin-top: 4px;
+}
+
+.aq-review-recovery-meta {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 158, 11, .24);
+  border-radius: var(--aq-radius-sm);
+  background: linear-gradient(135deg, rgba(245, 158, 11, .08), rgba(251, 191, 36, .12));
+}
+
+.aq-review-recovery-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.aq-review-recovery-row + .aq-review-recovery-row {
+  margin-top: 7px;
+}
+
+.aq-review-recovery-key {
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #B45309;
+}
+
+.aq-review-recovery-value {
+  font-size: .84rem;
+  font-weight: 700;
+  color: #7C2D12;
+  text-align: right;
 }
 
 .aq-review-explanation-title {
