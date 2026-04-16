@@ -641,6 +641,51 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     );
   }
 
+  function getRecommendedReviewTopics(sessionLike) {
+    var recommendedTopics = normalizeTopicList(
+      Array.isArray(sessionLike && sessionLike.recommended_review_topics)
+        ? sessionLike.recommended_review_topics
+        : []
+    );
+
+    if (recommendedTopics.length) return recommendedTopics.slice(0, 2);
+
+    var fallbackTopic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
+    return fallbackTopic ? [fallbackTopic] : [];
+  }
+
+  function getFollowUpTopicMasterySummaries(sessionLike) {
+    var summaries = Array.isArray(sessionLike && sessionLike.followup_topic_mastery_summaries)
+      ? sessionLike.followup_topic_mastery_summaries
+      : [];
+    if (summaries.length) return summaries;
+
+    var focusedSummary = sessionLike && sessionLike.focused_topic_mastery_summary;
+    if (focusedSummary && String(focusedSummary.topic || '').trim()) {
+      return [focusedSummary];
+    }
+
+    return [];
+  }
+
+  function getFollowUpPracticedTopics(sessionLike) {
+    var explicitTopics = normalizeTopicList(
+      Array.isArray(sessionLike && sessionLike.followup_topics_practised)
+        ? sessionLike.followup_topics_practised
+        : []
+    );
+    if (explicitTopics.length) return explicitTopics.slice(0, 2);
+
+    var summaryTopics = normalizeTopicList(
+      getFollowUpTopicMasterySummaries(sessionLike).map(function (summary) {
+        return summary && summary.topic;
+      })
+    );
+    if (summaryTopics.length) return summaryTopics.slice(0, 2);
+
+    return getPracticedTopics(sessionLike).slice(0, 2);
+  }
+
   function isSingleTopicFollowUpSession(sessionLike) {
     if (!isFollowUpSession(sessionLike)) return false;
 
@@ -653,6 +698,18 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return getPracticedTopics(sessionLike).length === 1;
   }
 
+  function isMultiTopicFollowUpSession(sessionLike) {
+    return isFollowUpSession(sessionLike) && getFollowUpPracticedTopics(sessionLike).length > 1;
+  }
+
+  function formatTopicList(topics) {
+    var normalized = normalizeTopicList(topics);
+    if (!normalized.length) return '';
+    if (normalized.length === 1) return normalized[0];
+    if (normalized.length === 2) return normalized[0] + ' and ' + normalized[1];
+    return normalized.slice(0, -1).join(', ') + ', and ' + normalized[normalized.length - 1];
+  }
+
   function getFocusedTopicName(sessionLike) {
     var focusedSummary = sessionLike && sessionLike.focused_topic_mastery_summary;
     if (focusedSummary && String(focusedSummary.topic || '').trim()) {
@@ -661,6 +718,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var practicedTopics = getPracticedTopics(sessionLike);
     if (practicedTopics.length === 1) return practicedTopics[0];
+
+    var recommendedTopics = getRecommendedReviewTopics(sessionLike);
+    if (recommendedTopics.length === 1) return recommendedTopics[0];
 
     var recommendationTopic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
     if (recommendationTopic) return recommendationTopic;
@@ -692,19 +752,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return null;
     }
 
-    var topic = String((sessionLike && sessionLike.recommended_review_topic) || '').trim();
+    var topics = getRecommendedReviewTopics(sessionLike);
     var courseId = String((sessionLike && sessionLike.course_id) || '').trim();
     var contentIds = Array.isArray(sessionLike && sessionLike.selected_content_ids)
       ? sessionLike.selected_content_ids.filter(function (contentId) { return !!contentId; })
       : [];
     var questionCount = parseInt((sessionLike && sessionLike.target_questions) || state.maxQuestionsCurrent || MAX_Q, 10) || MAX_Q;
 
-    if (!topic || !courseId || contentIds.length === 0) {
+    if (!topics.length || !courseId || contentIds.length === 0) {
       return null;
     }
 
     return {
-      topic: topic,
+      topics: topics,
+      topicText: formatTopicList(topics),
       courseId: courseId,
       contentIds: contentIds,
       questionCount: questionCount
@@ -719,7 +780,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     selectedMode = 'weakness_review';
 
     startSessionWithIds(context.contentIds, context.courseId, 'weakness_review', {
-      focusTopics: [context.topic],
+      focusTopics: context.topics,
       questionCount: context.questionCount,
       sessionOrigin: 'followup'
     });
@@ -1003,11 +1064,36 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return 'Still Needs Review';
   }
 
+  function classifyMultiTopicFollowUpOutcome(summaries, sessionAccuracy) {
+    var followUpSummaries = Array.isArray(summaries) ? summaries : [];
+    var accuracy = typeof sessionAccuracy === 'number' ? sessionAccuracy : 0;
+    var positiveCount = followUpSummaries.filter(function (summary) {
+      return summary && typeof summary.mastery_delta === 'number' && summary.mastery_delta > 0;
+    }).length;
+    var strongCount = followUpSummaries.filter(function (summary) {
+      return summary && typeof summary.mastery_delta === 'number' && summary.mastery_delta >= 0.03;
+    }).length;
+
+    if (followUpSummaries.length && strongCount === followUpSummaries.length && accuracy >= 0.8) {
+      return 'Strong Reinforcement';
+    }
+    if (followUpSummaries.length && positiveCount === followUpSummaries.length && accuracy >= 0.6) {
+      return 'Consistent Improvement';
+    }
+    if (positiveCount > 0 || accuracy >= 0.6) {
+      return 'Mixed Improvement';
+    }
+    return 'Still Needs Review';
+  }
+
   function renderSessionInsight(data) {
     var wrap = $('#aq-session-insight');
     if (!wrap) return;
 
     var focusedFollowUp = isSingleTopicFollowUpSession(data);
+    var multiTopicFollowUp = isMultiTopicFollowUpSession(data);
+    var followUpTopics = getFollowUpPracticedTopics(data);
+    var followUpSummaries = getFollowUpTopicMasterySummaries(data);
     var strongest = data.strongest_topic_this_session || '';
     var weakest = data.weakest_topic_this_session || '';
     var recommendation = data.session_recommendation || '';
@@ -1027,6 +1113,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         data && data.focused_topic_mastery_summary,
         data && data.session_accuracy
       );
+    } else if (multiTopicFollowUp) {
+      strongest = (followUpTopics.length || parseInt(data.topics_practised_count || 0, 10) || 0) + ' topics reviewed';
+      weakest = classifyMultiTopicFollowUpOutcome(
+        followUpSummaries,
+        data && data.session_accuracy
+      );
     }
 
     if (!strongest && !weakest && !recommendation) {
@@ -1039,25 +1131,31 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var avgTimeEl = $('#aq-insight-avg-time');
     var recTextEl = $('#aq-recommendation-text');
 
-    if (sectionTitleEl) sectionTitleEl.textContent = focusedFollowUp ? 'Follow-up Insight' : 'Session Insight';
+    if (sectionTitleEl) sectionTitleEl.textContent = (focusedFollowUp || multiTopicFollowUp) ? 'Follow-up Insight' : 'Session Insight';
     if (gridEl) gridEl.classList.toggle('aq-insight-grid-single', focusedFollowUp);
     if (strongestCardEl) strongestCardEl.classList.remove('aq-hidden');
     if (weakestCardEl) weakestCardEl.classList.toggle('aq-hidden', focusedFollowUp);
-    if (avgTimeCardEl) avgTimeCardEl.classList.toggle('aq-hidden', focusedFollowUp);
+    if (avgTimeCardEl) avgTimeCardEl.classList.toggle('aq-hidden', focusedFollowUp || multiTopicFollowUp);
 
-    if (strongestLabelEl) strongestLabelEl.textContent = focusedFollowUp ? 'Follow-up Outcome' : 'Best Performed Topic';
-    if (weakestLabelEl) weakestLabelEl.textContent = 'Needs Review';
+    if (strongestLabelEl) {
+      strongestLabelEl.textContent = focusedFollowUp
+        ? 'Follow-up Outcome'
+        : multiTopicFollowUp
+          ? 'Follow-up Coverage'
+          : 'Best Performed Topic';
+    }
+    if (weakestLabelEl) weakestLabelEl.textContent = multiTopicFollowUp ? 'Outcome' : 'Needs Review';
     if (avgTimeLabelEl) avgTimeLabelEl.textContent = 'Avg Response Time';
 
     if (strongestEl) strongestEl.textContent = strongest || '—';
     if (weakestEl) weakestEl.textContent = focusedFollowUp ? '—' : (weakest || '—');
-    if (avgTimeEl) avgTimeEl.textContent = focusedFollowUp ? '—' : formatMs(avgTime);
+    if (avgTimeEl) avgTimeEl.textContent = (focusedFollowUp || multiTopicFollowUp) ? '—' : formatMs(avgTime);
 
     if (recommendationCardEl) {
-      recommendationCardEl.classList.toggle('aq-hidden', focusedFollowUp && !recommendation);
+      recommendationCardEl.classList.toggle('aq-hidden', (focusedFollowUp || multiTopicFollowUp) && !recommendation);
     }
     if (recTextEl) {
-      recTextEl.textContent = focusedFollowUp
+      recTextEl.textContent = (focusedFollowUp || multiTopicFollowUp)
         ? (recommendation || '')
         : (recommendation || 'Keep practising to reinforce your learning.');
     }
@@ -1075,6 +1173,37 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     titleEl.textContent = 'Lecture Mastery Change';
 
     var focusedSummary = data && data.focused_topic_mastery_summary;
+    var followUpSummaries = getFollowUpTopicMasterySummaries(data);
+    if (isMultiTopicFollowUpSession(data) && followUpSummaries.length > 1) {
+      titleEl.textContent = 'Follow-up Topic Mastery';
+
+      followUpSummaries.slice(0, 2).forEach(function (summary) {
+        var beforePct = masteryPct(summary.mastery_before);
+        var afterPct = masteryPct(summary.mastery_after);
+        var deltaPct = masteryDeltaFromDisplayed(beforePct, afterPct);
+        var deltaClass = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat';
+        var deltaArrow = deltaPct > 0 ? '↑' : deltaPct < 0 ? '↓' : '→';
+        var deltaLabel = formatMasteryDelta(deltaPct);
+        var card = document.createElement('div');
+
+        card.className = 'aq-lecture-change-card aq-lecture-change-card-followup';
+        card.innerHTML =
+          '<div class="aq-lecture-change-top">' +
+          '<div>' +
+          '<div class="aq-lecture-change-title">' + escapeHtml(summary.topic) + '</div>' +
+          '<div class="aq-lecture-change-meta">Follow-up topic</div>' +
+          '</div>' +
+          '<span class="aq-lecture-change-delta ' + deltaClass + '">' + deltaArrow + ' ' + deltaLabel + '</span>' +
+          '</div>' +
+          '<div class="aq-lecture-change-values">' + beforePct + '% → ' + afterPct + '%</div>';
+
+        listEl.appendChild(card);
+      });
+
+      wrap.classList.remove('aq-hidden');
+      return;
+    }
+
     if (isSingleTopicFollowUpSession(data) && focusedSummary && focusedSummary.topic) {
       var beforePct = masteryPct(focusedSummary.mastery_before);
       var afterPct = masteryPct(focusedSummary.mastery_after);
@@ -1147,7 +1276,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return;
     }
 
-    topicEl.textContent = 'Focused on: ' + followUp.topic;
+    topicEl.textContent = 'Focused on: ' + followUp.topicText;
     btn.onclick = function () {
       startFocusedFollowUp(followUp);
     };
@@ -1295,11 +1424,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         ? session.selected_content_titles.join(', ')
         : '—';
       var focusedFollowUp = isSingleTopicFollowUpSession(session);
+      var multiTopicFollowUp = isMultiTopicFollowUpSession(session);
       var isFollowUp = isFollowUpSession(session);
-      var primaryLabel = focusedFollowUp ? 'Focus Topic' : 'Best Performed Topic';
-      var primaryValue = focusedFollowUp ? (getFocusedTopicName(session) || '—') : (session.strongest_topic_this_session || '—');
-      var secondaryLabel = focusedFollowUp ? 'Accuracy' : 'Needs Review';
-      var secondaryValue = focusedFollowUp ? (pct + '%') : (session.weakest_topic_this_session || '—');
+      var followUpTopics = getFollowUpPracticedTopics(session);
+      var primaryLabel = focusedFollowUp ? 'Focus Topic' : (multiTopicFollowUp ? 'Topics Reviewed' : 'Best Performed Topic');
+      var primaryValue = focusedFollowUp
+        ? (getFocusedTopicName(session) || '—')
+        : (multiTopicFollowUp
+          ? (formatTopicList(followUpTopics) || ((followUpTopics.length || 2) + ' topics reviewed'))
+          : (session.strongest_topic_this_session || '—'));
+      var secondaryLabel = focusedFollowUp ? 'Accuracy' : (multiTopicFollowUp ? 'Outcome' : 'Needs Review');
+      var secondaryValue = focusedFollowUp
+        ? (pct + '%')
+        : (multiTopicFollowUp
+          ? classifyMultiTopicFollowUpOutcome(getFollowUpTopicMasterySummaries(session), session.accuracy)
+          : (session.weakest_topic_this_session || '—'));
       var followUp = allowFollowUp ? getFollowUpContext(session) : null;
 
       var actionsHtml = '';
@@ -1318,7 +1457,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         actionsHtml =
           '<div class="aq-session-actions-wrap">' +
           (followUp
-            ? '<div class="aq-follow-up-sub aq-follow-up-sub-card">Focused on: ' + escapeHtml(followUp.topic) + '</div>'
+            ? '<div class="aq-follow-up-sub aq-follow-up-sub-card">Focused on: ' + escapeHtml(followUp.topicText) + '</div>'
             : '') +
           '<div class="aq-session-actions">' +
           actionButtons.join('') +
@@ -1743,12 +1882,6 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var subEl = $('#aq-diag-sub');
     var itemLbl = $('#aq-diag-item-label');
 
-    if (titleEl) {
-      titleEl.textContent = diagState.totalItems > 1
-        ? 'Assessment · Lecture ' + (data.item_index + 1) + ' of ' + data.total_items
-        : 'Quick Placement Assessment';
-    }
-
     if (subEl) {
       subEl.textContent =
         'Answer ' + currentItemTarget + ' questions so we can calibrate your starting level for "' +
@@ -1769,13 +1902,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     var topicBadge = $('#aq-diag-badge-topic');
-    var diffBadge = $('#aq-diag-badge-diff');
     if (topicBadge) topicBadge.textContent = q.topic || data.topic || 'General';
-    if (diffBadge) {
-      var d = q.difficulty || data.difficulty || 3;
-      diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
-      diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
-    }
 
     var qtEl = $('#aq-diag-question-text');
     if (qtEl) qtEl.textContent = q.question;

@@ -691,6 +691,9 @@ async def _create_session_history(
         "weakest_topic_this_session": None,
         "strongest_topic_this_session": None,
         "recommended_review_topic": None,
+        "recommended_review_topics": [],
+        "followup_topics_practised": [],
+        "followup_topic_mastery_summaries": [],
         "recommendation": None,
         "selected_mode": selected_mode,
         "session_origin": session_origin,
@@ -761,15 +764,123 @@ def _compute_topic_session_stats(question_log: list[dict]) -> dict[str, dict]:
 
     return stats
 
+
+def _select_recommended_review_topics(
+    topic_session_stats: dict[str, dict],
+    max_topics: int = 2,
+) -> list[str]:
+    if not topic_session_stats:
+        return []
+
+    review_candidates = [
+        topic for topic, stats in topic_session_stats.items()
+        if (
+            (stats["attempts"] >= 2 and stats["accuracy"] < 0.6) or
+            (stats["wrong"] >= 2) or
+            (stats["attempts"] == 1 and stats["accuracy"] == 0.0)
+        )
+    ]
+
+    ranked = sorted(
+        review_candidates,
+        key=lambda topic: (
+            topic_session_stats[topic]["accuracy"],
+            -topic_session_stats[topic]["wrong"],
+            -topic_session_stats[topic]["attempts"],
+            -topic_session_stats[topic]["avg_time_spent_ms"],
+            topic,
+        ),
+    )
+    return ranked[:max(0, max_topics)]
+
+
+def _get_practiced_topics_from_doc(doc: dict) -> list[str]:
+    practiced_topics = _dedupe_keep_order([
+        str(entry.get("topic", "")).strip()
+        for entry in (doc.get("question_log") or [])
+        if str(entry.get("topic", "")).strip()
+    ])
+    if practiced_topics:
+        return practiced_topics
+
+    return _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (doc.get("practiced_topics") or [])
+        if str(topic).strip()
+    ])
+
+
+def _build_followup_topic_mastery_summaries(doc: dict, topic_mastery_after: dict) -> list[dict]:
+    if not _is_followup_origin(doc.get("session_origin")):
+        return []
+
+    topic_mastery_before = doc.get("topic_mastery_before", {}) or {}
+    summaries: list[dict] = []
+
+    for topic in _get_practiced_topics_from_doc(doc)[:2]:
+        if topic not in topic_mastery_before or topic not in topic_mastery_after:
+            continue
+
+        before = float(topic_mastery_before[topic])
+        after = float(topic_mastery_after[topic])
+        summaries.append({
+            "topic": topic,
+            "mastery_before": round(before, 4),
+            "mastery_after": round(after, 4),
+            "mastery_delta": round(after - before, 4),
+        })
+
+    return summaries
+
 def _build_session_recommendation(
     accuracy: float,
-    review_topic: str | None,
+    review_topics: list[str] | None,
     strongest_topic: str | None,
     session_origin: str | None,
+    followup_topics: list[str] | None = None,
 ) -> str | None:
+    normalized_review_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (review_topics or [])
+        if str(topic).strip()
+    ])
+    review_topic = normalized_review_topics[0] if normalized_review_topics else None
+    followup_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (followup_topics or [])
+        if str(topic).strip()
+    ])
+
+    def _join_topics(topics: list[str]) -> str:
+        if not topics:
+            return ""
+        if len(topics) == 1:
+            return topics[0]
+        if len(topics) == 2:
+            return f"{topics[0]} and {topics[1]}"
+        return ", ".join(topics[:-1]) + f", and {topics[-1]}"
+
     if _is_followup_origin(session_origin):
-        focus_topic = review_topic or strongest_topic
-        if focus_topic:
+        focus_topics = followup_topics or normalized_review_topics
+        focus_topic_text = _join_topics(focus_topics)
+        if focus_topic_text:
+            if len(focus_topics) > 1:
+                if accuracy >= 0.8:
+                    return (
+                        f"Strong follow-up reinforcement across {focus_topic_text}. You can return to normal practice "
+                        f"or try challenge mode when you want a broader test."
+                    )
+                if accuracy >= 0.60:
+                    return (
+                        f"Good progress across {focus_topic_text}. A normal practice session would be a good next step "
+                        f"to check whether the improvement holds more broadly."
+                    )
+                return (
+                    f"This follow-up shows {focus_topic_text} still need more reinforcement. Keep practising those topics "
+                    f"step by step before moving back to a broader session."
+                )
+
+            focus_topic = focus_topics[0]
             if accuracy >= 0.8:
                 return (
                     f"Strong follow-up session on {focus_topic}. You can return to normal practice "
@@ -784,6 +895,22 @@ def _build_session_recommendation(
                 f"This follow-up is still building stability on {focus_topic}. Keep practising it step by step "
                 f"before moving back to a broader session."
             )
+
+    if len(normalized_review_topics) > 1:
+        review_topic_text = _join_topics(normalized_review_topics)
+        if accuracy >= 0.8:
+            return (
+                f"Strong session overall. The main topics still worth tightening up are {review_topic_text}."
+            )
+        if accuracy >= 0.60:
+            return (
+                f"Good progress. {review_topic_text} showed the most difficulty in this session, "
+                f"so a short focused follow-up on them would help."
+            )
+        return (
+            f"This session was challenging, which is completely normal. "
+            f"Start your next attempt by reviewing {review_topic_text} step by step."
+        )
 
     if review_topic:
         if accuracy >= 0.8:
@@ -884,38 +1011,10 @@ async def _build_content_mastery_summaries(doc: dict, topic_mastery_after: dict)
 
 
 def _build_focused_topic_mastery_summary(doc: dict, topic_mastery_after: dict) -> dict | None:
-    if not _is_followup_origin(doc.get("session_origin")):
+    summaries = _build_followup_topic_mastery_summaries(doc, topic_mastery_after)
+    if len(summaries) != 1:
         return None
-
-    practiced_topics = _dedupe_keep_order([
-        str(entry.get("topic", "")).strip()
-        for entry in (doc.get("question_log") or [])
-        if str(entry.get("topic", "")).strip()
-    ])
-    if not practiced_topics:
-        practiced_topics = _dedupe_keep_order([
-            str(topic).strip()
-            for topic in (doc.get("practiced_topics") or [])
-            if str(topic).strip()
-        ])
-    if len(practiced_topics) != 1:
-        return None
-
-    topic = practiced_topics[0]
-    topic_mastery_before = doc.get("topic_mastery_before", {}) or {}
-
-    if topic not in topic_mastery_before or topic not in topic_mastery_after:
-        return None
-
-    before = float(topic_mastery_before[topic])
-    after = float(topic_mastery_after[topic])
-
-    return {
-        "topic": topic,
-        "mastery_before": round(before, 4),
-        "mastery_after": round(after, 4),
-        "mastery_delta": round(after - before, 4),
-    }
+    return summaries[0]
 
 async def _finalize_session_history(session_id: str, topic_mastery_after: dict) -> dict:
     db = get_db()
@@ -930,26 +1029,21 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
     accuracy = (correct_answers / questions_answered) if questions_answered > 0 else 0.0
     avg_time = int(total_time_spent_ms / questions_answered) if questions_answered > 0 else 0
 
-    # NEW: derive practiced topics from the actual question log
     question_log = doc.get("question_log", [])
-    practiced_topics = []
-    seen = set()
-
-    for entry in question_log:
-        topic = entry.get("topic")
-        if topic and topic not in seen:
-            seen.add(topic)
-            practiced_topics.append(topic)
+    practiced_topics = _get_practiced_topics_from_doc(doc)
 
     lectures_practised_count = len(doc.get("selected_content_ids", []) or [])
     topics_practised_count = len(practiced_topics)
     content_mastery_summaries = await _build_content_mastery_summaries(doc, topic_mastery_after)
+    followup_topic_mastery_summaries = _build_followup_topic_mastery_summaries(doc, topic_mastery_after)
     focused_topic_mastery_summary = _build_focused_topic_mastery_summary(doc, topic_mastery_after)
+    followup_topics_practised = [summary["topic"] for summary in followup_topic_mastery_summaries]
 
     topic_session_stats = _compute_topic_session_stats(question_log)
 
     weakest_topic = None
     strongest_topic = None
+    recommended_review_topics: list[str] = []
 
     if topic_session_stats:
         # strongest = best session-local performance, preferring more evidence
@@ -962,32 +1056,18 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
             )
         )
 
-        review_candidates = [
-            t for t, s in topic_session_stats.items()
-            if (
-                (s["attempts"] >= 2 and s["accuracy"] < 0.6) or
-                (s["wrong"] >= 2) or
-                (s["attempts"] == 1 and s["accuracy"] == 0.0)
-            )
-        ]
-
-        if review_candidates:
-            weakest_topic = min(
-                review_candidates,
-                key=lambda t: (
-                    topic_session_stats[t]["accuracy"],
-                    -topic_session_stats[t]["wrong"],
-                    -topic_session_stats[t]["attempts"],
-                )
-            )
+        recommended_review_topics = _select_recommended_review_topics(topic_session_stats)
+        if recommended_review_topics:
+            weakest_topic = recommended_review_topics[0]
 
     recommended_review_topic = weakest_topic
 
     recommendation = _build_session_recommendation(
         accuracy=accuracy,
-        review_topic=recommended_review_topic,
+        review_topics=recommended_review_topics,
         strongest_topic=strongest_topic,
         session_origin=doc.get("session_origin"),
+        followup_topics=followup_topics_practised,
     )
 
     ended_at = datetime.now(timezone.utc).isoformat()
@@ -1005,9 +1085,12 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "topics_practised_count": topics_practised_count,
                 "content_mastery_summaries": content_mastery_summaries,
                 "focused_topic_mastery_summary": focused_topic_mastery_summary,
+                "followup_topics_practised": followup_topics_practised,
+                "followup_topic_mastery_summaries": followup_topic_mastery_summaries,
                 "weakest_topic_this_session": weakest_topic,
                 "strongest_topic_this_session": strongest_topic,
                 "recommended_review_topic": recommended_review_topic,
+                "recommended_review_topics": recommended_review_topics,
                 "recommendation": recommendation,
             }
         }
@@ -1022,9 +1105,12 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         "topics_practised_count": topics_practised_count,
         "content_mastery_summaries": content_mastery_summaries,
         "focused_topic_mastery_summary": focused_topic_mastery_summary,
+        "followup_topics_practised": followup_topics_practised,
+        "followup_topic_mastery_summaries": followup_topic_mastery_summaries,
         "weakest_topic_this_session": weakest_topic,
         "strongest_topic_this_session": strongest_topic,
         "recommended_review_topic": recommended_review_topic,
+        "recommended_review_topics": recommended_review_topics,
         "selected_content_ids": doc.get("selected_content_ids", []),
         "course_id": doc.get("course_id"),
         "recommendation": recommendation,
@@ -1050,6 +1136,10 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
             doc.get("recommended_review_topic")
             or doc.get("weakest_topic_this_session")
         ),
+        "recommended_review_topics": (
+            doc.get("recommended_review_topics")
+            or ([doc.get("recommended_review_topic")] if doc.get("recommended_review_topic") else [])
+        ),
         "recommendation": doc.get("recommendation"),
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
@@ -1057,6 +1147,8 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
         "topics_practised_count": doc.get("topics_practised_count"),
         "content_mastery_summaries": doc.get("content_mastery_summaries", []),
         "focused_topic_mastery_summary": doc.get("focused_topic_mastery_summary"),
+        "followup_topics_practised": doc.get("followup_topics_practised", []),
+        "followup_topic_mastery_summaries": doc.get("followup_topic_mastery_summaries", []),
         "selected_mode": doc.get("selected_mode", "normal_practice"),
         "session_origin": _normalize_session_origin(doc.get("session_origin")),
         "selected_content_ids": doc.get("selected_content_ids", []),
@@ -1423,23 +1515,23 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 def _apply_focus_topics(
     resolved_topics: list[str],
     focus_topics: list[str] | None,
-) -> tuple[list[str], str | None]:
+) -> tuple[list[str], list[str], str | None]:
     normalized_focus_topics = _dedupe_keep_order([
         str(topic).strip()
         for topic in (focus_topics or [])
         if str(topic).strip()
     ])
     if not normalized_focus_topics:
-        return resolved_topics, None
+        return resolved_topics, [], None
 
-    focused_topic = next(
-        (topic for topic in normalized_focus_topics if topic in resolved_topics),
-        None,
-    )
-    if not focused_topic:
-        return resolved_topics, None
+    valid_focus_topics = [
+        topic for topic in normalized_focus_topics
+        if topic in resolved_topics
+    ][:2]
+    if not valid_focus_topics:
+        return resolved_topics, [], None
 
-    return [focused_topic], focused_topic
+    return valid_focus_topics, valid_focus_topics, valid_focus_topics[0]
 
 
 def _set_session_followup_state(
@@ -1783,10 +1875,13 @@ async def submit(req: SubmitRequest):
         topics_practised_count=session_summary.get("topics_practised_count"),
         content_mastery_summaries=session_summary.get("content_mastery_summaries"),
         recommended_review_topic=session_summary.get("recommended_review_topic"),
+        recommended_review_topics=session_summary.get("recommended_review_topics"),
         selected_content_ids=session_summary.get("selected_content_ids"),
         course_id=session_summary.get("course_id"),
         session_origin=session_summary.get("session_origin", current_session_origin),
         focused_topic_mastery_summary=session_summary.get("focused_topic_mastery_summary"),
+        followup_topics_practised=session_summary.get("followup_topics_practised"),
+        followup_topic_mastery_summaries=session_summary.get("followup_topic_mastery_summaries"),
         narrative_bridge=narrative_bridge,
     )
 
@@ -1937,11 +2032,11 @@ async def session_start(req: GenerateRequest):
             detail="No active content found for the selected items.",
         )
 
-    resolved_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
-    if focused_topic:
+    resolved_topics, applied_focus_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
+    if applied_focus_topics:
         logger.info(
-            "[SESSION] Focus topic applied topic=%s mode=%s",
-            focused_topic,
+            "[SESSION] Focus topics applied topics=%s mode=%s",
+            applied_focus_topics,
             requested_mode,
         )
     elif req.focus_topics:
@@ -1993,7 +2088,7 @@ async def session_start(req: GenerateRequest):
     is_focused_followup = _set_session_followup_state(
         state=state,
         mode=requested_mode,
-        focus_topics=req.focus_topics,
+        focus_topics=applied_focus_topics,
         focused_topic=focused_topic,
         session_origin=requested_session_origin,
     )
@@ -2231,11 +2326,11 @@ async def session_finalize(req: SessionFinalizeRequest):
     if not resolved_topics:
         raise HTTPException(status_code=404, detail="No active content found.")
 
-    resolved_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
-    if focused_topic:
+    resolved_topics, applied_focus_topics, focused_topic = _apply_focus_topics(resolved_topics, req.focus_topics)
+    if applied_focus_topics:
         logger.info(
-            "[SESSION] Focus topic applied topic=%s mode=%s",
-            focused_topic,
+            "[SESSION] Focus topics applied topics=%s mode=%s",
+            applied_focus_topics,
             requested_mode,
         )
     elif req.focus_topics:
@@ -2285,7 +2380,7 @@ async def session_finalize(req: SessionFinalizeRequest):
     is_focused_followup = _set_session_followup_state(
         state=state,
         mode=requested_mode,
-        focus_topics=req.focus_topics,
+        focus_topics=applied_focus_topics,
         focused_topic=focused_topic,
         session_origin=requested_session_origin,
     )

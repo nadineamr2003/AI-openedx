@@ -2036,11 +2036,11 @@ body.aq-modal-open {
   align-items: center;
   background: var(--aq-amber-light);
   color: var(--aq-amber);
-  font-size: .72rem;
-  font-weight: 700;
-  letter-spacing: .06em;
+  font-size: .84rem;
+  font-weight: 800;
+  letter-spacing: .08em;
   text-transform: uppercase;
-  padding: 5px 14px;
+  padding: 8px 18px;
   border-radius: 999px;
   margin-bottom: 16px;
 }

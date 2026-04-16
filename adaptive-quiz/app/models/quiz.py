@@ -48,10 +48,13 @@ class SubmitResponse(BaseModel):
     topics_practised_count:          int | None = None
     content_mastery_summaries:       list[dict] | None = None
     recommended_review_topic:        str | None = None
+    recommended_review_topics:       list[str] | None = None
     selected_content_ids:            list[str] | None = None
     course_id:                       str | None = None
     session_origin:                  str | None = None
     focused_topic_mastery_summary:   dict | None = None
+    followup_topics_practised:       list[str] | None = None
+    followup_topic_mastery_summaries: list[dict] | None = None
     narrative_bridge:                str | None = None
 
 

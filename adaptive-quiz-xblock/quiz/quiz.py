@@ -1644,9 +1644,12 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "content_mastery_summaries": submit_resp.get("content_mastery_summaries", []),
             "focused_topic_mastery_summary": submit_resp.get("focused_topic_mastery_summary"),
             "recommended_review_topic": submit_resp.get("recommended_review_topic"),
+            "recommended_review_topics": submit_resp.get("recommended_review_topics", []),
             "selected_content_ids": submit_resp.get("selected_content_ids", []),
             "course_id": submit_resp.get("course_id"),
             "session_origin": submit_resp.get("session_origin", self.selected_session_origin),
+            "followup_topics_practised": submit_resp.get("followup_topics_practised", []),
+            "followup_topic_mastery_summaries": submit_resp.get("followup_topic_mastery_summaries", []),
             "narrative_bridge": submit_resp.get("narrative_bridge"),
         }
 
