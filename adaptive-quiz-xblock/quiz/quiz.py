@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 DEFAULT_BACKEND_URL = "http://host.docker.internal:8100"
 
 QUESTION_GENERATE_TIMEOUT = 120
+DIAGNOSTIC_GENERATE_TIMEOUT = 120
 SIMILAR_QUESTION_TIMEOUT = 120
 SESSION_START_TIMEOUT = 60
 ANSWER_SUBMIT_TIMEOUT = 45
@@ -1369,6 +1370,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         results_so_far = all_results.get(content_id, [])
         target_questions = int(item.get("diagnostic_target_questions", 5))
 
+        log.info("[DIAG] Using extended timeout for diagnostic generate")
         resp = self._api("/api/quiz/diagnostic/generate", payload={
             "student_id": self._student_id(),
             "course_id": self._active_course_id(),
@@ -1377,7 +1379,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "source_text": item.get("source_text", ""),
             "results_so_far": results_so_far,
             "target_questions": target_questions,
-        }, timeout=45)
+        }, timeout=DIAGNOSTIC_GENERATE_TIMEOUT)
 
         if not resp or not resp.get("success"):
             return {"success": False, "error": "Could not generate diagnostic question."}

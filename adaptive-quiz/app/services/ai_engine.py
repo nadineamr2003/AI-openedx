@@ -1570,7 +1570,13 @@ def _difficulty_mismatch_reasons(q: dict, source_text: str | None = None) -> lis
     return reasons
 
 
-async def _generate_question_once(topic: str, difficulty: int, source_text: str) -> dict:
+async def _generate_question_once(
+    topic: str,
+    difficulty: int,
+    source_text: str,
+    return_metadata: bool = False,
+    max_provider_model_attempts: int | None = None,
+) -> dict | tuple[dict, dict]:
     difficulty_label = {
     1: "very easy",
     2: "easy",
@@ -1611,6 +1617,26 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
 
     all_failures = []
     reserve_candidate = None
+    provider_model_attempts = 0
+
+    def _metadata_payload(
+        *,
+        used_last_resort: bool,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict:
+        payload = {
+            "used_last_resort": used_last_resort,
+            "provider_model_attempts": provider_model_attempts,
+            "budget_limited": max_provider_model_attempts is not None,
+            "max_provider_model_attempts": max_provider_model_attempts,
+        }
+        if provider:
+            payload["provider"] = provider
+        if model:
+            payload["model"] = model
+            payload["source"] = f"{provider}/{model}" if provider else model
+        return payload
 
     async with httpx.AsyncClient(timeout=30) as client:
         for provider_name in PROVIDER_ORDER:
@@ -1640,6 +1666,19 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
             logger.info(f"[LLM] Trying provider={provider_name} models={models}")
 
             for model in models:
+                if (
+                    max_provider_model_attempts is not None
+                    and provider_model_attempts >= max_provider_model_attempts
+                ):
+                    logger.info(
+                        "[LLM] Attempt budget exhausted topic=%s difficulty=%s attempts=%s max_attempts=%s",
+                        topic,
+                        difficulty,
+                        provider_model_attempts,
+                        max_provider_model_attempts,
+                    )
+                    break
+
                 model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
                 if model_cooldown_remaining > 0:
                     logger.info(
@@ -1650,6 +1689,7 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
                     )
                     continue
 
+                provider_model_attempts += 1
                 try:
                     raw = await _call_model(client, provider_name, model, prompt)
                     raw = _strip_markdown_fences(raw)
@@ -1660,6 +1700,12 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
                     if is_valid:
                         q = _shuffle_question_options(q)
                         logger.info(f"[LLM] SUCCESS provider={provider_name} model={model} topic={topic} difficulty={difficulty}")
+                        if return_metadata:
+                            return q, _metadata_payload(
+                                used_last_resort=False,
+                                provider=provider_name,
+                                model=model,
+                            )
                         return q
                     else:
                         reason_text = ",".join(reasons) if reasons else "unknown"
@@ -1710,6 +1756,12 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
                     all_failures.append(msg)
                     continue
 
+            if (
+                max_provider_model_attempts is not None
+                and provider_model_attempts >= max_provider_model_attempts
+            ):
+                break
+
     if reserve_candidate is not None:
         question = _shuffle_question_options(reserve_candidate["question"])
         logger.warning(
@@ -1718,15 +1770,41 @@ async def _generate_question_once(topic: str, difficulty: int, source_text: str)
             reserve_candidate["model"],
             ",".join(reserve_candidate["strict_reasons"]) if reserve_candidate["strict_reasons"] else "unknown",
         )
+        if return_metadata:
+            return question, _metadata_payload(
+                used_last_resort=True,
+                provider=reserve_candidate["provider"],
+                model=reserve_candidate["model"],
+            )
         return question
 
     raise NoValidQuestionError("All providers/models failed to produce a valid question.\n" + "\n".join(all_failures))
 
 
-async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
+async def generate_question_with_metadata(
+    topic: str,
+    difficulty: int,
+    source_text: str,
+    *,
+    max_provider_model_attempts: int | None = None,
+    allow_internal_fallback: bool = True,
+) -> tuple[dict, dict]:
     try:
-        return await _generate_question_once(topic, difficulty, source_text)
+        question, metadata = await _generate_question_once(
+            topic,
+            difficulty,
+            source_text,
+            return_metadata=True,
+            max_provider_model_attempts=max_provider_model_attempts,
+        )
+        metadata = dict(metadata)
+        metadata["requested_difficulty"] = difficulty
+        metadata["returned_difficulty"] = int(question.get("difficulty", difficulty))
+        return question, metadata
     except NoValidQuestionError as primary_error:
+        if not allow_internal_fallback:
+            raise ValueError(str(primary_error)) from primary_error
+
         fallback_difficulty = None
         if difficulty == 5:
             fallback_difficulty = 4
@@ -1744,9 +1822,24 @@ async def generate_question(topic: str, difficulty: int, source_text: str) -> di
         )
 
         try:
-            return await _generate_question_once(topic, fallback_difficulty, source_text)
+            question, metadata = await _generate_question_once(
+                topic,
+                fallback_difficulty,
+                source_text,
+                return_metadata=True,
+                max_provider_model_attempts=max_provider_model_attempts,
+            )
+            metadata = dict(metadata)
+            metadata["requested_difficulty"] = difficulty
+            metadata["returned_difficulty"] = int(question.get("difficulty", fallback_difficulty))
+            return question, metadata
         except NoValidQuestionError as fallback_error:
             raise ValueError(str(fallback_error)) from primary_error
+
+
+async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
+    question, _ = await generate_question_with_metadata(topic, difficulty, source_text)
+    return question
 
 # Rewrite the explanation in much simpler language.
 # Use an analogy if it helps.

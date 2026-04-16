@@ -27,6 +27,7 @@ from app.services.adaptation import (
 )
 from app.services.ai_engine import (
     generate_question,
+    generate_question_with_metadata,
     generate_simple_explanation,
     extract_content_metadata,
 )
@@ -51,6 +52,7 @@ RECENT_QUESTION_HISTORY_MAX_AGE = timedelta(days=14)
 LIVE_DEDUPE_MAX_ATTEMPTS = 3
 CHALLENGE_READY_AVG_MASTERY = TARGET_BAND[0]
 CHALLENGE_NOT_READY_ERROR = "challenge_not_ready"
+DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS = 3
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -2259,34 +2261,73 @@ async def _generate_diagnostic_question_with_fallback(
     difficulty: int,
     source_text: str,
 ) -> dict:
-    try:
-        return await generate_question(
-            topic=topic,
-            difficulty=difficulty,
-            source_text=source_text,
-        )
-    except ValueError:
-        lower_difficulty = max(1, int(difficulty) - 1)
-        if lower_difficulty >= int(difficulty):
-            raise
+    async def _attempt_with_budget(target_difficulty: int) -> tuple[str, dict | None, dict | None]:
+        try:
+            question, metadata = await generate_question_with_metadata(
+                topic=topic,
+                difficulty=target_difficulty,
+                source_text=source_text,
+                max_provider_model_attempts=DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS,
+                allow_internal_fallback=False,
+            )
+        except ValueError:
+            logger.info(
+                "[DIAG] Planned difficulty budget exhausted topic=%s difficulty=%s",
+                topic,
+                target_difficulty,
+            )
+            return "failure", None, None
 
+        is_clean = not metadata.get("used_last_resort")
         logger.info(
-            "[DIAG] Retry lower difficulty topic=%s from=%s to=%s",
+            "[DIAG] Diagnostic fast-path success topic=%s difficulty=%s clean=%s",
+            topic,
+            int(question.get("difficulty", target_difficulty)),
+            is_clean,
+        )
+        return ("clean" if is_clean else "reserve"), question, metadata
+
+    planned_outcome, planned_question, planned_metadata = await _attempt_with_budget(int(difficulty))
+    if planned_outcome == "clean" and planned_question is not None:
+        return planned_question
+
+    lower_difficulty = max(1, int(difficulty) - 1)
+    if lower_difficulty < int(difficulty):
+        retry_reason = "last_resort" if planned_outcome == "reserve" else "budget_exhausted"
+        logger.info(
+            "[DIAG] Retrying lower difficulty topic=%s from=%s to=%s reason=%s",
             topic,
             difficulty,
             lower_difficulty,
+            retry_reason,
         )
-        question = await generate_question(
-            topic=topic,
-            difficulty=lower_difficulty,
-            source_text=source_text,
-        )
+        lower_outcome, lower_question, lower_metadata = await _attempt_with_budget(lower_difficulty)
+        if lower_outcome == "clean" and lower_question is not None:
+            logger.info(
+                "[DIAG] Lower-difficulty fallback succeeded topic=%s difficulty=%s",
+                topic,
+                int(lower_question.get("difficulty", lower_difficulty)),
+            )
+            return lower_question
+        if lower_outcome == "reserve" and lower_question is not None:
+            logger.info(
+                "[DIAG] Using reserve candidate topic=%s difficulty=%s source=%s",
+                topic,
+                int(lower_question.get("difficulty", lower_difficulty)),
+                (lower_metadata or {}).get("source", "unknown"),
+            )
+            return lower_question
+
+    if planned_outcome == "reserve" and planned_question is not None:
         logger.info(
-            "[DIAG] Lower-difficulty fallback succeeded topic=%s difficulty=%s",
+            "[DIAG] Using reserve candidate topic=%s difficulty=%s source=%s",
             topic,
-            int(question.get("difficulty", lower_difficulty)),
+            int(planned_question.get("difficulty", difficulty)),
+            (planned_metadata or {}).get("source", "unknown"),
         )
-        return question
+        return planned_question
+
+    raise ValueError(f"Diagnostic generation failed at difficulty {difficulty}.")
 
 
 @router.post("/diagnostic/generate")
