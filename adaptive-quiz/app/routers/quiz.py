@@ -1435,6 +1435,363 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
 
     return item
 
+
+def _format_logged_answer(options: dict | None, answer_key: str | None) -> str:
+    key = str(answer_key or "").strip()
+    if not key:
+        return "—"
+
+    if not isinstance(options, dict):
+        return key
+
+    option_text = str(options.get(key) or "").strip()
+    return f"{key} — {option_text}" if option_text else key
+
+
+def _build_mistake_scope_key(parts: list[str]) -> str:
+    normalized_parts = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    if not normalized_parts:
+        normalized_parts = ["mistake-scope"]
+    payload = "||".join(normalized_parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_session_content_refs(doc: dict, content_by_id: dict[str, dict]) -> list[dict]:
+    selected_content_ids = [
+        str(content_id or "").strip()
+        for content_id in (doc.get("selected_content_ids") or [])
+        if str(content_id or "").strip()
+    ]
+    selected_content_titles = [
+        str(title or "").strip()
+        for title in (doc.get("selected_content_titles") or [])
+        if str(title or "").strip()
+    ]
+
+    refs: list[dict] = []
+
+    for index, content_id in enumerate(selected_content_ids):
+        content_doc = content_by_id.get(content_id) or {}
+        fallback_title = selected_content_titles[index] if index < len(selected_content_titles) else ""
+        refs.append({
+            "content_id": content_id,
+            "title": str(content_doc.get("title") or fallback_title or "Untitled Content").strip(),
+            "week": content_doc.get("week"),
+            "content_type": content_doc.get("content_type"),
+            "topics": _dedupe_keep_order([
+                str(topic or "").strip()
+                for topic in (content_doc.get("topics") or [])
+                if str(topic or "").strip()
+            ]),
+        })
+
+    if refs or not selected_content_titles:
+        return refs
+
+    for index, title in enumerate(selected_content_titles):
+        refs.append({
+            "content_id": "",
+            "title": title,
+            "week": None,
+            "content_type": None,
+            "topics": [],
+        })
+
+    return refs
+
+
+def _build_mistake_scope_label(content_refs: list[dict]) -> str:
+    titles = _dedupe_keep_order([
+        str(ref.get("title") or "").strip()
+        for ref in (content_refs or [])
+        if str(ref.get("title") or "").strip()
+    ])
+
+    if not titles:
+        return "Selected content scope"
+    if len(titles) == 1:
+        return f"Selected content scope: {titles[0]}"
+    return f"Selected content scope: {titles[0]} + {len(titles) - 1} more"
+
+
+def _resolve_mistake_lecture_context(doc: dict, entry: dict, content_by_id: dict[str, dict]) -> dict:
+    session_content_refs = _build_session_content_refs(doc, content_by_id)
+    topic = str(entry.get("topic") or "").strip()
+
+    matching_refs = [
+        ref for ref in session_content_refs
+        if topic and topic in (ref.get("topics") or [])
+    ]
+
+    if len(matching_refs) == 1:
+        ref = matching_refs[0]
+        content_id = str(ref.get("content_id") or "").strip()
+        return {
+            "lecture_key": f"content_{content_id}" if content_id else f"content_{_build_mistake_scope_key([ref.get('title')])}",
+            "lecture_title": ref.get("title") or "Untitled Content",
+            "lecture_scope_kind": "content",
+            "lecture_week": ref.get("week"),
+        }
+
+    if len(matching_refs) > 1:
+        return {
+            "lecture_key": f"scope_{_build_mistake_scope_key([ref.get('content_id') or ref.get('title') for ref in matching_refs])}",
+            "lecture_title": _build_mistake_scope_label(matching_refs),
+            "lecture_scope_kind": "scope",
+            "lecture_week": None,
+        }
+
+    if len(session_content_refs) == 1:
+        ref = session_content_refs[0]
+        content_id = str(ref.get("content_id") or "").strip()
+        return {
+            "lecture_key": f"content_{content_id}" if content_id else f"content_{_build_mistake_scope_key([ref.get('title')])}",
+            "lecture_title": ref.get("title") or "Untitled Content",
+            "lecture_scope_kind": "content" if content_id and not str(content_id).startswith("title_only_") else "scope",
+            "lecture_week": ref.get("week"),
+        }
+
+    if session_content_refs:
+        return {
+            "lecture_key": f"scope_{_build_mistake_scope_key([ref.get('content_id') or ref.get('title') for ref in session_content_refs])}",
+            "lecture_title": _build_mistake_scope_label(session_content_refs),
+            "lecture_scope_kind": "scope",
+            "lecture_week": None,
+        }
+
+    fallback_titles = _dedupe_keep_order([
+        str(title or "").strip()
+        for title in (doc.get("selected_content_titles") or [])
+        if str(title or "").strip()
+    ])
+    if fallback_titles:
+        return {
+            "lecture_key": f"scope_{_build_mistake_scope_key(fallback_titles)}",
+            "lecture_title": _build_mistake_scope_label([{"title": title} for title in fallback_titles]),
+            "lecture_scope_kind": "scope",
+            "lecture_week": None,
+        }
+
+    return {
+        "lecture_key": "scope_unknown",
+        "lecture_title": "Selected content scope",
+        "lecture_scope_kind": "scope",
+        "lecture_week": None,
+    }
+
+
+def _build_mistake_recovery_context(question_log: list[dict], question_index: int) -> dict | None:
+    if question_index < 0 or question_index >= len(question_log):
+        return None
+
+    entry = question_log[question_index] or {}
+    context: dict[str, object] = {}
+
+    if entry.get("recovery_step_available"):
+        context["guided_recovery_offered"] = True
+        trigger_reason = str(entry.get("recovery_trigger_reason") or "").strip()
+        if trigger_reason:
+            context["trigger_reason"] = trigger_reason
+
+    next_index = question_index + 1
+    if next_index < len(question_log):
+        next_entry = question_log[next_index] or {}
+        same_topic = (
+            str(next_entry.get("recovery_for_topic") or next_entry.get("topic") or "").strip()
+            == str(entry.get("topic") or "").strip()
+        )
+        if next_entry.get("is_recovery_step") and same_topic:
+            context["guided_recovery_used"] = True
+            context["recovery_outcome"] = next_entry.get("recovery_outcome")
+
+    return context or None
+
+
+def _serialize_mistake_entry(doc: dict, entry: dict, question_index: int, question_log: list[dict]) -> dict:
+    options = entry.get("options") if isinstance(entry.get("options"), dict) else {}
+    session_id = str(doc.get("session_id") or "").strip()
+    session_timestamp = doc.get("ended_at") or doc.get("started_at")
+
+    difficulty = entry.get("difficulty", 3)
+    try:
+        difficulty = int(difficulty)
+    except (TypeError, ValueError):
+        difficulty = 3
+
+    return {
+        "session_id": session_id,
+        "session_ended_at": session_timestamp,
+        "session_reference": f"Session {session_id[:8]}" if session_id else "Session",
+        "question_id": entry.get("question_id"),
+        "question_text": entry.get("question_text") or entry.get("question_id") or "Question unavailable",
+        "topic": entry.get("topic") or "General",
+        "options": options,
+        "selected_answer": entry.get("selected_answer"),
+        "selected_answer_text": _format_logged_answer(options, entry.get("selected_answer")),
+        "correct_answer": entry.get("correct_answer"),
+        "correct_answer_text": _format_logged_answer(options, entry.get("correct_answer")),
+        "explanation": entry.get("explanation") or "",
+        "difficulty": difficulty,
+        "is_correct": False,
+        "time_spent_ms": int(entry.get("time_spent_ms", 0) or 0),
+        "recovery_context": _build_mistake_recovery_context(question_log, question_index),
+    }
+
+
+def _sort_mistake_entries(entries: list[dict]) -> list[dict]:
+    return sorted(
+        entries,
+        key=lambda item: _parse_iso_datetime(item.get("session_ended_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+
+def _serialize_mistake_journal_summary(groups: list[dict]) -> list[dict]:
+    summaries: list[dict] = []
+
+    for group in groups:
+        summaries.append({
+            "lecture_key": group.get("lecture_key"),
+            "lecture_title": group.get("lecture_title"),
+            "lecture_scope_kind": group.get("lecture_scope_kind"),
+            "lecture_week": group.get("lecture_week"),
+            "mistake_count": group.get("mistake_count", 0),
+            "topic_count": group.get("topic_count", 0),
+            "latest_at": group.get("latest_at"),
+            "topics": [
+                {
+                    "topic": topic_group.get("topic"),
+                    "mistake_count": topic_group.get("mistake_count", 0),
+                    "latest_at": topic_group.get("latest_at"),
+                }
+                for topic_group in (group.get("topics") or [])
+            ],
+        })
+
+    return summaries
+
+
+async def _build_mistake_journal(student_id: str, course_id: str) -> list[dict]:
+    db = get_db()
+    content_docs = await db.course_content.find(
+        {"course_id": course_id},
+        {"_id": 1, "title": 1, "week": 1, "content_type": 1, "topics": 1}
+    ).to_list(length=None)
+    content_by_id = {
+        str(doc.get("_id")): doc
+        for doc in content_docs
+        if doc.get("_id") is not None
+    }
+
+    cursor = db.student_session_history.find(
+        {
+            "student_id": student_id,
+            "course_id": course_id,
+            "ended_at": {"$ne": None},
+        }
+    ).sort("started_at", -1)
+
+    grouped: dict[str, dict] = {}
+
+    async for doc in cursor:
+        question_log = doc.get("question_log") or []
+        if not isinstance(question_log, list):
+            continue
+
+        session_timestamp = doc.get("ended_at") or doc.get("started_at")
+
+        for question_index, entry in enumerate(question_log):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("is_recovery_step"):
+                continue
+            if entry.get("counts_toward_session_score") is False:
+                continue
+            if entry.get("is_correct"):
+                continue
+
+            lecture_context = _resolve_mistake_lecture_context(doc, entry, content_by_id)
+            lecture_key = lecture_context["lecture_key"]
+            topic = str(entry.get("topic") or "").strip() or "General"
+            group = grouped.setdefault(
+                lecture_key,
+                {
+                    "lecture_key": lecture_key,
+                    "lecture_title": lecture_context["lecture_title"],
+                    "lecture_scope_kind": lecture_context["lecture_scope_kind"],
+                    "lecture_week": lecture_context.get("lecture_week"),
+                    "mistake_count": 0,
+                    "latest_at": None,
+                    "topics_by_name": {},
+                },
+            )
+
+            group["mistake_count"] += 1
+            if session_timestamp and (
+                not group["latest_at"]
+                or (_parse_iso_datetime(session_timestamp) or datetime.min.replace(tzinfo=timezone.utc))
+                > (_parse_iso_datetime(group["latest_at"]) or datetime.min.replace(tzinfo=timezone.utc))
+            ):
+                group["latest_at"] = session_timestamp
+
+            topic_group = group["topics_by_name"].setdefault(
+                topic,
+                {
+                    "topic": topic,
+                    "mistake_count": 0,
+                    "latest_at": None,
+                    "entries": [],
+                },
+            )
+            topic_group["mistake_count"] += 1
+            if session_timestamp and (
+                not topic_group["latest_at"]
+                or (_parse_iso_datetime(session_timestamp) or datetime.min.replace(tzinfo=timezone.utc))
+                > (_parse_iso_datetime(topic_group["latest_at"]) or datetime.min.replace(tzinfo=timezone.utc))
+            ):
+                topic_group["latest_at"] = session_timestamp
+
+            topic_group["entries"].append(
+                _serialize_mistake_entry(
+                    doc=doc,
+                    entry=entry,
+                    question_index=question_index,
+                    question_log=question_log,
+                )
+            )
+
+    groups: list[dict] = []
+    for group in grouped.values():
+        topic_groups = list(group.get("topics_by_name", {}).values())
+        for topic_group in topic_groups:
+            topic_group["entries"] = _sort_mistake_entries(topic_group.get("entries", []))
+
+        topic_groups.sort(key=lambda topic_group: str(topic_group.get("topic") or "").lower())
+        topic_groups.sort(
+            key=lambda topic_group: _parse_iso_datetime(topic_group.get("latest_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        topic_groups.sort(key=lambda topic_group: int(topic_group.get("mistake_count", 0)), reverse=True)
+
+        groups.append({
+            "lecture_key": group.get("lecture_key"),
+            "lecture_title": group.get("lecture_title"),
+            "lecture_scope_kind": group.get("lecture_scope_kind"),
+            "lecture_week": group.get("lecture_week"),
+            "mistake_count": group.get("mistake_count", 0),
+            "topic_count": len(topic_groups),
+            "latest_at": group.get("latest_at"),
+            "topics": topic_groups,
+        })
+
+    groups.sort(key=lambda group: str(group.get("lecture_title") or "").lower())
+    groups.sort(
+        key=lambda group: _parse_iso_datetime(group.get("latest_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    groups.sort(key=lambda group: int(group.get("mistake_count", 0)), reverse=True)
+    return groups
+
 async def _get_cached_question(
     topic: str,
     difficulty: int,
@@ -3326,3 +3683,76 @@ async def get_session_history(
         for doc in docs
     ]
     return {"sessions": sessions}
+
+
+@router.get("/session/{student_id}/{course_id}/{session_id}")
+async def get_session_detail(
+    student_id: str,
+    course_id: str,
+    session_id: str,
+):
+    db = get_db()
+    doc = await db.student_session_history.find_one(
+        {
+            "student_id": student_id,
+            "course_id": course_id,
+            "session_id": session_id,
+            "ended_at": {"$ne": None},
+        }
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    return {"success": True, "session": _serialize_session(doc, include_questions=True)}
+
+
+@router.get("/mistake-journal/{student_id}/{course_id}")
+async def get_mistake_journal(student_id: str, course_id: str):
+    groups = await _build_mistake_journal(student_id, course_id)
+    return {
+        "success": True,
+        "course_id": course_id,
+        "groups": _serialize_mistake_journal_summary(groups),
+    }
+
+
+@router.get("/mistake-journal/review/{student_id}/{course_id}")
+async def get_mistake_journal_review(
+    student_id: str,
+    course_id: str,
+    lecture_key: str,
+    topic: str,
+):
+    groups = await _build_mistake_journal(student_id, course_id)
+
+    matching_group = next(
+        (group for group in groups if str(group.get("lecture_key") or "") == str(lecture_key or "")),
+        None,
+    )
+    if not matching_group:
+        raise HTTPException(status_code=404, detail="Mistake lecture group not found.")
+
+    matching_topic = next(
+        (
+            topic_group for topic_group in (matching_group.get("topics") or [])
+            if str(topic_group.get("topic") or "") == str(topic or "")
+        ),
+        None,
+    )
+    if not matching_topic:
+        raise HTTPException(status_code=404, detail="Mistake topic group not found.")
+
+    return {
+        "success": True,
+        "course_id": course_id,
+        "lecture": {
+            "lecture_key": matching_group.get("lecture_key"),
+            "lecture_title": matching_group.get("lecture_title"),
+            "lecture_scope_kind": matching_group.get("lecture_scope_kind"),
+            "lecture_week": matching_group.get("lecture_week"),
+        },
+        "topic": matching_topic.get("topic"),
+        "mistake_count": matching_topic.get("mistake_count", 0),
+        "latest_at": matching_topic.get("latest_at"),
+        "entries": matching_topic.get("entries", []),
+    }

@@ -492,6 +492,14 @@
         <div id="aq-dashboard-topics"></div>
       </div>
 
+      <div class="aq-mistake-journal-section">
+        <h3 class="aq-section-title">Mistake Journal</h3>
+        <p class="aq-empty-state aq-hidden" id="aq-mistake-journal-empty">
+          No mistakes logged yet — complete quiz sessions to build your journal.
+        </p>
+        <div id="aq-mistake-journal-groups"></div>
+      </div>
+
       <div class="aq-session-history-section">
         <h3 class="aq-section-title">Latest Sessions</h3>
         <p class="aq-empty-state aq-hidden" id="aq-session-history-empty">
@@ -550,7 +558,7 @@
     <div class="aq-modal">
       <div class="aq-modal-header">
         <div class="aq-modal-header-main">
-          <div class="aq-step-badge">Session Review</div>
+          <div class="aq-step-badge" id="aq-review-badge">Session Review</div>
           <h3 class="aq-panel-title" id="aq-review-session-title">Session Review</h3>
           <p class="aq-panel-sub" id="aq-review-session-sub">—</p>
         </div>
@@ -581,6 +589,8 @@
 
           <div class="aq-session-question-meta" style="margin-bottom:12px;">
             <span class="aq-session-meta-chip" id="aq-review-time-chip">Time: —</span>
+            <span class="aq-session-meta-chip aq-hidden" id="aq-review-source-chip">Session</span>
+            <span class="aq-session-meta-chip aq-hidden" id="aq-review-date-chip">Logged: —</span>
             <span class="aq-session-meta-chip aq-hidden" id="aq-review-recovery-chip">Recovery step</span>
           </div>
 

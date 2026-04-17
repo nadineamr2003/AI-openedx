@@ -17,6 +17,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
   var urlGetCourses = runtime.handlerUrl(element, 'get_courses');
   var urlSessionHistory = runtime.handlerUrl(element, 'get_session_history');
+  var urlSessionDetail = runtime.handlerUrl(element, 'get_session_detail');
+  var urlMistakeJournal = runtime.handlerUrl(element, 'get_mistake_journal');
+  var urlMistakeReview = runtime.handlerUrl(element, 'get_mistake_review');
   var urlGetDiagQ = runtime.handlerUrl(element, 'get_diagnostic_question');
   var urlSubmitDiagA = runtime.handlerUrl(element, 'submit_diagnostic_answer');
   var urlCompleteDiag = runtime.handlerUrl(element, 'complete_diagnostic_item');
@@ -35,6 +38,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     dashboardOrigin: 'start',
     historyOrigin: 'dashboard',
     historySessions: [],
+    sessionReviewCache: {},
     historyPage: 0,
     historyPageSize: 3,
     explainSimplerPending: false,
@@ -52,8 +56,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   };
 
   var reviewState = {
-    session: null,
-    questionIndex: 0
+    items: [],
+    questionIndex: 0,
+    mode: 'session',
+    badge: 'Session Review',
+    title: 'Session Review',
+    subtitle: '—'
   };
 
   var diagState = {
@@ -1059,6 +1067,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return normalized.slice(0, -1).join(', ') + ', and ' + normalized[normalized.length - 1];
   }
 
+  function formatMistakeCountLabel(count) {
+    var total = parseInt(count, 10) || 0;
+    return total + ' mistake' + (total === 1 ? '' : 's');
+  }
+
+  function isPlaceholderLectureTitle(title) {
+    var normalized = String(title || '').trim().toLowerCase();
+    return !normalized || normalized === 'untitled content';
+  }
+
   function getFocusedTopicName(sessionLike) {
     var focusedSummary = sessionLike && sessionLike.focused_topic_mastery_summary;
     if (focusedSummary && String(focusedSummary.topic || '').trim()) {
@@ -1153,6 +1171,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function getReviewItems() {
+    return Array.isArray(reviewState.items) ? reviewState.items : [];
   }
 
   function contentTypeLabel(type) {
@@ -1748,6 +1770,119 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     showScreen('dashboard');
   }
 
+  function renderMistakeJournal(groups) {
+    var wrap = $('#aq-mistake-journal-groups');
+    var empty = $('#aq-mistake-journal-empty');
+
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    wrap.classList.add('aq-mistake-groups');
+
+    var renderedGroups = (groups || []).filter(function (group) {
+      return !isPlaceholderLectureTitle(group && group.lecture_title);
+    });
+
+    if (!renderedGroups.length) {
+      if (empty) empty.classList.remove('aq-hidden');
+      return;
+    }
+
+    if (empty) empty.classList.add('aq-hidden');
+
+    var totalLectures = renderedGroups.length;
+    var totalTopics = renderedGroups.reduce(function (sum, group) {
+      return sum + (parseInt(group.topic_count, 10) || 0);
+    }, 0);
+    var totalMistakes = renderedGroups.reduce(function (sum, group) {
+      return sum + (parseInt(group.mistake_count, 10) || 0);
+    }, 0);
+
+    var lecturesDetails = document.createElement('details');
+    lecturesDetails.className = 'aq-accordion aq-accordion-type aq-mistake-outer-group';
+    lecturesDetails.open = true;
+    lecturesDetails.innerHTML =
+      '<summary class="aq-accordion-summary">' +
+      '<div class="aq-accordion-summary-main">' +
+      '<span class="aq-accordion-title">Lectures</span>' +
+      '<span class="aq-accordion-meta">' +
+      totalLectures + ' lecture' + (totalLectures === 1 ? '' : 's') +
+      ' · ' +
+      totalTopics + ' topic' + (totalTopics === 1 ? '' : 's') +
+      '</span>' +
+      '</div>' +
+      '<div class="aq-accordion-summary-side">' +
+      '<span class="aq-accordion-score">' + formatMistakeCountLabel(totalMistakes) + '</span>' +
+      '<span class="aq-accordion-chevron" aria-hidden="true">⌄</span>' +
+      '</div>' +
+      '</summary>';
+
+    var lecturesBody = document.createElement('div');
+    lecturesBody.className = 'aq-accordion-body aq-mistake-outer-body';
+
+    renderedGroups.forEach(function (group, groupIndex) {
+      var details = document.createElement('details');
+      details.className = 'aq-accordion aq-accordion-item aq-mistake-group';
+      if (groupIndex === 0) details.open = true;
+
+      var metaParts = [];
+      if (typeof group.lecture_week === 'number') {
+        metaParts.push('Week ' + group.lecture_week);
+      }
+      if (group.lecture_scope_kind === 'scope') {
+        metaParts.push('Selected content scope');
+      }
+      metaParts.push((group.topic_count || 0) + ' topic' + ((group.topic_count || 0) === 1 ? '' : 's') + ' affected');
+
+      var summary = document.createElement('summary');
+      summary.className = 'aq-accordion-summary';
+      summary.innerHTML =
+        '<div class="aq-accordion-summary-main">' +
+        '<div class="aq-accordion-title aq-accordion-title-item">' + escapeHtml(group.lecture_title || 'Selected content') + '</div>' +
+        '<div class="aq-accordion-meta">' + escapeHtml(metaParts.join(' · ')) + '</div>' +
+        '</div>' +
+        '<div class="aq-accordion-summary-side">' +
+        '<span class="aq-accordion-score">' + formatMistakeCountLabel(group.mistake_count || 0) + '</span>' +
+        '<span class="aq-accordion-chevron" aria-hidden="true">⌄</span>' +
+        '</div>';
+      details.appendChild(summary);
+
+      var body = document.createElement('div');
+      body.className = 'aq-accordion-body aq-accordion-body-item aq-mistake-topic-list';
+
+      (group.topics || []).forEach(function (topicGroup) {
+        var row = document.createElement('div');
+        row.className = 'aq-mistake-topic-row';
+        row.innerHTML =
+          '<div class="aq-mistake-topic-main">' +
+          '<div class="aq-mistake-topic-name">' + escapeHtml(topicGroup.topic || 'General') + '</div>' +
+          '<div class="aq-mistake-topic-meta">' +
+          '<span class="aq-mistake-topic-count">' + formatMistakeCountLabel(topicGroup.mistake_count || 0) + '</span>' +
+          '<span>Latest: ' + escapeHtml(formatDateTime(topicGroup.latest_at)) + '</span>' +
+          '</div>' +
+          '</div>' +
+          '<button class="aq-btn-session aq-btn-mistake-review" type="button" data-lecture-key="' + escapeHtml(group.lecture_key || '') + '" data-topic="' + escapeHtml(topicGroup.topic || '') + '">Review mistakes</button>';
+
+        body.appendChild(row);
+      });
+
+      details.appendChild(body);
+      lecturesBody.appendChild(details);
+    });
+
+    lecturesDetails.appendChild(lecturesBody);
+    wrap.appendChild(lecturesDetails);
+
+    wrap.querySelectorAll('.aq-btn-mistake-review').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        loadMistakeReview(
+          btn.getAttribute('data-lecture-key'),
+          btn.getAttribute('data-topic'),
+          btn
+        );
+      });
+    });
+  }
+
   function renderSessionHistory(sessions, options) {
     options = options || {};
     var wrap = options.wrap || $('#aq-session-history-list');
@@ -1766,6 +1901,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (empty) empty.classList.add('aq-hidden');
 
     sessions.forEach(function (session, idx) {
+      if (session && session.session_id && session.question_log && session.question_log.length) {
+        state.sessionReviewCache[session.session_id] = session;
+      }
+
       var score = (session.correct_answers || 0) + ' / ' + (session.target_questions || 0);
       var pct = Math.round((session.accuracy || 0) * 100);
       var modeText = getLearnerSessionLabel(session);
@@ -1950,17 +2089,40 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return question.is_correct ? 'recovered' : 'still needs review';
   }
 
+  function formatRecoveryContextOutcome(recoveryContext) {
+    if (!recoveryContext) return 'still needs review';
+    if (recoveryContext.recovery_outcome === 'recovered') return 'recovered';
+    if (recoveryContext.recovery_outcome === 'still_needs_review') return 'still needs review';
+    if (recoveryContext.guided_recovery_used) return 'guided recovery used';
+    if (recoveryContext.guided_recovery_offered) return 'guided recovery offered';
+    return 'still needs review';
+  }
+
+  function openReviewModal(config) {
+    reviewState.items = Array.isArray(config && config.items) ? config.items.slice() : [];
+    reviewState.questionIndex = 0;
+    reviewState.mode = (config && config.mode) || 'session';
+    reviewState.badge = (config && config.badge) || 'Session Review';
+    reviewState.title = (config && config.title) || 'Session Review';
+    reviewState.subtitle = (config && config.subtitle) || '—';
+
+    renderReviewQuestion();
+
+    $('#aq-review-modal').classList.remove('aq-hidden');
+    document.body.classList.add('aq-modal-open');
+  }
+
   function renderReviewQuestion() {
-    var session = reviewState.session;
-    if (!session || !session.question_log || !session.question_log.length) return;
+    var items = getReviewItems();
+    if (!items.length) return;
 
-    var q = session.question_log[reviewState.questionIndex];
-    var total = session.question_log.length;
+    var q = items[reviewState.questionIndex];
+    var total = items.length;
 
-    $('#aq-review-session-title').textContent = 'Session Review';
-    $('#aq-review-session-sub').textContent =
-      formatDateTime(session.ended_at || session.started_at) +
-      ' · Score: ' + (session.correct_answers || 0) + '/' + (session.target_questions || 0);
+    var badgeEl = $('#aq-review-badge');
+    if (badgeEl) badgeEl.textContent = reviewState.badge || 'Session Review';
+    $('#aq-review-session-title').textContent = reviewState.title || 'Session Review';
+    $('#aq-review-session-sub').textContent = reviewState.subtitle || '—';
 
     $('#aq-review-topic').textContent = q.topic || 'General';
     $('#aq-review-counter').textContent = (reviewState.questionIndex + 1) + ' / ' + total;
@@ -2013,11 +2175,30 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     $('#aq-review-time-chip').textContent = 'Time: ' + formatMs(q.time_spent_ms || 0);
+    var sourceChip = $('#aq-review-source-chip');
+    if (sourceChip) {
+      var sourceText = String(q.session_reference || '').trim();
+      sourceChip.textContent = sourceText || 'Session';
+      sourceChip.classList.toggle('aq-hidden', !(reviewState.mode === 'mistake' && sourceText));
+    }
+    var dateChip = $('#aq-review-date-chip');
+    if (dateChip) {
+      var loggedAt = q.session_ended_at ? ('Logged: ' + formatDateTime(q.session_ended_at)) : '';
+      dateChip.textContent = loggedAt || 'Logged: —';
+      dateChip.classList.toggle('aq-hidden', !(reviewState.mode === 'mistake' && loggedAt));
+    }
     var recoveryChip = $('#aq-review-recovery-chip');
     if (recoveryChip) {
-      recoveryChip.textContent = 'Guided Recovery';
       recoveryChip.classList.add('aq-session-meta-chip-recovery');
-      recoveryChip.classList.toggle('aq-hidden', !q.is_recovery_step);
+      if (q.is_recovery_step) {
+        recoveryChip.textContent = 'Guided Recovery';
+        recoveryChip.classList.remove('aq-hidden');
+      } else if (q.recovery_context && q.recovery_context.guided_recovery_used) {
+        recoveryChip.textContent = 'Guided Recovery Used';
+        recoveryChip.classList.remove('aq-hidden');
+      } else {
+        recoveryChip.classList.add('aq-hidden');
+      }
     }
     var recoveryMeta = $('#aq-review-recovery-meta');
     var recoveryTrigger = $('#aq-review-recovery-trigger');
@@ -2028,6 +2209,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         recoveryTrigger.textContent = formatRecoveryTriggerReason(q.recovery_trigger_reason);
         recoveryTopic.textContent = q.recovery_for_topic || q.topic || 'General';
         recoveryOutcome.textContent = formatRecoveryOutcome(q);
+        recoveryMeta.classList.remove('aq-hidden');
+      } else if (q.recovery_context && (q.recovery_context.guided_recovery_used || q.recovery_context.guided_recovery_offered)) {
+        recoveryTrigger.textContent = formatRecoveryTriggerReason(q.recovery_context.trigger_reason);
+        recoveryTopic.textContent = q.topic || 'General';
+        recoveryOutcome.textContent = formatRecoveryContextOutcome(q.recovery_context);
         recoveryMeta.classList.remove('aq-hidden');
       } else {
         recoveryMeta.classList.add('aq-hidden');
@@ -2050,19 +2236,96 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function openSessionReview(session) {
-    reviewState.session = session;
-    reviewState.questionIndex = 0;
-    renderReviewQuestion();
+    if (!session || !session.question_log || !session.question_log.length) return;
 
-    $('#aq-review-modal').classList.remove('aq-hidden');
-    document.body.classList.add('aq-modal-open');
+    openReviewModal({
+      mode: 'session',
+      badge: 'Session Review',
+      title: 'Session Review',
+      subtitle:
+        formatDateTime(session.ended_at || session.started_at) +
+        ' · Score: ' + (session.correct_answers || 0) + '/' + (session.target_questions || 0),
+      items: session.question_log
+    });
+  }
+
+  function openMistakeReview(reviewData) {
+    if (!reviewData || !reviewData.entries || !reviewData.entries.length) return;
+
+    var lectureTitle = reviewData.lecture && reviewData.lecture.lecture_title
+      ? reviewData.lecture.lecture_title
+      : 'Selected content';
+    var topic = reviewData.topic || 'General';
+    var mistakeCount = reviewData.mistake_count || reviewData.entries.length;
+
+    openReviewModal({
+      mode: 'mistake',
+      badge: 'Mistake Journal',
+      title: 'Mistake Review',
+      subtitle:
+        'Lecture: ' + lectureTitle +
+        ' · Topic: ' + topic +
+        ' · ' + formatMistakeCountLabel(mistakeCount),
+      items: reviewData.entries
+    });
   }
 
   function closeSessionReview() {
     $('#aq-review-modal').classList.add('aq-hidden');
     document.body.classList.remove('aq-modal-open');
-    reviewState.session = null;
+    reviewState.items = [];
     reviewState.questionIndex = 0;
+    reviewState.mode = 'session';
+    reviewState.badge = 'Session Review';
+    reviewState.title = 'Session Review';
+    reviewState.subtitle = '—';
+  }
+
+  function openSessionReviewById(sessionId, triggerBtn) {
+    if (!sessionId) return;
+
+    if (state.sessionReviewCache[sessionId]) {
+      openSessionReview(state.sessionReviewCache[sessionId]);
+      return;
+    }
+
+    var originalLabel = triggerBtn ? triggerBtn.textContent : '';
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = 'Loading Review…';
+    }
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlSessionDetail,
+      data: JSON.stringify({
+        selected_course_id: selectedCourseId,
+        session_id: sessionId
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        if (triggerBtn) {
+          triggerBtn.disabled = false;
+          triggerBtn.textContent = originalLabel || 'Review Session';
+        }
+
+        var session = data && data.success ? data.session : null;
+        if (!session || !session.question_log || !session.question_log.length) {
+          alert('Could not load session review.');
+          return;
+        }
+
+        state.sessionReviewCache[sessionId] = session;
+        openSessionReview(session);
+      },
+      error: function () {
+        if (triggerBtn) {
+          triggerBtn.disabled = false;
+          triggerBtn.textContent = originalLabel || 'Review Session';
+        }
+        alert('Could not load session review.');
+      }
+    });
   }
 
   function loadSessionHistory(courseId) {
@@ -2099,6 +2362,62 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           showReviewButton: false,
           allowFollowUp: false
         });
+      }
+    });
+  }
+
+  function loadMistakeJournal(courseId) {
+    jQuery.ajax({
+      type: 'POST',
+      url: urlMistakeJournal,
+      data: JSON.stringify({
+        selected_course_id: courseId
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        renderMistakeJournal((data && data.success) ? (data.groups || []) : []);
+      },
+      error: function () {
+        renderMistakeJournal([]);
+      }
+    });
+  }
+
+  function loadMistakeReview(lectureKey, topic, triggerBtn) {
+    var originalLabel = triggerBtn ? triggerBtn.textContent : '';
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.textContent = 'Loading…';
+    }
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlMistakeReview,
+      data: JSON.stringify({
+        selected_course_id: selectedCourseId,
+        lecture_key: lectureKey,
+        topic: topic
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        if (triggerBtn) {
+          triggerBtn.disabled = false;
+          triggerBtn.textContent = originalLabel || 'Review mistakes';
+        }
+
+        if (!data || !data.success || !data.entries || !data.entries.length) {
+          alert('Could not load mistake review.');
+          return;
+        }
+
+        openMistakeReview(data);
+      },
+      error: function () {
+        if (triggerBtn) {
+          triggerBtn.disabled = false;
+          triggerBtn.textContent = originalLabel || 'Review mistakes';
+        }
+        alert('Could not load mistake review.');
       }
     });
   }
@@ -2159,6 +2478,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           return;
         }
         renderDashboard(data);
+        loadMistakeJournal(selectedCourseId);
         loadSessionHistory(selectedCourseId);
       },
       error: function (xhr) {
@@ -2681,7 +3001,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var reviewPrevBtn = $('#aq-btn-review-prev');
   if (reviewPrevBtn) {
     reviewPrevBtn.onclick = function () {
-      if (!reviewState.session) return;
+      if (!getReviewItems().length) return;
       if (reviewState.questionIndex > 0) {
         reviewState.questionIndex -= 1;
         renderReviewQuestion();
@@ -2692,8 +3012,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var reviewNextBtn = $('#aq-btn-review-next');
   if (reviewNextBtn) {
     reviewNextBtn.onclick = function () {
-      if (!reviewState.session || !reviewState.session.question_log) return;
-      if (reviewState.questionIndex < reviewState.session.question_log.length - 1) {
+      var items = getReviewItems();
+      if (!items.length) return;
+      if (reviewState.questionIndex < items.length - 1) {
         reviewState.questionIndex += 1;
         renderReviewQuestion();
       }
@@ -2754,9 +3075,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         renderReviewQuestion();
       }
     } else if (e.key === 'ArrowRight') {
-      if (reviewState.session &&
-        reviewState.session.question_log &&
-        reviewState.questionIndex < reviewState.session.question_log.length - 1) {
+      var items = getReviewItems();
+      if (items.length &&
+        reviewState.questionIndex < items.length - 1) {
         reviewState.questionIndex += 1;
         renderReviewQuestion();
       }

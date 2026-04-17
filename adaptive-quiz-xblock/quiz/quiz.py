@@ -9,6 +9,7 @@ import json
 import logging
 import pkg_resources
 import requests
+from urllib.parse import quote
 
 from xblock.core import XBlock
 from xblock.fields import Scope, Integer, String, Boolean
@@ -2025,6 +2026,73 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         if resp:
             return {"success": True, "sessions": resp.get("sessions", [])}
         return {"success": True, "sessions": []}
+
+    @XBlock.json_handler
+    def get_session_detail(self, data, suffix=""):
+        """Return one completed session with question log for review flows."""
+        student_id = self._student_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+        session_id = data.get("session_id")
+
+        if active_course:
+            self.selected_course_id = active_course
+
+        if not session_id:
+            return {"success": False, "error": "Missing session_id."}
+
+        resp = self._api(
+            f"/api/quiz/session/{student_id}/{active_course}/{session_id}",
+            method="GET"
+        )
+
+        if resp and resp.get("success"):
+            return {"success": True, "session": resp.get("session")}
+        return {"success": False, "error": "Could not load session review."}
+
+    @XBlock.json_handler
+    def get_mistake_journal(self, data, suffix=""):
+        """Return grouped wrong-answer review entries derived from session history."""
+        student_id = self._student_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+
+        if active_course:
+            self.selected_course_id = active_course
+
+        resp = self._api(
+            f"/api/quiz/mistake-journal/{student_id}/{active_course}",
+            method="GET"
+        )
+
+        if resp and resp.get("success"):
+            return {
+                "success": True,
+                "course_id": active_course,
+                "groups": resp.get("groups", []),
+            }
+        return {"success": True, "course_id": active_course, "groups": []}
+
+    @XBlock.json_handler
+    def get_mistake_review(self, data, suffix=""):
+        """Return focused mistake-review entries for one lecture/topic group."""
+        student_id = self._student_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+        lecture_key = str(data.get("lecture_key") or "").strip()
+        topic = str(data.get("topic") or "").strip()
+
+        if active_course:
+            self.selected_course_id = active_course
+
+        if not lecture_key or not topic:
+            return {"success": False, "error": "Missing lecture_key or topic."}
+
+        resp = self._api(
+            f"/api/quiz/mistake-journal/review/{student_id}/{active_course}?lecture_key={quote(lecture_key, safe='')}&topic={quote(topic, safe='')}",
+            method="GET"
+        )
+
+        if resp and resp.get("success"):
+            return resp
+        return {"success": False, "error": "Could not load mistake review."}
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                    #
