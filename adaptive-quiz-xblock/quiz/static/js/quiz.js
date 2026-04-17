@@ -1072,6 +1072,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return total + ' mistake' + (total === 1 ? '' : 's');
   }
 
+  function getRecommendationData(sessionLike) {
+    var title = String((sessionLike && sessionLike.recommendation_title) || '').trim();
+    var text = String((sessionLike && sessionLike.recommendation_text) || (sessionLike && sessionLike.session_recommendation) || (sessionLike && sessionLike.recommendation) || '').trim();
+    var code = String((sessionLike && sessionLike.recommendation_code) || '').trim();
+    return {
+      code: code,
+      title: title,
+      text: text
+    };
+  }
+
   function isPlaceholderLectureTitle(title) {
     var normalized = String(title || '').trim().toLowerCase();
     return !normalized || normalized === 'untitled content';
@@ -1467,7 +1478,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var followUpSummaries = getFollowUpTopicMasterySummaries(data);
     var strongest = data.strongest_topic_this_session || '';
     var weakest = data.weakest_topic_this_session || '';
-    var recommendation = data.session_recommendation || '';
+    var recommendationData = getRecommendationData(data);
+    var recommendation = recommendationData.text;
     var avgTime = data.avg_time_spent_ms || 0;
     var sectionTitleEl = $('#aq-results-insight-title');
     var gridEl = $('#aq-insight-grid');
@@ -1500,6 +1512,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var strongestEl = $('#aq-insight-strongest');
     var weakestEl = $('#aq-insight-weakest');
     var avgTimeEl = $('#aq-insight-avg-time');
+    var recTitleEl = $('#aq-recommendation-title');
     var recTextEl = $('#aq-recommendation-text');
 
     if (sectionTitleEl) sectionTitleEl.textContent = (focusedFollowUp || multiTopicFollowUp) ? 'Follow-up Insight' : 'Session Insight';
@@ -1524,6 +1537,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     if (recommendationCardEl) {
       recommendationCardEl.classList.toggle('aq-hidden', (focusedFollowUp || multiTopicFollowUp) && !recommendation);
+    }
+    if (recTitleEl) {
+      recTitleEl.textContent = recommendationData.title || 'Recommended next step';
     }
     if (recTextEl) {
       recTextEl.textContent = (focusedFollowUp || multiTopicFollowUp)
@@ -1640,8 +1656,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var btn = $('#aq-btn-results-follow-up');
     if (!wrap || !topicEl || !btn) return;
 
+    var recommendationData = getRecommendationData(data);
     var followUp = getFollowUpContext(data);
-    if (!followUp) {
+    if (!followUp || recommendationData.code !== 'focused_follow_up') {
       wrap.classList.add('aq-hidden');
       btn.onclick = null;
       return;
@@ -1928,6 +1945,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           ? classifyMultiTopicFollowUpOutcome(getFollowUpTopicMasterySummaries(session), session.accuracy)
           : (session.weakest_topic_this_session || '—'));
       var followUp = allowFollowUp ? getFollowUpContext(session) : null;
+      var recommendationData = getRecommendationData(session);
+      var recommendationHeading = recommendationData.title || 'Recommendation';
+      var recommendationText = recommendationData.text || 'Keep building mastery through regular practice.';
 
       var actionsHtml = '';
       var actionButtons = [];
@@ -1994,7 +2014,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         '</div>' +
 
         '<div class="aq-session-recommendation">' +
-        '<strong>Recommendation:</strong> ' + escapeHtml(session.recommendation || 'Keep building mastery through regular practice.') +
+        '<strong>' + escapeHtml(recommendationHeading) + ':</strong> ' + escapeHtml(recommendationText) +
         '</div>' +
 
         actionsHtml;

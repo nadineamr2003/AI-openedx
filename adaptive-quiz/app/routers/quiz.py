@@ -1102,120 +1102,275 @@ def _build_followup_topic_mastery_summaries(doc: dict, topic_mastery_after: dict
 
     return summaries
 
+def _join_topics(topics: list[str]) -> str:
+    if not topics:
+        return ""
+    if len(topics) == 1:
+        return topics[0]
+    if len(topics) == 2:
+        return f"{topics[0]} and {topics[1]}"
+    return ", ".join(topics[:-1]) + f", and {topics[-1]}"
+
+
+def _make_recommendation_payload(code: str, title: str, text: str) -> dict[str, str]:
+    return {
+        "code": code,
+        "title": title,
+        "text": text,
+        "legacy_text": text,
+    }
+
+
+async def _get_selected_scope_topics(doc: dict) -> list[str]:
+    db = get_db()
+    selected_content_ids = doc.get("selected_content_ids", []) or []
+    course_id = doc.get("course_id")
+
+    if selected_content_ids and course_id:
+        object_ids = []
+        for content_id in selected_content_ids:
+            try:
+                object_ids.append(ObjectId(content_id))
+            except Exception:
+                continue
+
+        if object_ids:
+            content_docs = await db.course_content.find({
+                "_id": {"$in": object_ids},
+                "course_id": course_id,
+            }).to_list(length=len(object_ids))
+
+            scoped_topics: list[str] = []
+            for item in content_docs:
+                scoped_topics.extend(item.get("topics", []) or [])
+
+            deduped_topics = _dedupe_keep_order([
+                str(topic).strip()
+                for topic in scoped_topics
+                if str(topic).strip()
+            ])
+            if deduped_topics:
+                return deduped_topics
+
+    fallback_topics = doc.get("session_topics") or doc.get("practiced_topics") or []
+    return _dedupe_keep_order([
+        str(topic).strip()
+        for topic in fallback_topics
+        if str(topic).strip()
+    ])
+
+
 def _build_session_recommendation(
+    *,
     accuracy: float,
     review_topics: list[str] | None,
     strongest_topic: str | None,
+    selected_mode: str | None,
     session_origin: str | None,
     followup_topics: list[str] | None = None,
-) -> str | None:
+    scoped_topics: list[str] | None = None,
+    topic_session_stats: dict[str, dict] | None = None,
+    review_pressure_by_topic: dict[str, dict] | None = None,
+    challenge_ready: bool = False,
+    challenge_scope_topic_count: int = 0,
+) -> dict[str, str] | None:
     normalized_review_topics = _dedupe_keep_order([
         str(topic).strip()
         for topic in (review_topics or [])
         if str(topic).strip()
     ])
-    review_topic = normalized_review_topics[0] if normalized_review_topics else None
     followup_topics = _dedupe_keep_order([
         str(topic).strip()
         for topic in (followup_topics or [])
         if str(topic).strip()
     ])
+    scoped_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (scoped_topics or [])
+        if str(topic).strip()
+    ])
+    topic_session_stats = topic_session_stats or {}
+    review_pressure_by_topic = review_pressure_by_topic or {}
 
-    def _join_topics(topics: list[str]) -> str:
-        if not topics:
-            return ""
-        if len(topics) == 1:
-            return topics[0]
-        if len(topics) == 2:
-            return f"{topics[0]} and {topics[1]}"
-        return ", ".join(topics[:-1]) + f", and {topics[-1]}"
+    normalized_mode = str(selected_mode or "").strip().lower() or "normal_practice"
+    is_followup = _is_followup_origin(session_origin)
+    is_challenge = normalized_mode == "challenge"
+    is_weakness_review = normalized_mode == "weakness_review"
 
-    if _is_followup_origin(session_origin):
-        focus_topics = followup_topics or normalized_review_topics
-        focus_topic_text = _join_topics(focus_topics)
-        if focus_topic_text:
-            if len(focus_topics) > 1:
-                if accuracy >= 0.8:
-                    return (
-                        f"Strong follow-up reinforcement across {focus_topic_text}. You can return to normal practice "
-                        f"or try challenge mode when you want a broader test."
-                    )
-                if accuracy >= 0.60:
-                    return (
-                        f"Good progress across {focus_topic_text}. A normal practice session would be a good next step "
-                        f"to check whether the improvement holds more broadly."
-                    )
-                return (
-                    f"This follow-up shows {focus_topic_text} still need more reinforcement. Keep practising those topics "
-                    f"step by step before moving back to a broader session."
-                )
+    practiced_topic_count = max(len(topic_session_stats), len(scoped_topics))
+    poor_topics: list[str] = []
+    recovery_failures_total = 0
 
-            focus_topic = focus_topics[0]
-            if accuracy >= 0.8:
-                return (
-                    f"Strong follow-up session on {focus_topic}. You can return to normal practice "
-                    f"or try challenge mode when you want a broader test."
-                )
-            if accuracy >= 0.60:
-                return (
-                    f"Good progress on {focus_topic}. A normal practice session would be a good next step "
-                    f"to check whether the improvement holds more broadly."
-                )
-            return (
-                f"This follow-up is still building stability on {focus_topic}. Keep practising it step by step "
-                f"before moving back to a broader session."
+    for topic, stats in topic_session_stats.items():
+        pressure = review_pressure_by_topic.get(topic, {}) or {}
+        recovery_failures = int(pressure.get("recovery_failures", 0) or 0)
+        recovery_failures_total += recovery_failures
+        if (
+            stats.get("wrong", 0) >= 2
+            or stats.get("accuracy", 1.0) < 0.6
+            or float(pressure.get("pressure", 0.0) or 0.0) >= 1.5
+            or recovery_failures >= 1
+        ):
+            poor_topics.append(topic)
+
+    focus_topics = (followup_topics or normalized_review_topics)[:2] if is_followup else normalized_review_topics[:2]
+    focus_topic_text = _join_topics(focus_topics)
+    primary_focus_topic = focus_topics[0] if focus_topics else None
+    primary_focus_stats = topic_session_stats.get(primary_focus_topic or "", {})
+    primary_focus_pressure = review_pressure_by_topic.get(primary_focus_topic or "", {}) or {}
+    primary_focus_failures = int(primary_focus_pressure.get("recovery_failures", 0) or 0)
+    primary_focus_successes = int(primary_focus_pressure.get("recovery_successes", 0) or 0)
+    primary_focus_pressure_value = float(primary_focus_pressure.get("pressure", 0.0) or 0.0)
+
+    broad_topic_threshold = 2 if practiced_topic_count <= 2 else (practiced_topic_count + 1) // 2
+    broad_weakness = (
+        len(poor_topics) >= 2
+        and (
+            accuracy < 0.6
+            or len(poor_topics) >= broad_topic_threshold
+            or len(normalized_review_topics) >= broad_topic_threshold
+            or recovery_failures_total >= 2
+        )
+    )
+    isolated_recovery_stabilized = (
+        len(focus_topics) == 1
+        and primary_focus_successes >= 1
+        and primary_focus_failures == 0
+        and accuracy >= 0.6
+        and primary_focus_pressure_value < 1.5
+    )
+    focused_followup_justified = bool(focus_topics) and not broad_weakness and not isolated_recovery_stabilized
+    strong_session = accuracy >= 0.8
+    no_repair_signal = not normalized_review_topics and not poor_topics
+    challenge_recommendable = challenge_ready and strong_session and no_repair_signal and not is_challenge
+
+    if is_challenge:
+        if broad_weakness or accuracy < 0.55:
+            topic_text = _join_topics(normalized_review_topics[:2] or poor_topics[:2])
+            return _make_recommendation_payload(
+                "revisit_lecture_content",
+                "Recommended next step: Revisit this lecture first",
+                (
+                    f"This challenge exposed gaps across {topic_text}, so revisiting the lecture before another quiz is the best next step."
+                ) if topic_text else
+                "This challenge exposed broader gaps in this lecture, so revisiting the lecture before another quiz is the best next step."
             )
-
-    if len(normalized_review_topics) > 1:
-        review_topic_text = _join_topics(normalized_review_topics)
-        if accuracy >= 0.8:
-            return (
-                f"Strong session overall. The main topics still worth tightening up are {review_topic_text}."
+        if focused_followup_justified and focus_topic_text:
+            return _make_recommendation_payload(
+                "focused_follow_up",
+                "Recommended next step: Do a focused follow-up",
+                f"Challenge mode exposed the most difficulty in {focus_topic_text}, so a short targeted follow-up there is the best next step."
             )
-        if accuracy >= 0.60:
-            return (
-                f"Good progress. {review_topic_text} showed the most difficulty in this session, "
-                f"so a short focused follow-up on them would help."
-            )
-        return (
-            f"This session was challenging, which is completely normal. "
-            f"Start your next attempt by reviewing {review_topic_text} step by step."
+        return _make_recommendation_payload(
+            "continue_normal_practice",
+            "Recommended next step: Continue normal practice",
+            "You handled this challenge well, so returning to normal practice is the best next step to keep building breadth."
         )
 
-    if review_topic:
-        if accuracy >= 0.8:
-            if strongest_topic and strongest_topic != review_topic:
-                return (
-                    f"Strong session overall. You performed best on {strongest_topic}. "
-                    f"The main topic still worth tightening up is {review_topic}."
+    if is_followup:
+        if broad_weakness or accuracy < 0.55:
+            if (
+                focused_followup_justified
+                and len(focus_topics) == 1
+                and (primary_focus_pressure_value >= 1.5 or primary_focus_failures >= 1 or primary_focus_stats.get("wrong", 0) >= 2)
+            ):
+                return _make_recommendation_payload(
+                    "focused_follow_up",
+                    "Recommended next step: Do a focused follow-up",
+                    f"{focus_topic_text} still needs concentrated work, so one more short focused follow-up there is the best next step."
                 )
-            return (
-                f"Strong session overall. The only topic that still looks worth revisiting is {review_topic}."
+            topic_text = _join_topics(normalized_review_topics[:2] or poor_topics[:2])
+            return _make_recommendation_payload(
+                "revisit_lecture_content",
+                "Recommended next step: Revisit this lecture first",
+                (
+                    f"This follow-up still showed gaps across {topic_text}, so rereading the lecture before another quiz will help more than repeating the same practice loop."
+                ) if topic_text else
+                "This follow-up still showed broader gaps, so rereading the lecture before another quiz will help more than repeating the same practice loop."
             )
-
-        if accuracy >= 0.60:
-            return (
-                f"Good progress. {review_topic} showed the most difficulty in this session, "
-                f"so a short focused follow-up on it would help."
+        if challenge_recommendable:
+            return _make_recommendation_payload(
+                "try_challenge_mode",
+                "Recommended next step: Try challenge mode",
+                f"This follow-up was strong, and challenge mode is unlocked for this lecture scope, so a more demanding session is the best next step."
             )
-
-        return (
-            f"This session was challenging, which is completely normal. "
-            f"Start your next attempt by reviewing {review_topic} step by step."
+        if focused_followup_justified and len(focus_topics) == 1 and accuracy < 0.75 and (
+            primary_focus_pressure_value >= 1.5 or primary_focus_failures >= 1 or primary_focus_stats.get("wrong", 0) >= 2
+        ):
+            return _make_recommendation_payload(
+                "focused_follow_up",
+                "Recommended next step: Do a focused follow-up",
+                f"{focus_topic_text} still needs a little more reinforcement, so a short focused follow-up there is the best next step."
+            )
+        return _make_recommendation_payload(
+            "continue_normal_practice",
+            "Recommended next step: Continue normal practice",
+            "This follow-up showed steadier performance, so returning to normal practice is the best next step."
         )
 
-    if strongest_topic:
-        if accuracy >= 0.8:
-            return (
-                f"Excellent session. You handled all practiced topics well, with especially strong performance on {strongest_topic}. "
-                f"You are ready to continue or try a more challenging follow-up."
+    if is_weakness_review:
+        if broad_weakness:
+            topic_text = _join_topics(normalized_review_topics[:2] or poor_topics[:2])
+            return _make_recommendation_payload(
+                "revisit_lecture_content",
+                "Recommended next step: Revisit this lecture first",
+                (
+                    f"Your mistakes were spread across {topic_text}, so revisiting the lecture before another quiz will help more than pushing further right now."
+                ) if topic_text else
+                "Your mistakes were spread across several topics, so revisiting the lecture before another quiz will help more than pushing further right now."
             )
-        return (
-            f"Solid session. No single topic clearly needs review right now. "
-            f"Keep practising to consolidate what you built here."
+        if focused_followup_justified and focus_topic_text:
+            return _make_recommendation_payload(
+                "focused_follow_up",
+                "Recommended next step: Do a focused follow-up",
+                f"{focus_topic_text} still needs concentrated reinforcement, so a short focused follow-up there is the best next step."
+            )
+        return _make_recommendation_payload(
+            "continue_normal_practice",
+            "Recommended next step: Continue normal practice",
+            "You stabilized this weak area without one dominant repair signal, so returning to normal practice is the best next step."
         )
 
-    return None
+    if broad_weakness:
+        topic_text = _join_topics(normalized_review_topics[:2] or poor_topics[:2])
+        return _make_recommendation_payload(
+            "revisit_lecture_content",
+            "Recommended next step: Revisit this lecture first",
+            (
+                f"Your mistakes were spread across {topic_text}, so rereading the lecture before another quiz will likely help more than jumping straight into more questions."
+            ) if topic_text else
+            "Your mistakes were spread across several topics, so rereading the lecture before another quiz will likely help more than jumping straight into more questions."
+        )
+
+    if focused_followup_justified and focus_topic_text:
+        return _make_recommendation_payload(
+            "focused_follow_up",
+            "Recommended next step: Do a focused follow-up",
+            (
+                f"You struggled most with {focus_topic_text}, so a short targeted follow-up there will help more than switching topics now."
+            ) if len(focus_topics) == 1 else
+            f"You struggled most with {focus_topic_text}, so a short targeted follow-up on those topics is the best next step."
+        )
+
+    if challenge_recommendable:
+        return _make_recommendation_payload(
+            "try_challenge_mode",
+            "Recommended next step: Try challenge mode",
+            "Your performance in this lecture is strong and stable enough to try a more demanding practice path."
+        )
+
+    if strong_session and strongest_topic:
+        return _make_recommendation_payload(
+            "continue_normal_practice",
+            "Recommended next step: Continue normal practice",
+            f"You are improving without one dominant weak topic, so another normal session is the best way to keep building momentum from {strongest_topic}."
+        )
+
+    return _make_recommendation_payload(
+        "continue_normal_practice",
+        "Recommended next step: Continue normal practice",
+        "You are improving without one dominant weak topic, so another normal session is the best way to keep building momentum."
+    )
 
 
 async def _build_content_mastery_summaries(doc: dict, topic_mastery_after: dict) -> list[dict]:
@@ -1308,6 +1463,8 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
     followup_topic_mastery_summaries = _build_followup_topic_mastery_summaries(doc, topic_mastery_after)
     focused_topic_mastery_summary = _build_focused_topic_mastery_summary(doc, topic_mastery_after)
     followup_topics_practised = [summary["topic"] for summary in followup_topic_mastery_summaries]
+    scoped_topics = await _get_selected_scope_topics(doc)
+    challenge_readiness = _build_challenge_readiness(topic_mastery_after, scoped_topics)
 
     topic_session_stats = _compute_topic_session_stats(question_log)
     review_pressure_by_topic = _compute_topic_review_pressure(question_log)
@@ -1336,13 +1493,20 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
 
     recommended_review_topic = weakest_topic
 
-    recommendation = _build_session_recommendation(
+    recommendation_payload = _build_session_recommendation(
         accuracy=accuracy,
         review_topics=recommended_review_topics,
         strongest_topic=strongest_topic,
+        selected_mode=doc.get("selected_mode"),
         session_origin=doc.get("session_origin"),
         followup_topics=followup_topics_practised,
+        scoped_topics=scoped_topics,
+        topic_session_stats=topic_session_stats,
+        review_pressure_by_topic=review_pressure_by_topic,
+        challenge_ready=bool(challenge_readiness.get("ready")),
+        challenge_scope_topic_count=int(challenge_readiness.get("scoped_topic_count", 0) or 0),
     )
+    recommendation = (recommendation_payload or {}).get("legacy_text")
 
     ended_at = datetime.now(timezone.utc).isoformat()
 
@@ -1366,6 +1530,9 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
                 "recommended_review_topic": recommended_review_topic,
                 "recommended_review_topics": recommended_review_topics,
                 "recommendation": recommendation,
+                "recommendation_code": (recommendation_payload or {}).get("code"),
+                "recommendation_title": (recommendation_payload or {}).get("title"),
+                "recommendation_text": (recommendation_payload or {}).get("text"),
                 "review_pressure_by_topic": review_pressure_by_topic,
             }
         }
@@ -1389,6 +1556,9 @@ async def _finalize_session_history(session_id: str, topic_mastery_after: dict) 
         "selected_content_ids": doc.get("selected_content_ids", []),
         "course_id": doc.get("course_id"),
         "recommendation": recommendation,
+        "recommendation_code": (recommendation_payload or {}).get("code"),
+        "recommendation_title": (recommendation_payload or {}).get("title"),
+        "recommendation_text": (recommendation_payload or {}).get("text"),
         "session_origin": _normalize_session_origin(doc.get("session_origin")),
     }
 
@@ -1416,6 +1586,9 @@ def _serialize_session(doc: dict, include_questions: bool = False) -> dict:
             or ([doc.get("recommended_review_topic")] if doc.get("recommended_review_topic") else [])
         ),
         "recommendation": doc.get("recommendation"),
+        "recommendation_code": doc.get("recommendation_code"),
+        "recommendation_title": doc.get("recommendation_title"),
+        "recommendation_text": doc.get("recommendation_text"),
         "end_difficulty": doc.get("end_difficulty", 3),
         "practiced_topics": doc.get("practiced_topics", []),
         "lectures_practised_count": doc.get("lectures_practised_count"),
@@ -2546,6 +2719,9 @@ async def submit(req: SubmitRequest):
         support_features=support_features,
         session_complete=session_complete,
         session_recommendation=session_summary.get("recommendation"),
+        recommendation_code=session_summary.get("recommendation_code"),
+        recommendation_title=session_summary.get("recommendation_title"),
+        recommendation_text=session_summary.get("recommendation_text"),
         weakest_topic_this_session=session_summary.get("weakest_topic_this_session"),
         strongest_topic_this_session=session_summary.get("strongest_topic_this_session"),
         session_accuracy=session_summary.get("accuracy"),

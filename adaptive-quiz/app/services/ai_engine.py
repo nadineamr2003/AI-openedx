@@ -290,7 +290,103 @@ class ProviderHTTPError(Exception):
 
 
 class NoValidQuestionError(ValueError):
-    pass
+    def __init__(self, message: str, *, fallback_context: dict[str, Any] | None = None):
+        self.fallback_context = dict(fallback_context or {})
+        super().__init__(message)
+
+
+HARD_SHORT_SCOPE_MAX_CHARS = 4000
+HARD_SHORT_SCOPE_MAX_SEED_CHUNKS = 1
+HARD_SHORT_SCOPE_MAX_PROVIDER_MODEL_ATTEMPTS = 4
+HARD_SHORT_SCOPE_VALIDATION_FAILURE_LIMIT = 2
+HARD_SHORT_SCOPE_PROVIDER_FAILURE_LIMIT = 2
+HIGH_DIFFICULTY_BRITTLE_REASONS = {
+    "plain_recall_high_difficulty",
+    "too_direct_high_difficulty",
+    "weak_distractors_high_difficulty",
+    "unsupported_numeric_detail",
+    "too_many_out_of_source_specifics",
+    "too_close_to_source",
+}
+
+
+def _brittle_reason_subset(reasons: list[str]) -> list[str]:
+    return [reason for reason in reasons if reason in HIGH_DIFFICULTY_BRITTLE_REASONS]
+
+
+def _build_hard_short_scope_policy(
+    *,
+    difficulty: int,
+    context_mode: str,
+    selected_context: str,
+    selected_chunk_count: int,
+    max_provider_model_attempts: int | None,
+) -> dict[str, Any]:
+    selected_chars = len(selected_context or "")
+    is_high_difficulty = difficulty >= 4
+    is_short_scope = selected_chars <= HARD_SHORT_SCOPE_MAX_CHARS
+    is_narrow_context = (
+        context_mode == "full_cleaned_text"
+        or selected_chunk_count <= HARD_SHORT_SCOPE_MAX_SEED_CHUNKS
+    )
+    risky_generation = is_high_difficulty and is_short_scope and is_narrow_context
+
+    effective_attempt_budget = max_provider_model_attempts
+    if risky_generation:
+        if effective_attempt_budget is None:
+            effective_attempt_budget = HARD_SHORT_SCOPE_MAX_PROVIDER_MODEL_ATTEMPTS
+        else:
+            effective_attempt_budget = min(
+                effective_attempt_budget,
+                HARD_SHORT_SCOPE_MAX_PROVIDER_MODEL_ATTEMPTS,
+            )
+
+    return {
+        "risky_generation": risky_generation,
+        "selected_chars": selected_chars,
+        "context_mode": context_mode,
+        "selected_chunk_count": selected_chunk_count,
+        "effective_attempt_budget": effective_attempt_budget,
+    }
+
+
+def _build_no_valid_question_context(
+    *,
+    policy: dict[str, Any],
+    requested_difficulty: int,
+    provider_model_attempts: int,
+    brittle_validation_failures: int,
+    provider_failures: int,
+    rate_limit_failures: int,
+    exit_reason: str,
+) -> dict[str, Any]:
+    return {
+        "risky_generation": bool(policy.get("risky_generation")),
+        "requested_difficulty": requested_difficulty,
+        "selected_chars": policy.get("selected_chars"),
+        "context_mode": policy.get("context_mode"),
+        "selected_chunk_count": policy.get("selected_chunk_count"),
+        "effective_attempt_budget": policy.get("effective_attempt_budget"),
+        "provider_model_attempts": provider_model_attempts,
+        "brittle_validation_failures": brittle_validation_failures,
+        "provider_failures": provider_failures,
+        "rate_limit_failures": rate_limit_failures,
+        "exit_reason": exit_reason,
+    }
+
+
+def _fallback_difficulty_candidates(
+    requested_difficulty: int,
+    attempted_difficulties: list[int],
+) -> list[int]:
+    if requested_difficulty == 5:
+        candidates = [4, 3]
+    elif requested_difficulty == 4:
+        candidates = [3]
+    else:
+        candidates = []
+
+    return [difficulty for difficulty in candidates if difficulty not in attempted_difficulties]
 
 
 def validate_question(
@@ -1767,6 +1863,25 @@ async def _generate_question_once(
         topic,
     )
 
+    brittle_policy = _build_hard_short_scope_policy(
+        difficulty=difficulty,
+        context_mode=context_mode,
+        selected_context=selected_context,
+        selected_chunk_count=selected_chunk_count,
+        max_provider_model_attempts=max_provider_model_attempts,
+    )
+    effective_attempt_budget = brittle_policy["effective_attempt_budget"]
+    if brittle_policy["risky_generation"]:
+        logger.info(
+            "[LLM] Hard-short-scope risk detected topic=%s difficulty=%s selected_chars=%s context_mode=%s seed_chunks=%s max_attempts=%s",
+            topic,
+            difficulty,
+            brittle_policy["selected_chars"],
+            context_mode,
+            selected_chunk_count,
+            effective_attempt_budget,
+        )
+
     prompt = PROMPT_TEMPLATE.format(
         variation=variation,
         topic=topic,
@@ -1778,6 +1893,9 @@ async def _generate_question_once(
     all_failures = []
     reserve_candidate = None
     provider_model_attempts = 0
+    brittle_validation_failures = 0
+    provider_failures = 0
+    rate_limit_failures = 0
 
     def _metadata_payload(
         *,
@@ -1788,8 +1906,12 @@ async def _generate_question_once(
         payload = {
             "used_last_resort": used_last_resort,
             "provider_model_attempts": provider_model_attempts,
-            "budget_limited": max_provider_model_attempts is not None,
-            "max_provider_model_attempts": max_provider_model_attempts,
+            "budget_limited": effective_attempt_budget is not None,
+            "max_provider_model_attempts": effective_attempt_budget,
+            "hard_short_scope_risk": brittle_policy["risky_generation"],
+            "selected_context_chars": brittle_policy["selected_chars"],
+            "context_mode": brittle_policy["context_mode"],
+            "seed_chunks": brittle_policy["selected_chunk_count"],
         }
         if provider:
             payload["provider"] = provider
@@ -1830,15 +1952,15 @@ async def _generate_question_once(
 
             for model in models:
                 if (
-                    max_provider_model_attempts is not None
-                    and provider_model_attempts >= max_provider_model_attempts
+                    effective_attempt_budget is not None
+                    and provider_model_attempts >= effective_attempt_budget
                 ):
                     logger.info(
                         "[LLM] Attempt budget exhausted topic=%s difficulty=%s attempts=%s max_attempts=%s",
                         topic,
                         difficulty,
                         provider_model_attempts,
-                        max_provider_model_attempts,
+                        effective_attempt_budget,
                     )
                     break
 
@@ -1880,6 +2002,16 @@ async def _generate_question_once(
                         msg = f"[LLM] Validation failed provider={provider_name} model={model} reasons={reason_text}"
                         logger.warning(msg)
                         all_failures.append(msg)
+                        brittle_reasons = _brittle_reason_subset(reasons)
+                        if brittle_policy["risky_generation"] and brittle_reasons:
+                            brittle_validation_failures += 1
+                            logger.info(
+                                "[LLM] Hard-short-scope validation pressure topic=%s difficulty=%s count=%s reasons=%s",
+                                topic,
+                                difficulty,
+                                brittle_validation_failures,
+                                ",".join(brittle_reasons),
+                            )
 
                         core_valid, _ = validate_question_core_only(q)
                         if core_valid and reserve_candidate is None:
@@ -1895,6 +2027,22 @@ async def _generate_question_once(
                                 model,
                                 reason_text,
                             )
+                        if (
+                            brittle_policy["risky_generation"]
+                            and brittle_validation_failures >= HARD_SHORT_SCOPE_VALIDATION_FAILURE_LIMIT
+                        ):
+                            raise NoValidQuestionError(
+                                "High-difficulty generation became brittle on this narrow source scope.",
+                                fallback_context=_build_no_valid_question_context(
+                                    policy=brittle_policy,
+                                    requested_difficulty=difficulty,
+                                    provider_model_attempts=provider_model_attempts,
+                                    brittle_validation_failures=brittle_validation_failures,
+                                    provider_failures=provider_failures,
+                                    rate_limit_failures=rate_limit_failures,
+                                    exit_reason="repeated_strict_validation_failures",
+                                ),
+                            )
                         continue
 
                 except ProviderHTTPError as e:
@@ -1902,6 +2050,26 @@ async def _generate_question_once(
                     msg = f"[LLM] HTTP failure provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
+                    if e.status_code in {429, 503}:
+                        provider_failures += 1
+                        if e.status_code == 429:
+                            rate_limit_failures += 1
+                    if (
+                        brittle_policy["risky_generation"]
+                        and provider_failures >= HARD_SHORT_SCOPE_PROVIDER_FAILURE_LIMIT
+                    ):
+                        raise NoValidQuestionError(
+                            "High-difficulty generation became brittle on this narrow source scope.",
+                            fallback_context=_build_no_valid_question_context(
+                                policy=brittle_policy,
+                                requested_difficulty=difficulty,
+                                provider_model_attempts=provider_model_attempts,
+                                brittle_validation_failures=brittle_validation_failures,
+                                provider_failures=provider_failures,
+                                rate_limit_failures=rate_limit_failures,
+                                exit_reason="repeated_provider_failures",
+                            ),
+                        )
 
                     if e.status_code == 400:
                         raise ValueError(
@@ -1916,19 +2084,77 @@ async def _generate_question_once(
                     msg = f"[LLM] JSON parse failed provider={provider_name} model={model} error={_safe_exception_text(e)}"
                     logger.warning(msg)
                     all_failures.append(msg)
+                    if brittle_policy["risky_generation"]:
+                        provider_failures += 1
+                        if provider_failures >= HARD_SHORT_SCOPE_PROVIDER_FAILURE_LIMIT:
+                            raise NoValidQuestionError(
+                                "High-difficulty generation became brittle on this narrow source scope.",
+                                fallback_context=_build_no_valid_question_context(
+                                    policy=brittle_policy,
+                                    requested_difficulty=difficulty,
+                                    provider_model_attempts=provider_model_attempts,
+                                    brittle_validation_failures=brittle_validation_failures,
+                                    provider_failures=provider_failures,
+                                    rate_limit_failures=rate_limit_failures,
+                                    exit_reason="repeated_invalid_provider_responses",
+                                ),
+                            )
                     continue
+
+                except NoValidQuestionError:
+                    raise
 
                 except Exception as e:
                     msg = f"[LLM] Unexpected error provider={provider_name} model={model} error={_safe_exception_text(e)}"
                     logger.warning(msg)
                     all_failures.append(msg)
+                    if brittle_policy["risky_generation"]:
+                        provider_failures += 1
+                        if provider_failures >= HARD_SHORT_SCOPE_PROVIDER_FAILURE_LIMIT:
+                            raise NoValidQuestionError(
+                                "High-difficulty generation became brittle on this narrow source scope.",
+                                fallback_context=_build_no_valid_question_context(
+                                    policy=brittle_policy,
+                                    requested_difficulty=difficulty,
+                                    provider_model_attempts=provider_model_attempts,
+                                    brittle_validation_failures=brittle_validation_failures,
+                                    provider_failures=provider_failures,
+                                    rate_limit_failures=rate_limit_failures,
+                                    exit_reason="repeated_unexpected_provider_errors",
+                                ),
+                            )
                     continue
 
             if (
-                max_provider_model_attempts is not None
-                and provider_model_attempts >= max_provider_model_attempts
+                effective_attempt_budget is not None
+                and provider_model_attempts >= effective_attempt_budget
             ):
                 break
+
+    reserve_brittle_reasons = []
+    if reserve_candidate is not None:
+        reserve_brittle_reasons = _brittle_reason_subset(
+            reserve_candidate.get("strict_reasons", [])
+        )
+        if brittle_policy["risky_generation"] and reserve_brittle_reasons:
+            logger.warning(
+                "[LLM] Skipping last resort for hard-short-scope topic=%s difficulty=%s reasons=%s",
+                topic,
+                difficulty,
+                ",".join(reserve_brittle_reasons),
+            )
+            raise NoValidQuestionError(
+                "High-difficulty generation became brittle on this narrow source scope.",
+                fallback_context=_build_no_valid_question_context(
+                    policy=brittle_policy,
+                    requested_difficulty=difficulty,
+                    provider_model_attempts=provider_model_attempts,
+                    brittle_validation_failures=brittle_validation_failures,
+                    provider_failures=provider_failures,
+                    rate_limit_failures=rate_limit_failures,
+                    exit_reason="skip_last_resort_for_brittle_high_difficulty",
+                ),
+            )
 
     if reserve_candidate is not None:
         question = _shuffle_question_options(reserve_candidate["question"])
@@ -1946,7 +2172,18 @@ async def _generate_question_once(
             )
         return question
 
-    raise NoValidQuestionError("All providers/models failed to produce a valid question.\n" + "\n".join(all_failures))
+    raise NoValidQuestionError(
+        "All providers/models failed to produce a valid question.\n" + "\n".join(all_failures),
+        fallback_context=_build_no_valid_question_context(
+            policy=brittle_policy,
+            requested_difficulty=difficulty,
+            provider_model_attempts=provider_model_attempts,
+            brittle_validation_failures=brittle_validation_failures,
+            provider_failures=provider_failures,
+            rate_limit_failures=rate_limit_failures,
+            exit_reason="exhausted_provider_chain",
+        ),
+    )
 
 
 async def generate_question_with_metadata(
@@ -1958,43 +2195,14 @@ async def generate_question_with_metadata(
     allow_internal_fallback: bool = True,
     generation_profile: str = "default",
 ) -> tuple[dict, dict]:
-    try:
-        question, metadata = await _generate_question_once(
-            topic,
-            difficulty,
-            source_text,
-            return_metadata=True,
-            max_provider_model_attempts=max_provider_model_attempts,
-            generation_profile=generation_profile,
-        )
-        metadata = dict(metadata)
-        metadata["requested_difficulty"] = difficulty
-        metadata["returned_difficulty"] = int(question.get("difficulty", difficulty))
-        return question, metadata
-    except NoValidQuestionError as primary_error:
-        if not allow_internal_fallback:
-            raise ValueError(str(primary_error)) from primary_error
+    attempted_difficulties = [difficulty]
+    current_difficulty = difficulty
 
-        fallback_difficulty = None
-        if difficulty == 5:
-            fallback_difficulty = 4
-        elif difficulty == 4:
-            fallback_difficulty = 3
-
-        if fallback_difficulty is None:
-            raise ValueError(str(primary_error)) from primary_error
-
-        logger.warning(
-            "[LLM] Falling back generation topic=%s requested_difficulty=%s fallback_difficulty=%s",
-            topic,
-            difficulty,
-            fallback_difficulty,
-        )
-
+    while True:
         try:
             question, metadata = await _generate_question_once(
                 topic,
-                fallback_difficulty,
+                current_difficulty,
                 source_text,
                 return_metadata=True,
                 max_provider_model_attempts=max_provider_model_attempts,
@@ -2002,10 +2210,40 @@ async def generate_question_with_metadata(
             )
             metadata = dict(metadata)
             metadata["requested_difficulty"] = difficulty
-            metadata["returned_difficulty"] = int(question.get("difficulty", fallback_difficulty))
+            metadata["returned_difficulty"] = int(question.get("difficulty", current_difficulty))
+            metadata["attempted_difficulties"] = attempted_difficulties[:]
+            metadata["used_difficulty_fallback"] = current_difficulty != difficulty
             return question, metadata
-        except NoValidQuestionError as fallback_error:
-            raise ValueError(str(fallback_error)) from primary_error
+        except NoValidQuestionError as error:
+            if not allow_internal_fallback:
+                raise ValueError(str(error)) from error
+
+            fallback_context = dict(getattr(error, "fallback_context", {}) or {})
+            if not fallback_context.get("risky_generation"):
+                raise ValueError(str(error)) from error
+
+            fallback_candidates = _fallback_difficulty_candidates(
+                difficulty,
+                attempted_difficulties,
+            )
+            if not fallback_candidates:
+                raise ValueError(str(error)) from error
+
+            next_difficulty = fallback_candidates[0]
+            logger.warning(
+                "[LLM] Falling back generation topic=%s requested_difficulty=%s current_difficulty=%s fallback_difficulty=%s exit_reason=%s selected_chars=%s context_mode=%s seed_chunks=%s attempts=%s",
+                topic,
+                difficulty,
+                current_difficulty,
+                next_difficulty,
+                fallback_context.get("exit_reason"),
+                fallback_context.get("selected_chars"),
+                fallback_context.get("context_mode"),
+                fallback_context.get("selected_chunk_count"),
+                fallback_context.get("provider_model_attempts"),
+            )
+            attempted_difficulties.append(next_difficulty)
+            current_difficulty = next_difficulty
 
 
 async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:

@@ -116,19 +116,82 @@ help="Default fallback course identifier used if no learner-selected course is a
         """Return a stable anonymous student ID from the Open edX runtime."""
         return self.runtime.anonymous_student_id
 
-    def _api(self, path, method="POST", payload=None, timeout=30):
+    @staticmethod
+    def _truncate_backend_body(body, limit=300):
+        text = str(body or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    def _api(self, path, method="POST", payload=None, timeout=30, return_error_payload=False):
         """Make a synchronous call to the FastAPI backend."""
         url = f"{self.backend_url}{path}"
+
+        def _error_response(error, failure_type, status_code=None):
+            if not return_error_payload:
+                return None
+            payload = {
+                "success": False,
+                "error": error,
+                "failure_type": failure_type,
+            }
+            if status_code is not None:
+                payload["status_code"] = status_code
+            return payload
+
         try:
             if method == "GET":
                 resp = requests.get(url, timeout=timeout)
             else:
                 resp = requests.post(url, json=payload, timeout=timeout)
-            resp.raise_for_status()
-            return resp.json()
+        except requests.Timeout as exc:
+            log.error("Backend call timeout [%s %s timeout=%ss]: %s", method, url, timeout, exc)
+            return _error_response("Quiz backend timed out. Please try again.", "timeout")
         except requests.RequestException as exc:
-            log.error("Backend call failed [%s %s]: %s", method, url, exc)
-            return None
+            log.error("Backend call request exception [%s %s]: %s", method, url, exc)
+            return _error_response("Could not reach quiz backend.", "request_exception")
+        except Exception:
+            log.exception("Backend call unexpected exception [%s %s]", method, url)
+            return _error_response("Unexpected quiz backend error.", "unexpected_exception")
+
+        body_preview = self._truncate_backend_body(resp.text)
+        if resp.status_code >= 400:
+            detail = f"Quiz backend returned status {resp.status_code}."
+            try:
+                error_payload = resp.json()
+                detail = (
+                    error_payload.get("detail")
+                    or error_payload.get("error")
+                    or error_payload.get("message")
+                    or detail
+                )
+            except ValueError:
+                pass
+            log.error(
+                "Backend call non-200 [%s %s]: status=%s body=%s",
+                method,
+                url,
+                resp.status_code,
+                body_preview,
+            )
+            return _error_response(str(detail), "upstream_non_200", resp.status_code)
+
+        try:
+            return resp.json()
+        except ValueError as exc:
+            log.error(
+                "Backend call invalid JSON [%s %s]: status=%s error=%s body=%s",
+                method,
+                url,
+                resp.status_code,
+                exc,
+                body_preview,
+            )
+            return _error_response(
+                "Quiz backend returned an invalid response. Please try again.",
+                "invalid_json",
+                resp.status_code,
+            )
 
     def resource_string(self, path):
         """Return the contents of a static resource file."""
@@ -1649,6 +1712,9 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "max_questions": target_questions,
             "session_complete": session_complete,
             "session_recommendation": submit_resp.get("session_recommendation"),
+            "recommendation_code": submit_resp.get("recommendation_code"),
+            "recommendation_title": submit_resp.get("recommendation_title"),
+            "recommendation_text": submit_resp.get("recommendation_text"),
             "weakest_topic_this_session": submit_resp.get("weakest_topic_this_session"),
             "strongest_topic_this_session": submit_resp.get("strongest_topic_this_session"),
             "session_accuracy": submit_resp.get("session_accuracy"),
@@ -2118,10 +2184,30 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "source_text": self.session_source_text,
             },
             timeout=QUESTION_GENERATE_TIMEOUT,
+            return_error_payload=True,
         )
 
-        if not resp:
-            return {"success": False, "error": "Could not generate question. Try again."}
+        if not resp or resp.get("success") is False:
+            upstream_error = (resp or {}).get("error", "Could not generate question. Try again.")
+            failure_type = (resp or {}).get("failure_type", "unknown")
+            status_code = (resp or {}).get("status_code")
+            if failure_type == "timeout":
+                error_message = "Question generation timed out. Please try again."
+            elif failure_type == "invalid_json":
+                error_message = "Quiz backend returned an invalid response. Please try again."
+            else:
+                error_message = "Could not generate question. Try again."
+            log.error(
+                "Question fetch failed student=%s course=%s topic=%s difficulty=%s failure_type=%s status=%s upstream_error=%s",
+                self._student_id(),
+                self._active_course_id(),
+                self.current_topic,
+                self.current_difficulty,
+                failure_type,
+                status_code,
+                upstream_error,
+            )
+            return {"success": False, "error": error_message}
 
         # Store question so submit_answer can reference it
         self.current_question_json = json.dumps(resp)

@@ -1519,6 +1519,15 @@
   margin-bottom: 6px;
 }
 
+.aq-recommendation-title {
+  display: block;
+  margin: 0 0 6px;
+  font-size: .96rem;
+  line-height: 1.4;
+  color: var(--aq-text);
+  font-weight: 800;
+}
+
 .aq-recommendation-text {
   margin: 0;
   font-size: .9rem;

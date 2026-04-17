@@ -40,6 +40,9 @@ class SubmitResponse(BaseModel):
     support_features:                list[str]
     session_complete:                bool
     session_recommendation:          str | None = None
+    recommendation_code:            str | None = None
+    recommendation_title:           str | None = None
+    recommendation_text:            str | None = None
     weakest_topic_this_session:      str | None = None
     strongest_topic_this_session:    str | None = None
     session_accuracy:                float | None = None
