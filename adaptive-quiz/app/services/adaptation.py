@@ -43,6 +43,24 @@ DIAGNOSTIC_DIFF_SCORE_WEIGHTS = {
 
 DIAGNOSTIC_BASE_FLOOR = 0.15
 DIAGNOSTIC_BASE_CEILING = 0.85
+ALLOWED_CONFIDENCE_LEVELS = {"low", "medium", "high"}
+CONFIDENCE_CORRECT_MULTIPLIER = {
+    "low": 0.8,
+    "medium": 1.0,
+    "high": 1.15,
+}
+CONFIDENCE_INCORRECT_MULTIPLIER = {
+    "low": 0.75,
+    "medium": 1.0,
+    "high": 1.2,
+}
+
+
+def normalize_confidence_level(confidence: str | None) -> str | None:
+    normalized = str(confidence or "").strip().lower()
+    if normalized in ALLOWED_CONFIDENCE_LEVELS:
+        return normalized
+    return None
 
 
 def _normalize_time_context(time_context: str | None) -> str | None:
@@ -61,9 +79,21 @@ def compute_time_weight(time_ms: int, time_context: str | None = None) -> float:
     return 0.5
 
 
-def update_mastery(current_mastery: float, correct: bool, time_ms: int, time_context: str | None = None) -> float:
+def update_mastery(
+    current_mastery: float,
+    correct: bool,
+    time_ms: int,
+    time_context: str | None = None,
+    confidence: str | None = None,
+) -> float:
     time_weight = compute_time_weight(time_ms, time_context=time_context)
-    raw_delta   = 0.05 * time_weight if correct else -0.04
+    normalized_confidence = normalize_confidence_level(confidence)
+    if correct:
+        confidence_multiplier = CONFIDENCE_CORRECT_MULTIPLIER.get(normalized_confidence, 1.0)
+        raw_delta = 0.05 * time_weight * confidence_multiplier
+    else:
+        confidence_multiplier = CONFIDENCE_INCORRECT_MULTIPLIER.get(normalized_confidence, 1.0)
+        raw_delta = -0.04 * confidence_multiplier
     candidate   = current_mastery + raw_delta
     new_mastery = current_mastery * (1 - EMA_ALPHA) + candidate * EMA_ALPHA
     return round(max(0.0, min(1.0, new_mastery)), 4)
@@ -224,9 +254,17 @@ def process_answer(
     correct: bool,
     time_ms: int,
     time_context: str | None = None,
+    confidence: str | None = None,
 ) -> dict:
     current                       = state["topic_mastery"].get(topic, 0.5)
-    state["topic_mastery"][topic] = update_mastery(current, correct, time_ms, time_context=time_context)
+    normalized_confidence = normalize_confidence_level(confidence)
+    state["topic_mastery"][topic] = update_mastery(
+        current,
+        correct,
+        time_ms,
+        time_context=time_context,
+        confidence=normalized_confidence,
+    )
 
     # Track that this topic has been updated through real practice
     if "topic_mastery_source" not in state:
@@ -242,6 +280,7 @@ def process_answer(
         "correct": correct,
         "time_ms": time_ms,
         "time_context": _normalize_time_context(time_context) or "unknown",
+        "confidence": normalized_confidence,
     })
     if len(state["recent_answers"]) > 20:
         state["recent_answers"].pop(0)

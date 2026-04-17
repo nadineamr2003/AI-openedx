@@ -302,6 +302,30 @@
     <div class="aq-q-card">
       <p class="aq-q-text" id="aq-question-text">Loading…</p>
 
+      <div class="aq-confidence-box" id="aq-confidence-box">
+        <div class="aq-confidence-header">
+          <div>
+            <div class="aq-confidence-title">How sure are you? <span class="aq-confidence-optional">(optional)</span></div>
+            <p class="aq-confidence-help">
+              This can help the quiz support you better and make progress tracking more accurate.
+            </p>
+          </div>
+          <div class="aq-confidence-dismiss-wrap">
+            <button class="aq-confidence-close" id="aq-confidence-close" type="button" aria-label="Hide confidence selector">×</button>
+            <div class="aq-confidence-dismiss-menu aq-hidden" id="aq-confidence-dismiss-menu">
+              <button class="aq-confidence-dismiss-btn" id="aq-confidence-hide-question" type="button">Hide for this question</button>
+              <button class="aq-confidence-dismiss-btn" id="aq-confidence-hide-session" type="button">Hide for the rest of this session</button>
+              <button class="aq-confidence-dismiss-btn aq-confidence-dismiss-btn-subtle" id="aq-confidence-dismiss-cancel" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div class="aq-confidence-chips" id="aq-confidence-chips">
+          <button class="aq-confidence-chip" data-confidence="low" id="aq-confidence-low" type="button">Not sure</button>
+          <button class="aq-confidence-chip" data-confidence="medium" id="aq-confidence-medium" type="button">Somewhat sure</button>
+          <button class="aq-confidence-chip" data-confidence="high" id="aq-confidence-high" type="button">Very sure</button>
+        </div>
+      </div>
+
       <div class="aq-options" id="aq-options">
         <button class="aq-opt" data-key="A" id="aq-opt-A"><span class="aq-opt-key">A</span><span
             class="aq-opt-text">…</span></button>

@@ -15,6 +15,7 @@ from app.models.quiz import (
 from app.services.adaptation import (
     get_initial_student_state,
     process_answer,
+    normalize_confidence_level,
     select_next_topic,
     select_difficulty,
     make_content_key,
@@ -62,6 +63,11 @@ RECOVERY_THOUGHTFUL_RESPONSE_MS = 90_000
 RECOVERY_REASON_THOUGHTFUL = "thoughtful_wrong_answer"
 RECOVERY_REASON_REPEATED = "repeated_wrong_topic"
 RECOVERY_REVIEW_PRESSURE_THRESHOLD = 1.0
+RECOVERY_CONFIDENCE_TIME_THRESHOLDS_MS = {
+    "low": 105_000,
+    "medium": 75_000,
+    "high": 45_000,
+}
 
 
 def _state_key(student_id: str, course_id: str) -> dict:
@@ -374,6 +380,7 @@ def _detect_recovery_trigger(
     topic: str,
     time_spent_ms: int,
     time_context: str | None,
+    confidence: str | None,
     question_log: list[dict] | None,
 ) -> str | None:
     if is_correct or session_complete or not _is_recovery_supported_session(current_mode, session_origin):
@@ -393,7 +400,12 @@ def _detect_recovery_trigger(
     if normalized_time_context == "thinking":
         return RECOVERY_REASON_THOUGHTFUL
 
-    if time_spent_ms >= RECOVERY_THOUGHTFUL_RESPONSE_MS:
+    normalized_confidence = normalize_confidence_level(confidence)
+    thoughtful_threshold = RECOVERY_CONFIDENCE_TIME_THRESHOLDS_MS.get(
+        normalized_confidence,
+        RECOVERY_THOUGHTFUL_RESPONSE_MS,
+    )
+    if time_spent_ms >= thoughtful_threshold:
         return RECOVERY_REASON_THOUGHTFUL
 
     return None
@@ -2559,6 +2571,7 @@ async def submit(req: SubmitRequest):
 
     if req.topic not in state["topic_mastery"]:
         state["topic_mastery"][req.topic] = 0.5
+    normalized_confidence = normalize_confidence_level(req.confidence)
 
     if req.session_id:
         session_doc_before = await db.student_session_history.find_one({"session_id": req.session_id})
@@ -2570,6 +2583,7 @@ async def submit(req: SubmitRequest):
         correct=is_correct,
         time_ms=req.time_spent_ms,
         time_context=req.time_context,
+        confidence=normalized_confidence,
     )
 
     # Decide next parameters (scoped to current session topics)
@@ -2644,6 +2658,7 @@ async def submit(req: SubmitRequest):
             topic=req.topic,
             time_spent_ms=req.time_spent_ms,
             time_context=req.time_context,
+            confidence=normalized_confidence,
             question_log=prior_question_log,
         )
         question_entry = {
@@ -2658,6 +2673,7 @@ async def submit(req: SubmitRequest):
             "is_correct": is_correct,
             "time_spent_ms": req.time_spent_ms,
             "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
+            "confidence": normalized_confidence,
             "support_features_shown": support_features,
             "is_recovery_step": False,
             "counts_toward_session_score": True,
@@ -3563,6 +3579,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         raise HTTPException(status_code=409, detail="No active recovery step is available.")
 
     is_correct = req.selected_answer == req.correct_answer
+    normalized_confidence = normalize_confidence_level(req.confidence)
     question_entry = {
         "question_id": req.question_id,
         "question_text": req.question_text or req.question_id,
@@ -3575,6 +3592,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         "is_correct": is_correct,
         "time_spent_ms": req.time_spent_ms,
         "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
+        "confidence": normalized_confidence,
         "support_features_shown": [],
         "is_recovery_step": True,
         "recovery_for_topic": recovery_topic,

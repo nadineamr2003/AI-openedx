@@ -1657,6 +1657,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         student_id = self._student_id()
         time_spent_ms = int(data.get("time_spent_ms", 15000))
         time_context = data.get("time_context")
+        confidence = data.get("confidence")
 
         submit_resp = self._api("/api/quiz/submit", payload={
         "student_id": student_id,
@@ -1671,6 +1672,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         "difficulty": self.current_difficulty,
         "time_spent_ms": time_spent_ms,
         "time_context": time_context,
+        "confidence": confidence,
         "session_id": self.active_session_id or None,
         },timeout=ANSWER_SUBMIT_TIMEOUT,)
 
@@ -1836,6 +1838,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         time_spent_ms = int(data.get("time_spent_ms", 15000))
         time_context = data.get("time_context")
         selected = data.get("selected_answer", "")
+        confidence = data.get("confidence")
         resp = self._api(
             "/api/quiz/support/recovery/submit",
             payload={
@@ -1852,6 +1855,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "difficulty": question.get("difficulty", self.current_difficulty),
                 "time_spent_ms": time_spent_ms,
                 "time_context": time_context,
+                "confidence": confidence,
                 "recovery_for_topic": question.get("recovery_for_topic") or question.get("topic", self.current_topic),
             },
             timeout=ANSWER_SUBMIT_TIMEOUT,

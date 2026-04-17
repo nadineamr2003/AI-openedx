@@ -46,6 +46,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     lastFeedbackContext: null,
     pendingAnswerKey: null,
     pendingTimeSpentMs: null,
+    selectedConfidence: null,
+    confidenceHiddenForQuestion: false,
+    confidenceHiddenForSession: false,
+    confidenceDismissMenuOpen: false,
     challengeReadiness: {
       ready: false,
       loading: false,
@@ -505,6 +509,72 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     wrap.classList.add('aq-hidden');
   }
 
+  function resetConfidenceSessionState() {
+    state.selectedConfidence = null;
+    state.confidenceHiddenForQuestion = false;
+    state.confidenceHiddenForSession = false;
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
+  }
+
+  function resetConfidenceQuestionState() {
+    state.selectedConfidence = null;
+    state.confidenceHiddenForQuestion = false;
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
+  }
+
+  function shouldShowConfidenceUi() {
+    return !state.confidenceHiddenForSession && !state.confidenceHiddenForQuestion && !state.answered;
+  }
+
+  function closeConfidenceDismissMenu() {
+    if (!state.confidenceDismissMenuOpen) return;
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
+  }
+
+  function renderConfidenceUi() {
+    var box = $('#aq-confidence-box');
+    var menu = $('#aq-confidence-dismiss-menu');
+    if (!box || !menu) return;
+
+    var visible = shouldShowConfidenceUi();
+    box.classList.toggle('aq-hidden', !visible);
+    menu.classList.toggle('aq-hidden', !state.confidenceDismissMenuOpen || !visible);
+
+    ['low', 'medium', 'high'].forEach(function (level) {
+      var chip = $('#aq-confidence-' + level);
+      if (!chip) return;
+      chip.classList.toggle('is-active', state.selectedConfidence === level);
+    });
+  }
+
+  function setConfidenceSelection(confidence) {
+    if (!shouldShowConfidenceUi()) return;
+    state.selectedConfidence = confidence;
+    renderConfidenceUi();
+  }
+
+  function toggleConfidenceDismissMenu() {
+    if (!shouldShowConfidenceUi()) return;
+    state.confidenceDismissMenuOpen = !state.confidenceDismissMenuOpen;
+    renderConfidenceUi();
+  }
+
+  function handleConfidenceDismiss(action) {
+    if (action === 'question') {
+      state.selectedConfidence = null;
+      state.confidenceHiddenForQuestion = true;
+    } else if (action === 'session') {
+      state.selectedConfidence = null;
+      state.confidenceHiddenForSession = true;
+      state.confidenceHiddenForQuestion = false;
+    }
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
+  }
+
   function hideRecoveryCard() {
     var card = $('#aq-recovery-card');
     var nextBtn = $('#aq-btn-next');
@@ -591,6 +661,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
     renderRecoveryIntro(q);
+    resetConfidenceQuestionState();
 
     var qtEl = $('#aq-question-text');
     if (qtEl) qtEl.textContent = q.question;
@@ -609,6 +680,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (fb) fb.classList.add('aq-hidden');
     hideRecoveryCard();
     hideTimeContextPrompt();
+    renderConfidenceUi();
 
     showScreen('question');
   }
@@ -616,6 +688,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function handleOptionClick(selectedKey) {
     if (state.answered) return;
     state.answered = true;
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
 
     $('#aq-opt-' + selectedKey).classList.add('selected');
     ['A', 'B', 'C', 'D'].forEach(function (k) {
@@ -644,7 +718,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({
         selected_answer: selectedKey,
         time_spent_ms: timeSpentMs,
-        time_context: timeContext || null
+        time_context: timeContext || null,
+        confidence: state.selectedConfidence || null
       }),
       contentType: 'application/json',
       success: function (data) { renderFeedback(data, selectedKey); },
@@ -681,6 +756,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       alert('Error: ' + (data && data.error ? data.error : 'Unknown'));
       return;
     }
+
+    state.confidenceDismissMenuOpen = false;
+    renderConfidenceUi();
 
     if (typeof data.questions_seen === 'number') state.questionsSeenSoFar = data.questions_seen;
     if (typeof data.session_score === 'number') state.sessionScore = data.session_score;
@@ -2524,6 +2602,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     selectedCourseId = activeCourseId;
     selectedContentIds = normalizedIds.slice();
     selectedMode = mode || 'normal_practice';
+    resetConfidenceSessionState();
     state.questionsSeenSoFar = 0;
     state.sessionScore = 0;
     state.lastTopic = '—';
@@ -2836,6 +2915,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function finalizeDiagnosticSession() {
     setLoading('Starting your personalised quiz…');
+    resetConfidenceSessionState();
     jQuery.ajax({
       type: 'POST', url: urlFinalizeSession,
       data: JSON.stringify({}), contentType: 'application/json',
@@ -2899,11 +2979,41 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var timeSkipBtn = $('#aq-time-skip');
   if (timeSkipBtn) timeSkipBtn.onclick = function () { handleTimeContextChoice('unknown'); };
 
+  ['low', 'medium', 'high'].forEach(function (level) {
+    var chip = $('#aq-confidence-' + level);
+    if (chip) {
+      chip.onclick = function () { setConfidenceSelection(level); };
+    }
+  });
+
+  var confidenceCloseBtn = $('#aq-confidence-close');
+  if (confidenceCloseBtn) confidenceCloseBtn.onclick = function (event) {
+    event.stopPropagation();
+    toggleConfidenceDismissMenu();
+  };
+
+  var confidenceHideQuestionBtn = $('#aq-confidence-hide-question');
+  if (confidenceHideQuestionBtn) confidenceHideQuestionBtn.onclick = function () { handleConfidenceDismiss('question'); };
+
+  var confidenceHideSessionBtn = $('#aq-confidence-hide-session');
+  if (confidenceHideSessionBtn) confidenceHideSessionBtn.onclick = function () { handleConfidenceDismiss('session'); };
+
+  var confidenceCancelBtn = $('#aq-confidence-dismiss-cancel');
+  if (confidenceCancelBtn) confidenceCancelBtn.onclick = function () { closeConfidenceDismissMenu(); };
+
   var recoveryStartBtn = $('#aq-btn-recovery-start');
   if (recoveryStartBtn) recoveryStartBtn.onclick = handleStartRecoveryStep;
 
   var recoverySkipBtn = $('#aq-btn-recovery-skip');
   if (recoverySkipBtn) recoverySkipBtn.onclick = handleDeclineRecoveryStep;
+
+  element.addEventListener('click', function (event) {
+    var wrap = $('#aq-confidence-box');
+    if (!wrap || wrap.classList.contains('aq-hidden')) return;
+    if (!state.confidenceDismissMenuOpen) return;
+    if (wrap.contains(event.target)) return;
+    closeConfidenceDismissMenu();
+  });
 
   var dashRetryBtn = $('#aq-btn-dashboard-retry');
   if (dashRetryBtn) dashRetryBtn.onclick = function () { pickerMode = 'quiz'; loadCoursePicker(); };

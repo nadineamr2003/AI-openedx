@@ -27,6 +27,7 @@ class SubmitRequest(BaseModel):
     difficulty:       int
     time_spent_ms:    int
     time_context:     str | None = None
+    confidence:       str | None = None
     session_id:       str | None = None
 
 
@@ -98,6 +99,7 @@ class RecoverySubmitRequest(BaseModel):
     difficulty: int
     time_spent_ms: int
     time_context: str | None = None
+    confidence: str | None = None
     recovery_for_topic: str | None = None
 
 
