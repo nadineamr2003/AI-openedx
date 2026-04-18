@@ -53,7 +53,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     challengeReadiness: {
       ready: false,
       loading: false,
-      message: 'Challenge unlocks when this lecture has a stronger foundation.',
+      message: 'Unlocks when this lecture has a stronger foundation.',
       avgMastery: null,
       scopedTopicCount: 0
     }
@@ -377,6 +377,31 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       ready = avgMastery >= CHALLENGE_READY_AVG_MASTERY && proficientTopicCount >= requiredProficientTopics;
     }
 
+    var topicsNeeded = Math.max(requiredProficientTopics - proficientTopicCount, 0);
+    var selectedLectureCount = Array.isArray(selectedContentIds) ? selectedContentIds.length : 0;
+    var isMultiLectureSelection = selectedLectureCount > 1;
+    var scopeLabel = isMultiLectureSelection ? 'your selected lectures' : 'this lecture';
+    var avgVerb = isMultiLectureSelection ? 'reach' : 'reaches';
+    var topicWord = topicsNeeded === 1 ? 'topic' : 'topics';
+    var avgMasteryTargetPct = Math.round(CHALLENGE_READY_AVG_MASTERY * 100);
+    var topicRequirementMet = topicsNeeded === 0;
+    var avgRequirementMet = avgMastery >= CHALLENGE_READY_AVG_MASTERY;
+    var lockedMessage = 'Unlocks when ' + scopeLabel + ' has a stronger foundation.';
+
+    if (!topicRequirementMet && avgRequirementMet) {
+      lockedMessage = 'Unlocks when ' + scopeLabel + ' have ' + topicsNeeded + ' more ' + topicWord + ' at Proficient level.';
+      if (!isMultiLectureSelection) {
+        lockedMessage = 'Unlocks when ' + scopeLabel + ' has ' + topicsNeeded + ' more ' + topicWord + ' at Proficient level.';
+      }
+    } else if (topicRequirementMet && !avgRequirementMet) {
+      lockedMessage = 'Unlocks when ' + scopeLabel + ' ' + avgVerb + ' ' + avgMasteryTargetPct + '% avg mastery.';
+    } else if (!topicRequirementMet && !avgRequirementMet) {
+      lockedMessage = 'Unlocks when ' + scopeLabel + ' have ' + topicsNeeded + ' more ' + topicWord + ' at Proficient level and ' + avgVerb + ' ' + avgMasteryTargetPct + '% avg mastery.';
+      if (!isMultiLectureSelection) {
+        lockedMessage = 'Unlocks when ' + scopeLabel + ' has ' + topicsNeeded + ' more ' + topicWord + ' at Proficient level and ' + avgVerb + ' ' + avgMasteryTargetPct + '% avg mastery.';
+      }
+    }
+
     return {
       ready: ready,
       avgMastery: scopedScores.length ? avgMastery : null,
@@ -385,7 +410,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       requiredProficientTopics: scopedScores.length ? requiredProficientTopics : 0,
       message: ready
         ? ''
-        : 'Challenge unlocks when this lecture has a stronger foundation.'
+        : lockedMessage
     };
   }
 
@@ -412,7 +437,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     if (!readiness.ready) {
-      noteEl.textContent = readiness.message || 'Challenge unlocks when this lecture has a stronger foundation.';
+      noteEl.textContent = readiness.message || 'Unlocks when this lecture has a stronger foundation.';
       noteEl.classList.remove('aq-hidden');
       return;
     }
@@ -425,7 +450,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.challengeReadiness = {
       ready: false,
       loading: true,
-      message: 'Challenge unlocks when this lecture has a stronger foundation.',
+      message: 'Unlocks when this lecture has a stronger foundation.',
       avgMastery: null,
       scopedTopicCount: 0
     };
@@ -443,13 +468,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         applyChallengeReadinessUi();
       },
       error: function () {
-        state.challengeReadiness = {
-          ready: false,
-          loading: false,
-          message: 'Build more proficiency in this lecture first.',
-          avgMastery: null,
-          scopedTopicCount: getSelectedContentScopeTopics().length
-        };
+        var readiness = buildChallengeReadiness(null);
+        readiness.loading = false;
+        state.challengeReadiness = readiness;
         applyChallengeReadinessUi();
       }
     });
