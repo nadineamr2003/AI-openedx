@@ -2196,6 +2196,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return 'still needs review';
   }
 
+  function formatConfidenceLabel(confidence) {
+    var normalized = String(confidence || '').trim().toLowerCase();
+    if (normalized === 'low') return 'Not sure';
+    if (normalized === 'medium') return 'Somewhat sure';
+    if (normalized === 'high') return 'Very sure';
+    return '';
+  }
+
   function openReviewModal(config) {
     reviewState.items = Array.isArray(config && config.items) ? config.items.slice() : [];
     reviewState.questionIndex = 0;
@@ -2273,6 +2281,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     $('#aq-review-time-chip').textContent = 'Time: ' + formatMs(q.time_spent_ms || 0);
+    var confidenceChip = $('#aq-review-confidence-chip');
+    if (confidenceChip) {
+      var confidenceLabel = formatConfidenceLabel(q.confidence);
+      confidenceChip.textContent = confidenceLabel ? ('Confidence: ' + confidenceLabel) : 'Confidence: —';
+      confidenceChip.classList.toggle('aq-hidden', !confidenceLabel);
+    }
     var sourceChip = $('#aq-review-source-chip');
     if (sourceChip) {
       var sourceText = String(q.session_reference || '').trim();

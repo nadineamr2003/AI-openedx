@@ -1819,6 +1819,7 @@ def _serialize_mistake_entry(doc: dict, entry: dict, question_index: int, questi
         "difficulty": difficulty,
         "is_correct": False,
         "time_spent_ms": int(entry.get("time_spent_ms", 0) or 0),
+        "confidence": entry.get("confidence"),
         "recovery_context": _build_mistake_recovery_context(question_log, question_index),
     }
 
