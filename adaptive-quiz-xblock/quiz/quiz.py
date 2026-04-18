@@ -748,16 +748,19 @@ help="Default fallback course identifier used if no learner-selected course is a
 
     <div id="aqs-extracted-section" style="display:none">
         <div class="aqs-divider"><span>Review and Edit Extracted Lecture</span></div>
+        <div class="aqs-hint" style="margin:-4px 0 14px;">Review the course name, lecture title, week, and topics before saving.</div>
 
         <div class="aqs-grid-2">
         <div class="aqs-col-full aqs-field">
             <label class="aqs-label">Lecture Title</label>
             <input type="text" id="aqs-ext-title" class="aqs-input" placeholder="e.g. Relational Schema Mapping">
+            <span class="aqs-hint">You can edit the parsed title before saving.</span>
         </div>
 
         <div class="aqs-field">
             <label class="aqs-label">Week</label>
             <input type="number" id="aqs-ext-week" class="aqs-input" min="1" max="52" value="1">
+            <span class="aqs-hint">Adjust this if the parser guessed the lecture week incorrectly.</span>
         </div>
 
         <div class="aqs-field">
@@ -837,6 +840,63 @@ help="Default fallback course identifier used if no learner-selected course is a
     var selectedFile = null;
     var editingContentId = null;
     var editingContentActive = true;
+    var isSaveInFlight = false;
+    var editorBaselineState = null;
+
+    function aqsEmptyEditorState() {{
+        return {{
+            mode: "create",
+            title: "",
+            week: 1,
+            courseId: String(document.getElementById("aqs-ext-course-id").value || "{self.course_id}").trim(),
+            courseName: "",
+            topics: [],
+            sourceText: "",
+            active: true,
+            reassessment: false
+        }};
+    }}
+
+    function aqsNormalizeTopics(topics) {{
+        var cleaned = [];
+        var seen = {{}};
+        (Array.isArray(topics) ? topics : []).forEach(function(topic) {{
+            var normalized = String(topic || "").trim();
+            if (!normalized || seen[normalized]) return;
+            seen[normalized] = true;
+            cleaned.push(normalized);
+        }});
+        return cleaned;
+    }}
+
+    function aqsGetEditorState() {{
+        return {{
+            mode: editingContentId ? "edit" : "create",
+            title: String(document.getElementById("aqs-ext-title").value || "").trim(),
+            week: parseInt(document.getElementById("aqs-ext-week").value || "1", 10) || 1,
+            courseId: String(document.getElementById("aqs-ext-course-id").value || "").trim(),
+            courseName: String(document.getElementById("aqs-ext-course-name").value || "").trim(),
+            topics: aqsNormalizeTopics(currentTopics),
+            sourceText: String(document.getElementById("aqs-ext-source").value || "").trim(),
+            active: editingContentActive !== false,
+            reassessment: !!document.getElementById("aqs-require-reassessment").checked
+        }};
+    }}
+
+    function aqsSetEditorBaseline(state) {{
+        editorBaselineState = JSON.stringify(state || aqsEmptyEditorState());
+    }}
+
+    function aqsIsEditorDirty() {{
+        var section = document.getElementById("aqs-extracted-section");
+        if (!section || section.style.display === "none" || isSaveInFlight) return false;
+        return JSON.stringify(aqsGetEditorState()) !== (editorBaselineState || JSON.stringify(aqsEmptyEditorState()));
+    }}
+
+    function aqsConfirmDiscardChanges() {{
+        if (!aqsIsEditorDirty()) return true;
+        return window.confirm("You have unsaved lecture changes. Discard them?");
+    }}
 
     function aqsRenderReassessmentField() {{
         var field = document.getElementById("aqs-reassessment-field");
@@ -845,6 +905,10 @@ help="Default fallback course identifier used if no learner-selected course is a
     }}
 
     window.aqsTab = function(name) {{
+        var currentContentVisible = document.getElementById("aqs-panel-content").style.display !== "none";
+        if (currentContentVisible && name !== "content" && !aqsConfirmDiscardChanges()) {{
+        return;
+        }}
         ["settings", "content"].forEach(function(t) {{
         document.getElementById("aqs-tab-" + t).classList.toggle("active", t === name);
         document.getElementById("aqs-panel-" + t).style.display = t === name ? "" : "none";
@@ -916,6 +980,10 @@ help="Default fallback course identifier used if no learner-selected course is a
 
     window.aqsParse = function() {{
         var btn = document.getElementById("aqs-btn-parse");
+
+        if (!aqsConfirmDiscardChanges()) {{
+        return;
+        }}
 
         if (currentMode === "pdf") {{
         if (!selectedFile) {{
@@ -1004,6 +1072,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     editingContentId = item.id || null;
     editingContentActive = item.active !== false;
     aqsRenderReassessmentField();
+    aqsSetEditorBaseline(editingContentId ? aqsGetEditorState() : aqsEmptyEditorState());
 
     var saveBtn = document.getElementById("aqs-btn-save");
     var cancelBtn = document.getElementById("aqs-btn-cancel-edit");
@@ -1017,7 +1086,11 @@ help="Default fallback course identifier used if no learner-selected course is a
     }}, 100);
 }}
 
-window.aqsCancelEdit = function() {{
+window.aqsCancelEdit = function(force) {{
+    if (!force && !aqsConfirmDiscardChanges()) {{
+        return;
+    }}
+
     editingContentId = null;
     editingContentActive = true;
     aqsRenderReassessmentField();
@@ -1040,9 +1113,14 @@ window.aqsCancelEdit = function() {{
 
     document.getElementById("aqs-extracted-section").style.display = "none";
     aqsStatus("aqs-save-status", "", "");
+    aqsSetEditorBaseline(aqsEmptyEditorState());
 }};
 
 window.aqsEditContent = function(contentId) {{
+    if (!aqsConfirmDiscardChanges()) {{
+        return;
+    }}
+
     aqsStatus("aqs-save-status", "loading", "Loading lecture for editing…");
 
     jQuery.ajax({{
@@ -1125,6 +1203,12 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         aqsRenderTopics();
     }};
 
+    window.addEventListener("beforeunload", function(event) {{
+        if (!aqsIsEditorDirty()) return;
+        event.preventDefault();
+        event.returnValue = "";
+    }});
+
     document.addEventListener("keydown", function(e) {{
         var topicInput = document.getElementById("aqs-topic-input");
         if (!topicInput || document.activeElement !== topicInput) return;
@@ -1146,6 +1230,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     var courseId = document.getElementById("aqs-ext-course-id").value.trim();
     var courseName = document.getElementById("aqs-ext-course-name").value.trim();
     var sourceText = document.getElementById("aqs-ext-source").value.trim();
+    var normalizedTopics = aqsNormalizeTopics(currentTopics);
 
     if (!title) {{
         aqsStatus("aqs-save-status", "error", "Please enter a lecture title.");
@@ -1159,7 +1244,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         aqsStatus("aqs-save-status", "error", "Please enter a Course Name.");
         return;
     }}
-    if (currentTopics.length === 0) {{
+    if (normalizedTopics.length === 0) {{
         aqsStatus("aqs-save-status", "error", "Please add at least one topic.");
         return;
     }}
@@ -1167,17 +1252,22 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         aqsStatus("aqs-save-status", "error", "Source text is too short.");
         return;
     }}
+    if (isSaveInFlight) {{
+        return;
+    }}
 
     var isEdit = !!editingContentId;
     var targetUrl = isEdit ? UPDATE_CONTENT_URL : SAVE_CONTENT_URL;
     var requireReassessment = !!document.getElementById("aqs-require-reassessment").checked;
+    currentTopics = normalizedTopics;
+    aqsRenderTopics();
 
     var payload = {{
         course_id: courseId,
         course_name: courseName,
         title: title,
         week: week,
-        topics: currentTopics,
+        topics: normalizedTopics,
         source_text: sourceText,
         active: editingContentActive,
         require_reassessment: requireReassessment
@@ -1188,6 +1278,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     }}
 
     var saveBtn = document.getElementById("aqs-btn-save");
+    isSaveInFlight = true;
     saveBtn.disabled = true;
     saveBtn.innerHTML = '<span class="aqs-spinner"></span> ' + (isEdit ? 'Updating…' : 'Saving…');
 
@@ -1197,6 +1288,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         data: JSON.stringify(payload),
         contentType: "application/json",
         success: function(data) {{
+            isSaveInFlight = false;
             saveBtn.disabled = false;
             saveBtn.innerHTML = isEdit ? "💾 Update Lecture" : "💾 Save Lecture";
 
@@ -1213,13 +1305,14 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                         ? (requireReassessment ? "Lecture updated. Students will redo assessment for this lecture." : "Lecture updated successfully.")
                         : "Lecture saved successfully."
                 );
-                aqsCancelEdit();
+                aqsCancelEdit(true);
                 aqsLoadExisting();
             }} else {{
                 aqsStatus("aqs-save-status", "error", data.error || "Save failed.");
             }}
         }},
         error: function() {{
+            isSaveInFlight = false;
             saveBtn.disabled = false;
             saveBtn.innerHTML = isEdit ? "💾 Update Lecture" : "💾 Save Lecture";
             aqsStatus("aqs-save-status", "error", "Network error — could not save lecture.");
