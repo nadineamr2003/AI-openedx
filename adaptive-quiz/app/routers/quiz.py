@@ -10,7 +10,8 @@ from app.models.quiz import (
     ContentItem, ContentListResponse, ContentUpdateRequest, ContentToggleRequest,
     DiagnosticGenerateRequest, DiagnosticCompleteRequest,
     DiagnosticItem, SessionFinalizeRequest, RecoveryStartRequest,
-    RecoveryDeclineRequest, RecoverySubmitRequest,
+    RecoveryDeclineRequest, RecoverySubmitRequest, SessionResumeRequest,
+    SessionRetireRequest,
 )
 from app.services.adaptation import (
     get_initial_student_state,
@@ -63,6 +64,7 @@ RECOVERY_THOUGHTFUL_RESPONSE_MS = 90_000
 RECOVERY_REASON_THOUGHTFUL = "thoughtful_wrong_answer"
 RECOVERY_REASON_REPEATED = "repeated_wrong_topic"
 RECOVERY_REVIEW_PRESSURE_THRESHOLD = 1.0
+SESSION_RESUME_WINDOW = timedelta(days=7)
 RECOVERY_CONFIDENCE_TIME_THRESHOLDS_MS = {
     "low": 105_000,
     "medium": 75_000,
@@ -113,6 +115,137 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
     return parsed.astimezone(timezone.utc)
+
+
+async def _resolve_content_scope(
+    course_id: str,
+    selected_content_ids: list[str] | None,
+) -> dict:
+    db = get_db()
+    resolved_topics: list[str] = []
+    resolved_source_text = ""
+    resolved_titles: list[str] = []
+    resolved_content_ids: list[str] = []
+
+    for content_id in (selected_content_ids or []):
+        try:
+            oid = ObjectId(content_id)
+        except Exception:
+            continue
+
+        item = await db.course_content.find_one({
+            "_id": oid,
+            "course_id": course_id,
+            "active": True,
+        })
+        if not item:
+            continue
+
+        resolved_content_ids.append(str(item["_id"]))
+        resolved_topics.extend(item.get("topics", []))
+        resolved_source_text += "\n\n" + str(item.get("source_text") or "")
+        resolved_titles.append(str(item.get("title") or ""))
+
+    return {
+        "content_ids": _dedupe_keep_order(resolved_content_ids),
+        "topics": _dedupe_keep_order([
+            str(topic).strip()
+            for topic in resolved_topics
+            if str(topic).strip()
+        ]),
+        "source_text": resolved_source_text.strip(),
+        "titles": _dedupe_keep_order([
+            str(title).strip()
+            for title in resolved_titles
+            if str(title).strip()
+        ]),
+    }
+
+
+def _is_resumable_session_doc(doc: dict | None) -> bool:
+    if not doc:
+        return False
+    if doc.get("ended_at") is not None:
+        return False
+    if doc.get("abandoned_at"):
+        return False
+
+    selected_mode = str(doc.get("selected_mode") or "").strip().lower()
+    if selected_mode not in {"normal_practice", "weakness_review", "challenge"}:
+        return False
+
+    try:
+        target_questions = int(doc.get("target_questions", 0) or 0)
+        questions_answered = int(doc.get("questions_answered", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+    if target_questions <= 0 or questions_answered >= target_questions:
+        return False
+
+    started_at = _parse_iso_datetime(doc.get("started_at"))
+    if not started_at:
+        return False
+
+    if datetime.now(timezone.utc) - started_at > SESSION_RESUME_WINDOW:
+        return False
+
+    return True
+
+
+def _serialize_resumable_session(doc: dict, resolved_titles: list[str]) -> dict:
+    selected_titles = _dedupe_keep_order([
+        str(title).strip()
+        for title in ((doc.get("selected_content_titles") or []) + (resolved_titles or []))
+        if str(title).strip()
+    ])
+    target_questions = int(doc.get("target_questions", 0) or 0)
+    questions_answered = int(doc.get("questions_answered", 0) or 0)
+    return {
+        "session_id": doc.get("session_id"),
+        "selected_mode": doc.get("selected_mode", "normal_practice"),
+        "session_origin": _normalize_session_origin(doc.get("session_origin")),
+        "selected_content_ids": doc.get("selected_content_ids", []),
+        "selected_content_titles": selected_titles,
+        "questions_answered": questions_answered,
+        "target_questions": target_questions,
+        "remaining_questions": max(target_questions - questions_answered, 0),
+        "started_at": doc.get("started_at"),
+    }
+
+
+async def _find_latest_resumable_session(student_id: str, course_id: str) -> tuple[dict | None, dict | None]:
+    db = get_db()
+    docs = await db.student_session_history.find(
+        {
+            "student_id": student_id,
+            "course_id": course_id,
+            "ended_at": None,
+            "abandoned_at": {"$exists": False},
+        }
+    ).sort("started_at", -1).to_list(length=10)
+
+    for doc in docs:
+        if not _is_resumable_session_doc(doc):
+            continue
+
+        expected_content_ids = _dedupe_keep_order([
+            str(content_id).strip()
+            for content_id in (doc.get("selected_content_ids") or [])
+            if str(content_id).strip()
+        ])
+        scope = await _resolve_content_scope(course_id, doc.get("selected_content_ids") or [])
+        if (
+            not scope.get("topics")
+            or not scope.get("source_text")
+            or not scope.get("content_ids")
+            or len(scope.get("content_ids") or []) != len(expected_content_ids)
+        ):
+            continue
+
+        return doc, scope
+
+    return None, None
 
 
 def _prune_recent_question_history(history: list[dict] | None) -> list[dict]:
@@ -3909,6 +4042,148 @@ async def get_session_detail(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     return {"success": True, "session": _serialize_session(doc, include_questions=True)}
+
+
+@router.get("/session-resumable/{student_id}/{course_id}")
+async def get_resumable_session(student_id: str, course_id: str):
+    doc, scope = await _find_latest_resumable_session(student_id, course_id)
+    if not doc or not scope:
+        return {"success": True, "session": None}
+
+    return {
+        "success": True,
+        "session": _serialize_resumable_session(doc, scope.get("titles", [])),
+    }
+
+
+@router.post("/session/retire")
+async def retire_session(req: SessionRetireRequest):
+    db = get_db()
+    doc = await db.student_session_history.find_one({
+        "session_id": req.session_id,
+        "student_id": req.student_id,
+        "course_id": req.course_id,
+    })
+    if not doc:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if _is_resumable_session_doc(doc):
+        await db.student_session_history.update_one(
+            {"session_id": req.session_id},
+            {
+                "$set": {
+                    "abandoned_at": datetime.now(timezone.utc).isoformat(),
+                    "abandoned_reason": "superseded_new_session",
+                }
+            }
+        )
+
+    return {"success": True}
+
+
+@router.post("/session/resume")
+async def resume_session(req: SessionResumeRequest):
+    db = get_db()
+    doc = await db.student_session_history.find_one({
+        "session_id": req.session_id,
+        "student_id": req.student_id,
+        "course_id": req.course_id,
+    })
+    if not _is_resumable_session_doc(doc):
+        raise HTTPException(status_code=404, detail="Resumable session not found.")
+
+    expected_content_ids = _dedupe_keep_order([
+        str(content_id).strip()
+        for content_id in (doc.get("selected_content_ids") or [])
+        if str(content_id).strip()
+    ])
+    scope = await _resolve_content_scope(req.course_id, doc.get("selected_content_ids") or [])
+    if (
+        not scope.get("content_ids")
+        or not scope.get("topics")
+        or not scope.get("source_text")
+        or len(scope.get("content_ids") or []) != len(expected_content_ids)
+    ):
+        raise HTTPException(status_code=409, detail="Session can no longer be resumed.")
+
+    session_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (doc.get("session_topics") or [])
+        if str(topic).strip() and str(topic).strip() in scope["topics"]
+    ]) or scope["topics"]
+
+    state = await _get_state(req.student_id, req.course_id, session_topics)
+
+    if "topic_mastery_source" not in state:
+        state["topic_mastery_source"] = {}
+
+    for topic in session_topics:
+        if topic not in state["topic_mastery"]:
+            state["topic_mastery"][topic] = 0.5
+        if topic not in state["topic_mastery_source"]:
+            state["topic_mastery_source"][topic] = "default_prior"
+
+    selected_mode = str(doc.get("selected_mode") or "normal_practice").strip().lower() or "normal_practice"
+    session_origin = _normalize_session_origin(doc.get("session_origin"))
+    focused_topic = session_topics[0] if _is_focused_followup_session(selected_mode, session_topics, session_origin) else None
+
+    state["session_topics"] = session_topics
+    state["current_session_mode"] = selected_mode
+    _clear_recovery_state(state)
+    _set_session_followup_state(
+        state=state,
+        mode=selected_mode,
+        focus_topics=session_topics if _is_followup_origin(session_origin) else None,
+        focused_topic=focused_topic,
+        session_origin=session_origin,
+    )
+    state["current_source_scope_key"] = _make_source_scope_key(scope["source_text"])
+    state["current_cache_prompt_version"] = CACHE_PROMPT_VERSION
+
+    current_difficulty = int(doc.get("end_difficulty", doc.get("start_difficulty", state.get("current_difficulty", 3))) or 3)
+    current_difficulty = max(1, min(5, current_difficulty))
+    state["current_difficulty"] = current_difficulty
+
+    scoped_mastery = {
+        topic: state["topic_mastery"].get(topic, 0.5)
+        for topic in session_topics
+    }
+    next_topic, effective_mode = select_next_topic(
+        scoped_mastery,
+        mode=selected_mode,
+        recent_answers=state.get("recent_answers", []),
+        total_answers=state.get("total_answers", 0),
+    )
+
+    await _save_state(state)
+
+    question = await generate(GenerateRequest(
+        student_id=req.student_id,
+        course_id=req.course_id,
+        topic=next_topic,
+        difficulty=current_difficulty,
+        source_text=scope["source_text"],
+        mode=selected_mode,
+        session_origin=session_origin,
+        content_ids=scope["content_ids"],
+    ))
+
+    return {
+        "success": True,
+        "session_id": req.session_id,
+        "question": question,
+        "questions_seen": int(doc.get("questions_answered", 0) or 0),
+        "session_score": int(doc.get("correct_answers", 0) or 0),
+        "max_questions": int(doc.get("target_questions", 0) or 0),
+        "current_difficulty": current_difficulty,
+        "next_topic": next_topic,
+        "topics": session_topics,
+        "resolved_source_text": scope["source_text"],
+        "selected_mode": selected_mode,
+        "effective_mode": effective_mode,
+        "session_origin": session_origin,
+        "selected_content_ids": scope["content_ids"],
+    }
 
 
 @router.get("/mistake-journal/{student_id}/{course_id}")

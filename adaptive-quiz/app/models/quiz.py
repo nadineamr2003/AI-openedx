@@ -210,3 +210,15 @@ class SessionFinalizeRequest(BaseModel):
     mode: str = "normal_practice"
     session_origin: str | None = None
     focus_topics: list[str] | None = None
+
+
+class SessionResumeRequest(BaseModel):
+    student_id: str
+    course_id: str
+    session_id: str
+
+
+class SessionRetireRequest(BaseModel):
+    student_id: str
+    course_id: str
+    session_id: str

@@ -24,6 +24,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlSubmitDiagA = runtime.handlerUrl(element, 'submit_diagnostic_answer');
   var urlCompleteDiag = runtime.handlerUrl(element, 'complete_diagnostic_item');
   var urlFinalizeSession = runtime.handlerUrl(element, 'finalize_session');
+  var urlGetResumableSession = runtime.handlerUrl(element, 'get_resumable_session');
+  var urlResumeSession = runtime.handlerUrl(element, 'resume_session');
+  var urlRetireResumableSession = runtime.handlerUrl(element, 'retire_resumable_session');
 
   var state = {
     currentQuestion: null,
@@ -50,6 +53,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     confidenceHiddenForQuestion: false,
     confidenceHiddenForSession: false,
     confidenceDismissMenuOpen: false,
+    resumePromptSession: null,
+    resumeActionPending: false,
     challengeReadiness: {
       ready: false,
       loading: false,
@@ -204,6 +209,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function goHome() {
+    closeResumePrompt();
     pickerMode = 'quiz';
     showScreen('start');
   }
@@ -242,6 +248,80 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       list.appendChild(label);
     });
     showScreen('course');
+  }
+
+  function closeResumePrompt() {
+    state.resumePromptSession = null;
+    state.resumeActionPending = false;
+    var modal = $('#aq-resume-modal');
+    if (modal) modal.classList.add('aq-hidden');
+    document.body.classList.remove('aq-modal-open');
+    var continueBtn = $('#aq-btn-resume-continue');
+    var startNewBtn = $('#aq-btn-resume-start-new');
+    if (continueBtn) {
+      continueBtn.disabled = false;
+      continueBtn.textContent = 'Continue Previous Quiz';
+    }
+    if (startNewBtn) {
+      startNewBtn.disabled = false;
+      startNewBtn.textContent = 'Start a New Quiz';
+    }
+  }
+
+  function openResumePrompt(session) {
+    var modal = $('#aq-resume-modal');
+    var subtitle = $('#aq-resume-subtitle');
+    var summary = $('#aq-resume-summary');
+    var meta = $('#aq-resume-meta');
+    if (!modal || !subtitle || !summary || !meta) {
+      loadContentPicker(selectedCourseId);
+      return;
+    }
+
+    state.resumePromptSession = session || null;
+    state.resumeActionPending = false;
+
+    var modeLabel = getLearnerSessionLabel(session || {});
+    var targetQuestions = parseInt((session && session.target_questions) || 0, 10) || 0;
+    var answered = parseInt((session && session.questions_answered) || 0, 10) || 0;
+    var lectureTitles = Array.isArray(session && session.selected_content_titles) && session.selected_content_titles.length
+      ? session.selected_content_titles.join(', ')
+      : 'Selected lecture';
+
+    subtitle.textContent = 'You have an unfinished quiz in this course.';
+    summary.textContent = 'You have an unfinished ' + (targetQuestions || 'ongoing') + '-question ' + modeLabel.toLowerCase() + ' session in this course.';
+    meta.textContent =
+      'Lectures: ' + lectureTitles +
+      ' · Progress: ' + answered + ' / ' + (targetQuestions || answered) + ' completed' +
+      ((session && session.started_at) ? (' · Started: ' + formatDateTime(session.started_at)) : '');
+
+    modal.classList.remove('aq-hidden');
+    document.body.classList.add('aq-modal-open');
+  }
+
+  function continueAfterCourseSelection() {
+    loadContentPicker(selectedCourseId);
+  }
+
+  function checkForResumableSession() {
+    setLoading('Checking for unfinished quiz…');
+    jQuery.ajax({
+      type: 'POST',
+      url: urlGetResumableSession,
+      data: JSON.stringify({ selected_course_id: selectedCourseId }),
+      contentType: 'application/json',
+      success: function (data) {
+        if (data && data.success && data.session) {
+          showScreen('course');
+          openResumePrompt(data.session);
+          return;
+        }
+        continueAfterCourseSelection();
+      },
+      error: function () {
+        continueAfterCourseSelection();
+      }
+    });
   }
 
   // ── Content picker ─────────────────────────────────────────────────
@@ -3076,7 +3156,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   });
 
   var courseBackBtn = $('#aq-btn-course-back');
-  if (courseBackBtn) courseBackBtn.onclick = function () { showScreen('start'); };
+  if (courseBackBtn) courseBackBtn.onclick = function () {
+    closeResumePrompt();
+    showScreen('start');
+  };
 
   var courseContinueBtn = $('#aq-btn-course-continue');
   if (courseContinueBtn) {
@@ -3087,7 +3170,104 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       selectedCourseName = checked.getAttribute('data-course-name') || checked.value;
       if (pickerMode === 'progress') loadDashboard('start', selectedCourseId, selectedCourseName);
       else if (pickerMode === 'history') loadFullSessionHistory(selectedCourseId, 'start');
-      else loadContentPicker(selectedCourseId);
+      else checkForResumableSession();
+    };
+  }
+
+  var resumeContinueBtn = $('#aq-btn-resume-continue');
+  if (resumeContinueBtn) {
+    resumeContinueBtn.onclick = function () {
+      var session = state.resumePromptSession;
+      if (!session || state.resumeActionPending) return;
+
+      state.resumeActionPending = true;
+      resumeContinueBtn.disabled = true;
+      resumeContinueBtn.textContent = 'Continuing…';
+      var startNewBtn = $('#aq-btn-resume-start-new');
+      if (startNewBtn) startNewBtn.disabled = true;
+
+      jQuery.ajax({
+        type: 'POST',
+        url: urlResumeSession,
+        data: JSON.stringify({
+          selected_course_id: selectedCourseId,
+          session_id: session.session_id
+        }),
+        contentType: 'application/json',
+        success: function (data) {
+          if (!data || !data.success || !data.question) {
+            state.resumeActionPending = false;
+            if (startNewBtn) startNewBtn.disabled = false;
+            resumeContinueBtn.disabled = false;
+            resumeContinueBtn.textContent = 'Continue Previous Quiz';
+            alert((data && data.error) || 'Could not resume previous quiz.');
+            closeResumePrompt();
+            continueAfterCourseSelection();
+            return;
+          }
+
+          selectedMode = data.selected_mode || selectedMode;
+          selectedContentIds = Array.isArray(data.selected_content_ids) ? data.selected_content_ids.slice() : [];
+          if (typeof data.questions_seen === 'number') state.questionsSeenSoFar = data.questions_seen;
+          if (typeof data.session_score === 'number') state.sessionScore = data.session_score;
+          if (data.max_questions) state.maxQuestionsCurrent = data.max_questions;
+          closeResumePrompt();
+          renderQuestion(data);
+        },
+        error: function () {
+          state.resumeActionPending = false;
+          if (startNewBtn) startNewBtn.disabled = false;
+          resumeContinueBtn.disabled = false;
+          resumeContinueBtn.textContent = 'Continue Previous Quiz';
+          alert('Could not resume previous quiz.');
+          closeResumePrompt();
+          continueAfterCourseSelection();
+        }
+      });
+    };
+  }
+
+  var resumeStartNewBtn = $('#aq-btn-resume-start-new');
+  if (resumeStartNewBtn) {
+    resumeStartNewBtn.onclick = function () {
+      var session = state.resumePromptSession;
+      if (!session || state.resumeActionPending) return;
+
+      state.resumeActionPending = true;
+      resumeStartNewBtn.disabled = true;
+      resumeStartNewBtn.textContent = 'Starting New…';
+      var continueBtn = $('#aq-btn-resume-continue');
+      if (continueBtn) continueBtn.disabled = true;
+
+      jQuery.ajax({
+        type: 'POST',
+        url: urlRetireResumableSession,
+        data: JSON.stringify({
+          selected_course_id: selectedCourseId,
+          session_id: session.session_id
+        }),
+        contentType: 'application/json',
+        success: function (data) {
+          if (!data || !data.success) {
+            state.resumeActionPending = false;
+            resumeStartNewBtn.disabled = false;
+            resumeStartNewBtn.textContent = 'Start a New Quiz';
+            if (continueBtn) continueBtn.disabled = false;
+            alert((data && data.error) || 'Could not start a new quiz right now.');
+            return;
+          }
+
+          closeResumePrompt();
+          continueAfterCourseSelection();
+        },
+        error: function () {
+          state.resumeActionPending = false;
+          resumeStartNewBtn.disabled = false;
+          resumeStartNewBtn.textContent = 'Start a New Quiz';
+          if (continueBtn) continueBtn.disabled = false;
+          alert('Could not start a new quiz right now.');
+        }
+      });
     };
   }
 

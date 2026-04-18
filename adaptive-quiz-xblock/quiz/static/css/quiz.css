@@ -2206,6 +2206,10 @@
   animation: aq-fade-in .18s var(--aq-ease);
 }
 
+.aq-modal-compact {
+  max-width: 560px;
+}
+
 .aq-modal-header {
   display: flex;
   justify-content: space-between;
@@ -2242,6 +2246,31 @@ body.aq-modal-open {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.aq-resume-card {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-md);
+  background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFF 100%);
+}
+
+.aq-resume-summary {
+  font-size: .94rem;
+  font-weight: 700;
+  color: var(--aq-text);
+  margin-bottom: 8px;
+}
+
+.aq-resume-meta {
+  font-size: .82rem;
+  color: var(--aq-text-muted);
+  line-height: 1.55;
+}
+
+.aq-resume-actions {
+  margin-top: 0;
 }
 
 .aq-btn-review-nav {

@@ -1536,6 +1536,110 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         return self._fetch_and_store_question()
 
     @XBlock.json_handler
+    def get_resumable_session(self, data, suffix=""):
+        student_id = self._student_id()
+        active_course = data.get("selected_course_id") or self._active_course_id()
+
+        if active_course:
+            self.selected_course_id = active_course
+
+        resp = self._api(
+            f"/api/quiz/session-resumable/{student_id}/{active_course}",
+            method="GET",
+        )
+
+        if resp and resp.get("success"):
+            return {"success": True, "session": resp.get("session")}
+        return {"success": True, "session": None}
+
+    @XBlock.json_handler
+    def retire_resumable_session(self, data, suffix=""):
+        selected_course = data.get("selected_course_id") or self._active_course_id()
+        session_id = data.get("session_id")
+
+        if not selected_course or not session_id:
+            return {"success": False, "error": "Missing course or session."}
+
+        resp = self._api(
+            "/api/quiz/session/retire",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": selected_course,
+                "session_id": session_id,
+            },
+            timeout=SESSION_START_TIMEOUT,
+        )
+
+        if not resp or not resp.get("success"):
+            return {"success": False, "error": "Could not retire previous session."}
+
+        if self.active_session_id == session_id:
+            self.session_active = False
+            self.active_session_id = ""
+            self.current_question_json = ""
+
+        return {"success": True}
+
+    @XBlock.json_handler
+    def resume_session(self, data, suffix=""):
+        selected_course = data.get("selected_course_id") or self._active_course_id()
+        session_id = data.get("session_id")
+
+        if not selected_course or not session_id:
+            return {"success": False, "error": "Missing course or session."}
+
+        self.selected_course_id = selected_course
+
+        resp = self._api(
+            "/api/quiz/session/resume",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": selected_course,
+                "session_id": session_id,
+            },
+            timeout=SESSION_START_TIMEOUT,
+        )
+
+        if not resp or not resp.get("success") or not resp.get("question"):
+            return {
+                "success": False,
+                "error": (resp or {}).get("error", "Could not resume previous session."),
+            }
+
+        self.diagnostic_pending = False
+        self.diagnostic_items_json = ""
+        self.diagnostic_results_json = ""
+        self.diagnostic_all_content_ids_json = ""
+        self.diagnostic_item_index = 0
+        self.diagnostic_question_index = 0
+        self.pending_focus_topics_json = ""
+
+        self.session_active = True
+        self.active_session_id = resp.get("session_id", session_id)
+        self.session_topics_json = json.dumps(resp.get("topics", []))
+        self.session_source_text = resp.get("resolved_source_text", "")
+        self.session_target_questions = int(resp.get("max_questions", self.max_questions) or self.max_questions)
+        self.questions_seen = int(resp.get("questions_seen", 0) or 0)
+        self.session_score = int(resp.get("session_score", 0) or 0)
+        self.selected_session_mode = resp.get("selected_mode", self.selected_session_mode)
+        self.selected_session_origin = resp.get("session_origin", self.selected_session_origin)
+        self.current_difficulty = int(resp.get("current_difficulty", 3) or 3)
+        self.current_topic = resp.get("next_topic") or resp["question"].get("topic", "")
+        self.current_question_json = json.dumps(resp["question"])
+
+        return {
+            "success": True,
+            "question": resp["question"],
+            "questions_seen": self.questions_seen,
+            "session_score": self.session_score,
+            "max_questions": self.session_target_questions,
+            "current_difficulty": self.current_difficulty,
+            "selected_mode": self.selected_session_mode,
+            "effective_mode": resp.get("effective_mode", self.selected_session_mode),
+            "selected_content_ids": resp.get("selected_content_ids", []),
+        }
+
+    @XBlock.json_handler
     def get_question(self, data, suffix=""):
         """Fetch a new question (called after submitting an answer)."""
         return self._fetch_and_store_question()
