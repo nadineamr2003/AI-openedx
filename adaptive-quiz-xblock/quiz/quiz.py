@@ -765,7 +765,6 @@ help="Default fallback course identifier used if no learner-selected course is a
             <div style="padding:9px 12px; background:#EEF2FF; border:1.5px solid #C7D2FE; border-radius:10px; font-size:.9rem; font-weight:700; color:#2B4EDE; display:inline-block;">
             📖 Lecture
             </div>
-            <span class="aqs-hint">Tutorial and lab support can be added later.</span>
         </div>
 
         <div class="aqs-col-full aqs-field">
@@ -774,8 +773,9 @@ help="Default fallback course identifier used if no learner-selected course is a
         </div>
 
         <div class="aqs-col-full aqs-field">
-            <label class="aqs-label">Course Name <span class="aqs-label-hint">— optional</span></label>
+            <label class="aqs-label">Course Name <span class="aqs-label-hint">— required</span></label>
             <input type="text" id="aqs-ext-course-name" class="aqs-input" placeholder="e.g. Database Systems">
+            <span class="aqs-hint">Required for new saves and updates. Review the parsed value before saving.</span>
         </div>
         </div>
 
@@ -795,6 +795,17 @@ help="Default fallback course identifier used if no learner-selected course is a
         <div class="aqs-field">
         <label class="aqs-label">AI Summary <span class="aqs-label-hint">— reference only</span></label>
         <textarea id="aqs-ext-summary" class="aqs-textarea" rows="3" readonly></textarea>
+        </div>
+
+        <div class="aqs-field" id="aqs-reassessment-field" style="display:none;">
+        <label class="aqs-label" for="aqs-require-reassessment">Assessment Recheck</label>
+        <label style="display:flex; align-items:flex-start; gap:10px; padding:12px 14px; border:1px solid #D7DEEA; border-radius:12px; background:#F8FAFC; cursor:pointer;">
+            <input type="checkbox" id="aqs-require-reassessment" style="margin-top:2px;">
+            <span>
+                <strong style="display:block; color:#183153;">Require students to redo assessment for this lecture</strong>
+                <span class="aqs-hint" style="display:block; margin-top:4px;">Enable this only when the lecture content changed enough to affect student understanding.</span>
+            </span>
+        </label>
         </div>
 
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
@@ -826,6 +837,12 @@ help="Default fallback course identifier used if no learner-selected course is a
     var selectedFile = null;
     var editingContentId = null;
     var editingContentActive = true;
+
+    function aqsRenderReassessmentField() {{
+        var field = document.getElementById("aqs-reassessment-field");
+        if (!field) return;
+        field.style.display = editingContentId ? "" : "none";
+    }}
 
     window.aqsTab = function(name) {{
         ["settings", "content"].forEach(function(t) {{
@@ -976,6 +993,7 @@ help="Default fallback course identifier used if no learner-selected course is a
     document.getElementById("aqs-ext-course-name").value = item.course_name || "";
     document.getElementById("aqs-ext-source").value = item.source_text || "";
     document.getElementById("aqs-ext-summary").value = item.summary || "";
+    document.getElementById("aqs-require-reassessment").checked = false;
 
     document.getElementById("aqs-source-char-count").textContent =
         (item.source_text || "").length.toLocaleString() + " characters";
@@ -985,6 +1003,7 @@ help="Default fallback course identifier used if no learner-selected course is a
 
     editingContentId = item.id || null;
     editingContentActive = item.active !== false;
+    aqsRenderReassessmentField();
 
     var saveBtn = document.getElementById("aqs-btn-save");
     var cancelBtn = document.getElementById("aqs-btn-cancel-edit");
@@ -1001,12 +1020,14 @@ help="Default fallback course identifier used if no learner-selected course is a
 window.aqsCancelEdit = function() {{
     editingContentId = null;
     editingContentActive = true;
+    aqsRenderReassessmentField();
 
     document.getElementById("aqs-ext-title").value = "";
     document.getElementById("aqs-ext-week").value = 1;
     document.getElementById("aqs-ext-course-name").value = "";
     document.getElementById("aqs-ext-source").value = "";
     document.getElementById("aqs-ext-summary").value = "";
+    document.getElementById("aqs-require-reassessment").checked = false;
     document.getElementById("aqs-source-char-count").textContent = "0 characters";
 
     currentTopics = [];
@@ -1071,7 +1092,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     aqsFillEditor({{
         id: null,
         course_id: document.getElementById("aqs-ext-course-id").value || "{self.course_id}",
-        course_name: document.getElementById("aqs-ext-course-name").value || "",
+        course_name: ext.course_name || document.getElementById("aqs-ext-course-name").value || "",
         title: ext.suggested_title || "",
         week: ext.suggested_week || 1,
         topics: Array.isArray(ext.topics) ? ext.topics.slice() : [],
@@ -1134,6 +1155,10 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         aqsStatus("aqs-save-status", "error", "Please enter a Course ID.");
         return;
     }}
+    if (!courseName) {{
+        aqsStatus("aqs-save-status", "error", "Please enter a Course Name.");
+        return;
+    }}
     if (currentTopics.length === 0) {{
         aqsStatus("aqs-save-status", "error", "Please add at least one topic.");
         return;
@@ -1145,15 +1170,17 @@ window.aqsToggleActive = function(contentId, nextActive) {{
 
     var isEdit = !!editingContentId;
     var targetUrl = isEdit ? UPDATE_CONTENT_URL : SAVE_CONTENT_URL;
+    var requireReassessment = !!document.getElementById("aqs-require-reassessment").checked;
 
     var payload = {{
         course_id: courseId,
-        course_name: courseName || null,
+        course_name: courseName,
         title: title,
         week: week,
         topics: currentTopics,
         source_text: sourceText,
-        active: editingContentActive
+        active: editingContentActive,
+        require_reassessment: requireReassessment
     }};
 
     if (isEdit) {{
@@ -1179,7 +1206,13 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                     settingsCourseField.value = courseId;
                 }}
 
-                aqsStatus("aqs-save-status", "success", isEdit ? "Lecture updated successfully." : "Lecture saved successfully.");
+                aqsStatus(
+                    "aqs-save-status",
+                    "success",
+                    isEdit
+                        ? (requireReassessment ? "Lecture updated. Students will redo assessment for this lecture." : "Lecture updated successfully.")
+                        : "Lecture saved successfully."
+                );
                 aqsCancelEdit();
                 aqsLoadExisting();
             }} else {{
@@ -1976,7 +2009,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         """
         Save reviewed lecture content to MongoDB.
         """
-        required = ["course_id", "title", "week", "topics", "source_text"]
+        required = ["course_id", "course_name", "title", "week", "topics", "source_text"]
         for field in required:
             if not data.get(field):
                 return {"success": False, "error": f"Missing required field: {field}"}
@@ -1990,6 +2023,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "topics": data["topics"],
             "source_text": data["source_text"],
             "active": True,
+            "require_reassessment": bool(data.get("require_reassessment", False)),
         }
 
         resp = self._api("/api/quiz/content/add", payload=payload)
@@ -1999,7 +2033,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
     
     @XBlock.json_handler
     def update_content_item(self, data, suffix=""):
-        required = ["content_id", "course_id", "title", "week", "topics", "source_text"]
+        required = ["content_id", "course_id", "course_name", "title", "week", "topics", "source_text"]
         for field in required:
             if not data.get(field):
                 return {"success": False, "error": f"Missing required field: {field}"}
@@ -2013,6 +2047,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "topics": data["topics"],
             "source_text": data["source_text"],
             "active": bool(data.get("active", True)),
+            "require_reassessment": bool(data.get("require_reassessment", False)),
         }
 
         resp = self._api("/api/quiz/content/update", payload=payload)

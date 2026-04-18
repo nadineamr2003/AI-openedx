@@ -237,6 +237,7 @@ Your job is to return METADATA ONLY.
 
 Return ONLY this JSON:
 {{
+  "course_name": "...",
   "suggested_title": "...",
   "suggested_week": 1,
   "topics": ["topic1", "topic2", "topic3", "topic4"],
@@ -244,6 +245,11 @@ Return ONLY this JSON:
 }}
 
 Rules:
+- course_name:
+  - extract the formal course name if it is clearly present in the lecture text or cover/header material
+  - prefer the full course title over short codes when both appear
+  - if the course name is not clear, return an empty string
+
 - suggested_title:
   - must be formal, descriptive, and course-appropriate
   - do NOT abbreviate casually
@@ -2348,7 +2354,7 @@ async def extract_content_metadata(sample_text: str) -> dict:
     """
     Use the LLM fallback chain to extract metadata only from lecture text.
     Returns:
-      suggested_title, suggested_week, topics, summary
+      course_name, suggested_title, suggested_week, topics, summary
     """
     prompt = CONTENT_EXTRACTION_PROMPT.format(text=sample_text)
 
@@ -2392,7 +2398,7 @@ async def extract_content_metadata(sample_text: str) -> dict:
 
                     result = json.loads(raw)
 
-                    required = ["suggested_title", "suggested_week", "topics", "summary"]
+                    required = ["course_name", "suggested_title", "suggested_week", "topics", "summary"]
                     if not all(k in result for k in required):
                         msg = f"[LLM] Metadata extraction missing fields provider={provider_name} model={model}"
                         logger.warning(msg)
@@ -2404,6 +2410,8 @@ async def extract_content_metadata(sample_text: str) -> dict:
                         logger.warning(msg)
                         all_failures.append(msg)
                         continue
+
+                    result["course_name"] = str(result.get("course_name") or "").strip()
 
                     try:
                         result["suggested_week"] = int(result["suggested_week"])

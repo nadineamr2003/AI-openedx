@@ -2130,6 +2130,16 @@ async def _replenish_cache(
     finally:
         _REPLENISH_IN_FLIGHT.discard(bucket_key)
         
+def _get_content_source_version(doc: dict) -> str:
+    return str(
+        doc.get("assessment_version")
+        or doc.get("updated_at")
+        or doc.get("uploaded_at")
+        or doc.get("_id")
+        or ""
+    )
+
+
 def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dict:
     item = {
         "id": str(doc["_id"]),
@@ -2140,7 +2150,7 @@ def _serialize_content_item(doc: dict, include_source_text: bool = False) -> dic
         "title": doc.get("title"),
         "topics": doc.get("topics", []),
         "active": doc.get("active", True),
-        "source_version": doc.get("updated_at") or doc.get("uploaded_at") or str(doc["_id"]),
+        "source_version": _get_content_source_version(doc),
     }
     if include_source_text:
         item["source_text"] = doc.get("source_text", "")
@@ -2868,11 +2878,7 @@ async def session_start(req: GenerateRequest):
 
         topics = item.get("topics", [])
         source_text = item.get("source_text", "")
-        source_version = (
-            item.get("updated_at")
-            or item.get("uploaded_at")
-            or str(item["_id"])
-        )
+        source_version = _get_content_source_version(item)
 
         resolved_topics.extend(topics)
         resolved_source_text += "\n\n" + source_text
@@ -3282,11 +3288,7 @@ async def session_finalize(req: SessionFinalizeRequest):
 
         resolved_items.append({
             "content_id": str(item["_id"]),
-            "source_version": (
-                item.get("updated_at")
-                or item.get("uploaded_at")
-                or str(item["_id"])
-            ),
+            "source_version": _get_content_source_version(item),
         })
 
     # Deduplicate topics while preserving order
@@ -3680,7 +3682,7 @@ async def parse_content(data: dict):
     Phase 1 rules:
     - lecture only
     - source_text comes from deterministic extraction, not the LLM
-    - LLM only suggests title, week, topics, summary
+    - LLM only suggests course name, title, week, topics, summary
     """
     pdf_base64 = data.get("pdf_base64", "")
     raw_text_input = data.get("raw_text", "")
@@ -3727,6 +3729,7 @@ async def parse_content(data: dict):
     return {
         "success": True,
         "extracted": {
+            "course_name": metadata.get("course_name", ""),
             "suggested_title": metadata.get("suggested_title", ""),
             "suggested_week": metadata.get("suggested_week", 1),
             "suggested_content_type": "lecture",
@@ -3743,8 +3746,10 @@ async def parse_content(data: dict):
 async def add_content(item: ContentItem):
     """Instructor adds a content item (paste text + metadata)."""
     db = get_db()
-    doc = item.model_dump()
-    doc["uploaded_at"] = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc = item.model_dump(exclude={"require_reassessment"})
+    doc["uploaded_at"] = now_iso
+    doc["assessment_version"] = now_iso
     await db.course_content.insert_one(doc)
     return {"success": True, "message": f"Content '{item.title}' added."}
 
@@ -3752,26 +3757,31 @@ async def add_content(item: ContentItem):
 async def update_content_item(req: ContentUpdateRequest):
     db = get_db()
     oid = _parse_object_id(req.content_id)
+    existing_doc = await db.course_content.find_one({"_id": oid})
+    if not existing_doc:
+        raise HTTPException(status_code=404, detail="Content item not found.")
 
-    result = await db.course_content.update_one(
+    now_iso = datetime.now(timezone.utc).isoformat()
+    current_assessment_version = _get_content_source_version(existing_doc)
+    next_assessment_version = now_iso if req.require_reassessment else current_assessment_version
+
+    await db.course_content.update_one(
         {"_id": oid},
         {
             "$set": {
-    "course_id": req.course_id,
-    "course_name": req.course_name,
-    "week": req.week,
-    "content_type": "lecture",
-    "title": req.title,
-    "topics": req.topics,
-    "source_text": req.source_text,
-    "active": req.active,
-    "updated_at": datetime.now(timezone.utc).isoformat(),
-}
+                "course_id": req.course_id,
+                "course_name": req.course_name,
+                "week": req.week,
+                "content_type": "lecture",
+                "title": req.title,
+                "topics": req.topics,
+                "source_text": req.source_text,
+                "active": req.active,
+                "updated_at": now_iso,
+                "assessment_version": next_assessment_version,
+            }
         }
     )
-
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Content item not found.")
 
     return {"success": True, "message": "Content item updated successfully."}
 

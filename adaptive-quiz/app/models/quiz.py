@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class GenerateRequest(BaseModel):
@@ -114,13 +114,22 @@ class MasteryResponse(BaseModel):
 
 class ContentItem(BaseModel):
     course_id:    str
-    course_name:  str | None = None
+    course_name:  str
     week:         int
     content_type: str
     title:        str
     topics:       list[str]
     source_text:  str
     active:       bool = True
+    require_reassessment: bool = False
+
+    @field_validator("course_name")
+    @classmethod
+    def validate_course_name(cls, value: str) -> str:
+        course_name = str(value or "").strip()
+        if not course_name:
+            raise ValueError("course_name is required")
+        return course_name
 
 
 class ContentListResponse(BaseModel):
@@ -131,12 +140,21 @@ class ContentListResponse(BaseModel):
 class ContentUpdateRequest(BaseModel):
     content_id:   str
     course_id:    str
-    course_name:  str | None = None
+    course_name:  str
     week:         int
     title:        str
     topics:       list[str]
     source_text:  str
     active:       bool = True
+    require_reassessment: bool = False
+
+    @field_validator("course_name")
+    @classmethod
+    def validate_course_name(cls, value: str) -> str:
+        course_name = str(value or "").strip()
+        if not course_name:
+            raise ValueError("course_name is required")
+        return course_name
 
 
 class ContentToggleRequest(BaseModel):

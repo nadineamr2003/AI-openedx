@@ -571,7 +571,7 @@ def make_content_key(content_id: str, source_version: str) -> str:
     """
     Stable version-aware key for diagnostic tracking.
     content_id   = Mongo _id string of the content item
-    source_version = uploaded_at ISO string (or hash) — invalidates on edit
+    source_version = assessment-relevant version string for the lecture
     """
     return f"{content_id}:{source_version}"
 
