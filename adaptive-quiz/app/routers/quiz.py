@@ -40,7 +40,7 @@ from app.db.mongodb import get_db
 import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
-CACHE_PROMPT_VERSION = "quiz-cache-v2"
+CACHE_PROMPT_VERSION = "quiz-cache-v4"
 CACHE_UNUSED_TTL_DAYS = 14
 CACHE_USED_TTL_DAYS = 7
 DEFAULT_CACHE_TARGET = 1
@@ -392,6 +392,7 @@ async def _generate_question_with_soft_dedupe(
             topic=topic,
             difficulty=difficulty,
             source_text=source_text,
+            course_id=course_id,
         )
         question_hash = _question_hash_for_tracking(question)
 
@@ -2426,7 +2427,12 @@ async def _replenish_cache(
         for _ in range(needed):
             try:
                 await asyncio.sleep(2)
-                q = await generate_question(topic, difficulty, source_text)
+                q = await generate_question(
+                    topic,
+                    difficulty,
+                    source_text,
+                    course_id=course_id,
+                )
                 now = datetime.now(timezone.utc)
                 generated_at = now.isoformat()
                 expires_at = _cache_unused_expires_at(now)
@@ -3420,6 +3426,7 @@ async def _generate_diagnostic_question_with_fallback(
     topic: str,
     difficulty: int,
     source_text: str,
+    course_id: str | None = None,
 ) -> dict:
     async def _attempt_with_budget(target_difficulty: int) -> tuple[str, dict | None, dict | None]:
         try:
@@ -3427,6 +3434,7 @@ async def _generate_diagnostic_question_with_fallback(
                 topic=topic,
                 difficulty=target_difficulty,
                 source_text=source_text,
+                course_id=course_id,
                 max_provider_model_attempts=DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS,
                 allow_internal_fallback=False,
                 generation_profile="diagnostic",
@@ -3516,6 +3524,7 @@ async def diagnostic_generate(req: DiagnosticGenerateRequest):
             topic=plan["topic"],
             difficulty=plan["difficulty"],
             source_text=req.source_text,
+            course_id=req.course_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -4083,7 +4092,8 @@ async def support_similar(req: GenerateRequest):
         question = await generate_question(
             topic=req.topic,
             difficulty=req.difficulty,
-            source_text=req.source_text
+            source_text=req.source_text,
+            course_id=req.course_id,
         )
         return question
     except ValueError as e:

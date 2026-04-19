@@ -214,6 +214,8 @@ Question quality rules:
 - Never ask about who teaches the course, staff members, email addresses, office hours, access codes, or grade distribution
 - Do NOT generate misconception-style stems such as "What is a misconception..." or "Which wrong assumption..."
 - If the source text is too weak to support a high-quality question on this topic, choose a safer factual angle rather than inventing nuance.
+{course_style_block}
+{hard_quality_block}
 
 Source text:
 {source_text}
@@ -313,11 +315,372 @@ HIGH_DIFFICULTY_BRITTLE_REASONS = {
     "unsupported_numeric_detail",
     "too_many_out_of_source_specifics",
     "too_close_to_source",
+    "generic_benefit_stem_high_difficulty",
+    "ambiguous_multi_positive_options_high_difficulty",
+    "slogan_recall_high_difficulty",
+    "stem_option_mismatch_named_concept",
+    "stem_option_mismatch_described_concept",
+}
+
+LAST_RESORT_BLOCKING_REASONS = {
+    "plain_recall_high_difficulty",
+    "too_direct_high_difficulty",
+    "generic_benefit_stem_high_difficulty",
+    "ambiguous_multi_positive_options_high_difficulty",
+    "slogan_recall_high_difficulty",
+    "stem_option_mismatch_named_concept",
+    "stem_option_mismatch_described_concept",
+}
+
+NAMED_CONCEPT_ALIASES = {
+    "command": ["command pattern"],
+    "observer": ["observer pattern"],
+    "strategy": ["strategy pattern"],
+    "factory_method": ["factory method", "factory pattern", "abstract factory"],
+    "decorator": ["decorator pattern"],
+    "adapter": ["adapter pattern"],
+    "singleton": ["singleton pattern"],
+    "dependency_inversion": [
+        "dependency inversion principle",
+        "dependency inversion",
+        "dip",
+    ],
+    "open_closed": [
+        "open closed principle",
+        "open-closed principle",
+        "ocp",
+    ],
+    "single_responsibility": [
+        "single responsibility principle",
+        "single responsibility",
+        "srp",
+    ],
+    "interface_segregation": [
+        "interface segregation principle",
+        "interface segregation",
+        "isp",
+    ],
+    "liskov_substitution": [
+        "liskov substitution principle",
+        "liskov substitution",
+        "lsp",
+    ],
+    "abstraction": ["abstraction"],
+    "information_hiding": ["information hiding", "encapsulation"],
+    "coupling": ["coupling", "low coupling", "tight coupling"],
+    "cohesion": ["cohesion", "high cohesion", "low cohesion"],
+}
+
+OPTION_ONLY_CONCEPT_ALIASES = {
+    "command": ["command"],
+    "observer": ["observer"],
+    "strategy": ["strategy"],
+    "factory_method": ["factory"],
+    "decorator": ["decorator"],
+    "adapter": ["adapter"],
+    "singleton": ["singleton"],
+}
+
+DESCRIBED_CONCEPT_HINTS = {
+    "command": {
+        "threshold": 2,
+        "groups": [
+            ("request as an object", "request as object", "encapsulate a request"),
+            ("remote control", "toolbar button", "menu item"),
+            ("invoker", "receiver"),
+            ("undo", "redo"),
+        ],
+    },
+    "observer": {
+        "threshold": 2,
+        "groups": [
+            ("notify", "notification"),
+            ("observer", "observers", "subscriber", "subscribers", "listener", "listeners"),
+            ("subject", "one-to-many", "state changes", "state change"),
+        ],
+    },
+    "strategy": {
+        "threshold": 2,
+        "groups": [
+            ("family of algorithms", "algorithm", "algorithms"),
+            ("swap", "switch", "choose"),
+            ("runtime", "at runtime", "without changing the client"),
+        ],
+    },
+    "dependency_inversion": {
+        "threshold": 2,
+        "groups": [
+            ("high-level module", "high level module"),
+            ("abstraction", "interface"),
+            ("concrete implementation", "low-level module", "low level module"),
+        ],
+    },
+    "open_closed": {
+        "threshold": 2,
+        "groups": [
+            ("open for extension", "closed for modification"),
+            ("extend", "extension"),
+            ("without modifying", "without changing existing"),
+        ],
+    },
 }
 
 
 def _brittle_reason_subset(reasons: list[str]) -> list[str]:
     return [reason for reason in reasons if reason in HIGH_DIFFICULTY_BRITTLE_REASONS]
+
+
+def _blocks_last_resort_accept(reasons: list[str]) -> bool:
+    return any(reason in LAST_RESORT_BLOCKING_REASONS for reason in reasons)
+
+
+def _normalize_course_signal(course_id: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(course_id or "").strip().lower())
+
+
+def _is_csen603_course(course_id: str | None) -> bool:
+    return "csen603" in _normalize_course_signal(course_id)
+
+
+def _topic_contains_any(topic: str, keywords: list[str]) -> bool:
+    normalized_topic = " ".join(str(topic or "").strip().lower().split())
+    return any(keyword in normalized_topic for keyword in keywords)
+
+
+def _topic_is_design_or_pattern_family(topic: str) -> bool:
+    return _topic_contains_any(
+        topic,
+        [
+            "pattern", "solid", "design", "refactor", "principle",
+            "abstraction", "information hiding", "coupling", "cohesion",
+            "oop", "object oriented",
+        ],
+    )
+
+
+def _build_hard_question_quality_block(
+    course_id: str | None,
+    topic: str,
+    difficulty: int,
+    generation_profile: str,
+) -> str:
+    if difficulty < 4:
+        return ""
+
+    if generation_profile == "diagnostic":
+        lines = [
+            "Hard diagnostic quality gate:",
+            "- Keep the question clean and answerable, but do NOT make it plain slogan or definition recall with harder wording.",
+            "- Prefer a short applied discrimination, correction, or best-choice-in-context over a generic benefit or main-goal stem.",
+            "- If the stem clearly points to a named concept, principle, or pattern, the intended option must explicitly appear among the answer choices.",
+        ]
+    else:
+        lines = [
+            "Hard-question quality gate:",
+            "- Do NOT write a hard or very hard question that is only definition recall, slogan recall, or a principle tagline with harder wording.",
+            "- Avoid generic stems like 'What is the primary benefit of...', 'What is the key characteristic of...', or 'What is the main goal of...' unless the options are sharply separated and only one answer is clearly best.",
+            "- If the stem clearly points to a named concept, principle, or pattern, the intended option must explicitly appear among the answer choices.",
+            "- Prefer a short concrete situation, tradeoff, violation, smell, correction, refactor, or best-choice-in-context over a generic benefit or slogan question.",
+        ]
+
+    if _is_csen603_course(course_id) and _topic_is_design_or_pattern_family(topic):
+        lines.append(
+            "- For CSEN603 design or pattern topics, do NOT ask a hard question that merely recalls a design-pattern or SOLID slogan. Use a short design situation, violation, tradeoff, or refactoring choice instead."
+        )
+
+    return "\n" + "\n".join(lines)
+
+
+def _csen603_style_hint(topic: str, difficulty: int, generation_profile: str) -> str:
+    topic_text = str(topic or "").strip().lower()
+    style_map = [
+        (
+            [
+                "requirement", "use case", "stakeholder", "user story",
+                "verifiab", "include", "extend", "nfr", "fr",
+            ],
+            (
+                "Prefer short stakeholder, functional-vs-non-functional classification, "
+                "verifiability check, include-vs-extend, user-story quality, dependency, "
+                "or ambiguity scenarios. Avoid pure textbook-definition stems when a "
+                "classification or issue-identification scenario is possible."
+            ),
+        ),
+        (
+            [
+                "architecture", "rest", "soa", "service", "api",
+                "stateless", "stateful", "redundan", "failure", "boundary",
+            ],
+            (
+                "Prefer architecture matching, tradeoff, redundancy, single-point-of-failure, "
+                "service-boundary, stateless-vs-stateful, or best-fit architecture choice "
+                "scenarios. Avoid generic definition stems when a short constraint-based "
+                "situation can be used."
+            ),
+        ),
+        (
+            [
+                "ui", "ux", "usability", "heuristic", "accessib",
+                "cta", "feedback", "interaction", "interface",
+            ],
+            (
+                "Prefer violated-principle, redesign, visible call-to-action, visible state "
+                "or feedback, error-handling, accessibility, recognition-vs-recall, or "
+                "memory-load scenarios. Avoid generic 'what is usability engineering' style "
+                "stems unless difficulty is very low."
+            ),
+        ),
+        (
+            [
+                "pattern", "solid", "design", "refactor", "extensib",
+                "single responsibility", "open closed", "liskov",
+                "interface segregation", "dependency inversion",
+            ],
+            (
+                "Prefer pattern identification from a short situation, role assignment, "
+                "extension or refactoring, SOLID-violation identification, or best-design-choice "
+                "scenarios. Avoid simple definition recall when a small design situation can be used."
+            ),
+        ),
+        (
+            [
+                "diagram", "uml", "model", "multiplicity", "relation",
+                "abstraction", "class diagram", "sequence diagram",
+                "activity diagram", "state diagram",
+            ],
+            (
+                "Prefer correction, wrong relation or multiplicity, abstraction mismatch, "
+                "or extensibility or modeling-improvement scenarios. Avoid purely naming "
+                "diagram types unless difficulty is very low."
+            ),
+        ),
+        (
+            [
+                "testing", "test", "verification", "validation", "coverage",
+                "integration", "stub", "driver",
+            ],
+            (
+                "Prefer test-type classification, driver-vs-stub, integration strategy choice, "
+                "boundary or partition reasoning, coverage reasoning, or applied testing scenarios. "
+                "Avoid generic definition stems unless difficulty is very low."
+            ),
+        ),
+        (
+            [
+                "agile", "scrum", "sprint", "velocity", "burndown",
+                "kano", "moscow", "backlog", "ceremony",
+            ],
+            (
+                "Prefer role identification, sprint planning or allocation, prioritization, "
+                "ceremony interpretation, burndown, backlog, or story-point scenarios. "
+                "Avoid pure manifesto-style definition questions unless difficulty is very low."
+            ),
+        ),
+        (
+            [
+                "maintenance", "git", "ci", "cd", "smell",
+                "version control", "continuous integration", "continuous delivery",
+            ],
+            (
+                "Prefer workflow or collaboration situations, smell identification, "
+                "refactoring or maintenance-type classification, version-control interpretation, "
+                "or CI/CD interpretation scenarios. Avoid overly tool-specific trivia not grounded "
+                "in the lecture text."
+            ),
+        ),
+    ]
+
+    for keywords, hint in style_map:
+        if _topic_contains_any(topic_text, keywords):
+            return hint
+
+    return (
+        "Prefer a short realistic software-engineering scenario, classification, best-choice, "
+        "or issue-identification stem over a pure definition only when the lecture text supports it."
+    )
+
+
+def _csen603_difficulty_style_hint(difficulty: int, generation_profile: str) -> str:
+    if generation_profile == "diagnostic":
+        return (
+            "Diagnostic tone: keep the question clean, answerable, and modestly applied. "
+            "Prefer short classification or simple applied identification over a generic definition "
+            "when the topic allows it, but avoid tricky or heavy multi-step reasoning."
+        )
+
+    if difficulty <= 1:
+        return (
+            "Difficulty 1: keep it very answerable. Prefer concrete applied classification over raw "
+            "definition when possible, but do NOT make it reasoning-heavy."
+        )
+    if difficulty == 2:
+        return (
+            "Difficulty 2: prefer a simple short scenario or direct applied identification. "
+            "Avoid pure textbook-definition stems if a cleaner applied stem exists."
+        )
+    if difficulty == 3:
+        return (
+            "Difficulty 3: make the scenario style clearly visible. Prefer short applied situations, "
+            "classification, best choice, or redesign selection."
+        )
+    if difficulty == 4:
+        return (
+            "Difficulty 4: prefer applied reasoning, best answer among plausible options, tradeoff, "
+            "correction, or interpretation."
+        )
+    return (
+        "Difficulty 5: prefer nuanced but still lecture-grounded scenarios with plausible alternatives, "
+        "without adding unsupported external details."
+    )
+
+
+def _csen603_stem_guardrail_hint(difficulty: int, generation_profile: str) -> str:
+    if generation_profile == "diagnostic":
+        return (
+            "Still avoid generic stems like 'What is the primary goal of...' when a short applied or "
+            "classification form is cleanly possible."
+        )
+    if difficulty <= 2:
+        return (
+            "Avoid generic stems like 'What is the primary goal of...' or 'Which principle should be prioritized?' "
+            "when a cleaner applied classification or identification form is available, but keep low difficulty simple."
+        )
+    return (
+        "Strongly discourage generic stems like 'What is the primary goal of...', "
+        "'Which principle should be prioritized?', or 'What is likely to happen if...' unless the lecture "
+        "topic truly only supports that style."
+    )
+
+
+def _build_course_style_block(
+    course_id: str | None,
+    topic: str,
+    difficulty: int,
+    generation_profile: str,
+) -> str:
+    if not _is_csen603_course(course_id):
+        return ""
+
+    style_hint = _csen603_style_hint(topic, difficulty, generation_profile)
+    difficulty_hint = _csen603_difficulty_style_hint(difficulty, generation_profile)
+    stem_guardrail_hint = _csen603_stem_guardrail_hint(difficulty, generation_profile)
+    return f"""
+
+CSEN603 exam-style framing:
+- Prefer scenario-based MCQs over pure definitions when the lecture text supports it.
+- Prefer short applied scenarios, classification, issue-identification, best-method or best-pattern or best-test or best-design-choice, redesign, correction, or improvement questions whenever the lecture text supports them.
+- Use realistic but minimal software engineering situations grounded in the provided lecture text, such as a small team situation, short UI behavior, short architecture or design constraint, short testing or integration situation, short sprint or planning scenario, or short maintenance or version-control situation.
+- Favor issue identification, concept classification, choosing the best method, pattern, or testing approach, design repair or improvement, interpreting a short concrete situation, and justifying the best answer among plausible alternatives.
+- Topic-family style hint: {style_hint}
+- Difficulty-sensitive guidance: {difficulty_hint}
+- Stem preference guardrail: {stem_guardrail_hint}
+- You may frame the question as a realistic software engineering scenario.
+- However, the correct answer must still be clearly inferable from the provided lecture text.
+- Do NOT rely on external assignment text, exam text, tool, platform, company, or workflow details not supported by the source.
+- Do NOT invent GitHub-specific, Jira-specific, CI/CD platform-specific, or deployment-specific behavior unless the lecture text clearly supports that level of detail.
+- Keep the scenario minimal. If an applied framing would become unsupported or overly complex, choose the safest grounded applied form available.
+- If the lecture text does not support a realistic scenario cleanly, prefer a grounded conceptual or applied question instead.
+""".rstrip()
 
 
 def _build_hard_short_scope_policy(
@@ -1776,6 +2139,248 @@ def _looks_like_reasoning_question(question_text: str) -> bool:
     return any(marker in text for marker in REASONING_MARKERS)
 
 
+def _generic_benefit_stem_markers() -> tuple[str, ...]:
+    return (
+        "primary benefit",
+        "main benefit",
+        "key benefit",
+        "primary goal",
+        "main goal",
+        "key characteristic",
+        "main characteristic",
+        "main purpose",
+        "primary purpose",
+        "which principle should be prioritized",
+        "which principle is most important",
+    )
+
+
+def _broad_positive_option_markers() -> tuple[str, ...]:
+    return (
+        "flexibility",
+        "extensibility",
+        "maintainability",
+        "reusability",
+        "scalability",
+        "modularity",
+        "testability",
+        "usability",
+        "reliability",
+        "readability",
+        "simplicity",
+        "consistency",
+        "adaptability",
+        "decoupling",
+        "low coupling",
+        "high cohesion",
+        "abstraction",
+        "information hiding",
+        "encapsulation",
+        "improve",
+        "improves",
+        "increase",
+        "increases",
+        "reduce",
+        "reduces",
+        "enhance",
+        "enhances",
+    )
+
+
+def _slogan_recall_stem_markers() -> tuple[str, ...]:
+    return (
+        "which principle states",
+        "which principle emphasizes",
+        "which principle suggests",
+        "which principle says",
+        "what is the main idea of",
+        "what does the principle of",
+        "which design principle emphasizes",
+        "which principle is described by",
+    )
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _option_texts(q: dict) -> list[str]:
+    return [
+        str(text).strip()
+        for text in (q.get("options", {}) or {}).values()
+        if str(text).strip()
+    ]
+
+
+def _stem_asks_for_named_concept_choice(question_text: str) -> bool:
+    text = _normalized_text(question_text)
+    if not text:
+        return False
+
+    direct_markers = (
+        "which pattern",
+        "what pattern",
+        "which design pattern",
+        "which principle",
+        "what principle",
+        "which concept",
+        "what concept",
+        "which term",
+        "what term",
+        "which approach",
+        "which design choice",
+        "best identifies",
+        "best matches",
+        "best fits",
+        "is the clearest example of",
+    )
+    if any(marker in text for marker in direct_markers):
+        return True
+
+    return (
+        "best describes" in text
+        and any(marker in text for marker in ("pattern", "principle", "concept", "design"))
+    )
+
+
+def _stem_implies_named_concept(question_text: str) -> str | None:
+    text = _normalized_text(question_text)
+    matches = []
+    for canonical, aliases in NAMED_CONCEPT_ALIASES.items():
+        matched_aliases = [alias for alias in aliases if alias in text]
+        if matched_aliases:
+            matches.append((canonical, max(len(alias) for alias in matched_aliases)))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda item: item[1], reverse=True)
+    return matches[0][0]
+
+
+def _options_include_named_concept(q: dict, canonical: str) -> bool:
+    aliases = list(NAMED_CONCEPT_ALIASES.get(canonical, []))
+    aliases.extend(OPTION_ONLY_CONCEPT_ALIASES.get(canonical, []))
+    option_blob = _normalized_text(" ".join(_option_texts(q)))
+    return any(alias in option_blob for alias in aliases)
+
+
+def _stem_implies_described_concept(question_text: str) -> str | None:
+    text = _normalized_text(question_text)
+    best_match = None
+    best_score = 0
+
+    for canonical, config in DESCRIBED_CONCEPT_HINTS.items():
+        groups = config.get("groups", [])
+        threshold = int(config.get("threshold", 2) or 2)
+        score = 0
+        for group in groups:
+            if any(phrase in text for phrase in group):
+                score += 1
+        if score >= threshold and score > best_score:
+            best_match = canonical
+            best_score = score
+
+    return best_match
+
+
+def _high_difficulty_uses_generic_benefit_stem(q: dict) -> bool:
+    question_text = _normalized_text(str(q.get("question", "")))
+    if not question_text:
+        return False
+
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4:
+        return False
+
+    if _has_high_difficulty_reasoning_layer(question_text):
+        return False
+
+    return any(marker in question_text for marker in _generic_benefit_stem_markers())
+
+
+def _is_broad_positive_option(option_text: str) -> bool:
+    text = _normalized_text(option_text)
+    if not text:
+        return False
+
+    if any(negation in text for negation in ("not ", "avoid ", "prevent ", "reduce risk", "less ")):
+        return False
+
+    if len(text.split()) > 9:
+        return False
+
+    return any(marker in text for marker in _broad_positive_option_markers())
+
+
+def _high_difficulty_has_ambiguous_multi_positive_options(q: dict) -> bool:
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4:
+        return False
+
+    question_text = _normalized_text(str(q.get("question", "")))
+    if not question_text or not any(marker in question_text for marker in _generic_benefit_stem_markers()):
+        return False
+
+    positive_options = [text for text in _option_texts(q) if _is_broad_positive_option(text)]
+    return len(positive_options) >= 2
+
+
+def _high_difficulty_is_slogan_recall(q: dict) -> bool:
+    question_text = _normalized_text(str(q.get("question", "")))
+    if not question_text:
+        return False
+
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if difficulty < 4:
+        return False
+
+    if _has_high_difficulty_reasoning_layer(question_text):
+        return False
+
+    if any(marker in question_text for marker in _slogan_recall_stem_markers()):
+        return True
+
+    return (
+        _looks_like_plain_recall_question(question_text)
+        and any(
+            marker in question_text
+            for marker in ("principle", "pattern", "benefit", "goal", "characteristic", "purpose")
+        )
+    )
+
+
+def _stem_option_mismatch_reason(q: dict) -> str | None:
+    question_text = str(q.get("question", ""))
+    if not question_text:
+        return None
+
+    if not _stem_asks_for_named_concept_choice(question_text):
+        return None
+
+    named_concept = _stem_implies_named_concept(question_text)
+    if named_concept and not _options_include_named_concept(q, named_concept):
+        return "stem_option_mismatch_named_concept"
+
+    described_concept = _stem_implies_described_concept(question_text)
+    if described_concept and not _options_include_named_concept(q, described_concept):
+        return "stem_option_mismatch_described_concept"
+
+    return None
+
+
 def _difficulty_mismatch_reasons(
     q: dict,
     source_text: str | None = None,
@@ -1790,11 +2395,24 @@ def _difficulty_mismatch_reasons(
     except Exception:
         difficulty = 3
 
+    stem_option_mismatch_reason = _stem_option_mismatch_reason(q)
+    if stem_option_mismatch_reason:
+        reasons.append(stem_option_mismatch_reason)
+
     if difficulty >= 4 and _looks_like_plain_recall_question(question_text):
         reasons.append("plain_recall_high_difficulty")
 
     if difficulty >= 4 and _high_difficulty_looks_too_direct(q):
         reasons.append("too_direct_high_difficulty")
+
+    if difficulty >= 4 and _high_difficulty_uses_generic_benefit_stem(q):
+        reasons.append("generic_benefit_stem_high_difficulty")
+
+    if difficulty >= 4 and _high_difficulty_has_ambiguous_multi_positive_options(q):
+        reasons.append("ambiguous_multi_positive_options_high_difficulty")
+
+    if difficulty >= 4 and _high_difficulty_is_slogan_recall(q):
+        reasons.append("slogan_recall_high_difficulty")
 
     if difficulty >= 4 and _high_difficulty_distractors_look_too_weak(q):
         if validation_profile == "diagnostic" and _diagnostic_allows_borderline_distractors(q):
@@ -1829,6 +2447,7 @@ async def _generate_question_once(
     topic: str,
     difficulty: int,
     source_text: str,
+    course_id: str | None = None,
     return_metadata: bool = False,
     max_provider_model_attempts: int | None = None,
     generation_profile: str = "default",
@@ -1888,11 +2507,32 @@ async def _generate_question_once(
             effective_attempt_budget,
         )
 
+    course_style_block = _build_course_style_block(
+        course_id,
+        topic,
+        difficulty,
+        generation_profile,
+    )
+    hard_quality_block = _build_hard_question_quality_block(
+        course_id,
+        topic,
+        difficulty,
+        generation_profile,
+    )
+    if course_style_block:
+        logger.info(
+            "[LLM] Course-specific prompt conditioning enabled course=%s topic=%s",
+            course_id,
+            topic,
+        )
+
     prompt = PROMPT_TEMPLATE.format(
         variation=variation,
         topic=topic,
         difficulty_label=difficulty_label,
         difficulty=difficulty,
+        course_style_block=course_style_block,
+        hard_quality_block=hard_quality_block,
         source_text=selected_context
     )
 
@@ -2020,7 +2660,11 @@ async def _generate_question_once(
                             )
 
                         core_valid, _ = validate_question_core_only(q)
-                        if core_valid and reserve_candidate is None:
+                        if (
+                            core_valid
+                            and reserve_candidate is None
+                            and not _blocks_last_resort_accept(reasons)
+                        ):
                             reserve_candidate = {
                                 "question": q,
                                 "provider": provider_name,
@@ -2029,6 +2673,13 @@ async def _generate_question_once(
                             }
                             logger.info(
                                 "[LLM] Reserve candidate stored provider=%s model=%s reasons=%s",
+                                provider_name,
+                                model,
+                                reason_text,
+                            )
+                        elif core_valid and _blocks_last_resort_accept(reasons):
+                            logger.info(
+                                "[LLM] Reserve candidate skipped provider=%s model=%s blocking_reasons=%s",
                                 provider_name,
                                 model,
                                 reason_text,
@@ -2197,6 +2848,7 @@ async def generate_question_with_metadata(
     difficulty: int,
     source_text: str,
     *,
+    course_id: str | None = None,
     max_provider_model_attempts: int | None = None,
     allow_internal_fallback: bool = True,
     generation_profile: str = "default",
@@ -2210,6 +2862,7 @@ async def generate_question_with_metadata(
                 topic,
                 current_difficulty,
                 source_text,
+                course_id=course_id,
                 return_metadata=True,
                 max_provider_model_attempts=max_provider_model_attempts,
                 generation_profile=generation_profile,
@@ -2252,8 +2905,19 @@ async def generate_question_with_metadata(
             current_difficulty = next_difficulty
 
 
-async def generate_question(topic: str, difficulty: int, source_text: str) -> dict:
-    question, _ = await generate_question_with_metadata(topic, difficulty, source_text)
+async def generate_question(
+    topic: str,
+    difficulty: int,
+    source_text: str,
+    *,
+    course_id: str | None = None,
+) -> dict:
+    question, _ = await generate_question_with_metadata(
+        topic,
+        difficulty,
+        source_text,
+        course_id=course_id,
+    )
     return question
 
 # Rewrite the explanation in much simpler language.
