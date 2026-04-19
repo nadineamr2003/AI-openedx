@@ -391,7 +391,7 @@
         </div>
 
         <div class="aq-recovery-card aq-hidden" id="aq-recovery-card">
-          <div class="aq-recovery-card-title">Need a guided step?</div>
+          <div class="aq-recovery-card-title" id="aq-recovery-card-title">Need a guided step?</div>
           <p class="aq-recovery-card-text" id="aq-recovery-card-text">
             You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.
           </p>
@@ -402,6 +402,50 @@
         </div>
 
         <button class="aq-btn aq-btn-primary" id="aq-btn-next">Next Question →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── WORKED EXAMPLE ─────────────────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-worked-example">
+    <div class="aq-progress-strip">
+      <div class="aq-progress-fill" id="aq-worked-progress-bar" style="width:0%"></div>
+    </div>
+
+    <div class="aq-q-meta">
+      <span class="aq-tag aq-tag-topic" id="aq-worked-badge-topic">Topic</span>
+      <span class="aq-q-counter" id="aq-worked-counter">Worked example</span>
+      <span class="aq-tag aq-tag-diff" id="aq-worked-badge-diff">Medium</span>
+    </div>
+
+    <div class="aq-q-card aq-worked-screen-card">
+      <div class="aq-worked-screen-header">
+        <span class="aq-worked-screen-eyebrow">Worked example</span>
+        <h2 class="aq-worked-screen-title" id="aq-worked-screen-title">Worked example</h2>
+        <p class="aq-worked-screen-subtitle" id="aq-worked-screen-subtitle">Here’s a solved example before you try again.</p>
+      </div>
+
+      <div class="aq-worked-screen-section">
+        <span class="aq-worked-example-label">Example question</span>
+        <p class="aq-q-text aq-worked-screen-question" id="aq-worked-screen-question">—</p>
+      </div>
+
+      <div class="aq-worked-screen-section">
+        <span class="aq-worked-example-label">Answer options</span>
+        <div class="aq-options aq-worked-screen-options" id="aq-worked-screen-options"></div>
+      </div>
+
+      <div class="aq-worked-screen-section aq-worked-screen-steps-wrap">
+        <span class="aq-worked-example-label">Worked through</span>
+        <ol class="aq-worked-example-steps" id="aq-worked-screen-steps"></ol>
+      </div>
+
+      <p class="aq-worked-example-note aq-hidden" id="aq-worked-screen-note">—</p>
+      <div class="aq-worked-screen-status aq-hidden" id="aq-worked-screen-status"></div>
+
+      <div class="aq-recovery-card-actions aq-worked-screen-actions">
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-worked-example-continue" type="button">Continue to quiz</button>
+        <button class="aq-btn aq-btn-primary" id="aq-btn-worked-example-practice" type="button">Practice one yourself</button>
       </div>
     </div>
   </div>

@@ -12,6 +12,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
   var urlStartRecovery = runtime.handlerUrl(element, 'start_recovery_step');
+  var urlPracticeRecovery = runtime.handlerUrl(element, 'practice_recovery_step');
   var urlDeclineRecovery = runtime.handlerUrl(element, 'decline_recovery_step');
   var urlProgress = runtime.handlerUrl(element, 'get_progress');
   var urlGetContent = runtime.handlerUrl(element, 'get_content');
@@ -61,7 +62,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       message: 'Unlocks when this lecture has a stronger foundation.',
       avgMastery: null,
       scopedTopicCount: 0
-    }
+    },
+    workedExamplePrimer: null
   };
 
   var reviewState = {
@@ -104,7 +106,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function $(sel) { return element.querySelector(sel); }
 
-  var SCREENS = ['start', 'loading', 'question', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
+  var SCREENS = ['start', 'loading', 'question', 'worked-example', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
 
   var COURSE_PICKER_COPY = {
     quiz: {
@@ -689,12 +691,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function showRecoveryCard(data) {
     var card = $('#aq-recovery-card');
+    var title = $('#aq-recovery-card-title');
     var text = $('#aq-recovery-card-text');
+    var supportRow = $('#aq-support-row');
     var nextBtn = $('#aq-btn-next');
     var startBtn = $('#aq-btn-recovery-start');
     var skipBtn = $('#aq-btn-recovery-skip');
     if (!card || !text) return;
 
+    if (title) title.textContent = 'Need a guided step?';
     text.textContent = data.recovery_message || 'You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.';
     card.classList.remove('aq-hidden');
     card.classList.remove('aq-recovery-card-loading');
@@ -702,7 +707,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       startBtn.disabled = false;
       startBtn.textContent = 'Try guided step';
     }
-    if (skipBtn) skipBtn.disabled = false;
+    if (skipBtn) {
+      skipBtn.disabled = false;
+      skipBtn.textContent = 'Continue normally';
+    }
+    if (supportRow) supportRow.classList.remove('aq-hidden');
     if (nextBtn) nextBtn.classList.add('aq-hidden');
     state.recoveryStartPending = false;
   }
@@ -714,9 +723,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (card) card.classList.toggle('aq-recovery-card-loading', !!isLoading);
     if (startBtn) {
       startBtn.disabled = !!isLoading;
-      startBtn.textContent = isLoading ? 'Preparing guided step…' : 'Try guided step';
+      startBtn.textContent = isLoading ? 'Preparing worked example…' : 'Try guided step';
     }
-    if (skipBtn) skipBtn.disabled = !!isLoading;
+    if (skipBtn) {
+      skipBtn.disabled = !!isLoading;
+      if (!isLoading) skipBtn.textContent = 'Continue normally';
+    }
     state.recoveryStartPending = !!isLoading;
   }
 
@@ -728,6 +740,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function restoreFeedbackAfterRecoveryDecline() {
     if (!state.lastFeedbackContext || !state.lastFeedbackContext.data) {
       hideRecoveryCard();
+      showScreen('question');
       return;
     }
 
@@ -744,6 +757,111 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       isRestoredFeedback: true,
       preserveExplanationText: preservedExplanation
     });
+    showScreen('question');
+  }
+
+  function getWorkedExampleStatusEl() {
+    return $('#aq-worked-screen-status');
+  }
+
+  function hideWorkedExampleStatus() {
+    var statusEl = getWorkedExampleStatusEl();
+    if (!statusEl) return;
+    statusEl.textContent = '';
+    statusEl.classList.add('aq-hidden');
+  }
+
+  function showWorkedExampleStatus(message) {
+    var statusEl = getWorkedExampleStatusEl();
+    if (!statusEl) return;
+    statusEl.textContent = message || '';
+    statusEl.classList.remove('aq-hidden');
+  }
+
+  function setWorkedExampleActionLoading(isLoading, action) {
+    var continueBtn = $('#aq-btn-worked-example-continue');
+    var practiceBtn = $('#aq-btn-worked-example-practice');
+    if (continueBtn) {
+      continueBtn.disabled = !!isLoading;
+      continueBtn.textContent = isLoading && action === 'continue'
+        ? 'Returning to quiz…'
+        : 'Continue to quiz';
+    }
+    if (practiceBtn) {
+      practiceBtn.disabled = !!isLoading;
+      practiceBtn.textContent = isLoading && action === 'practice'
+        ? 'Preparing practice question…'
+        : 'Practice one yourself';
+    }
+    state.recoveryStartPending = !!isLoading;
+  }
+
+  function renderWorkedExampleScreen(primer) {
+    var topicBadge = $('#aq-worked-badge-topic');
+    var diffBadge = $('#aq-worked-badge-diff');
+    var progress = $('#aq-worked-progress-bar');
+    var titleEl = $('#aq-worked-screen-title');
+    var subtitleEl = $('#aq-worked-screen-subtitle');
+    var questionEl = $('#aq-worked-screen-question');
+    var optionsWrap = $('#aq-worked-screen-options');
+    var stepsEl = $('#aq-worked-screen-steps');
+    var noteEl = $('#aq-worked-screen-note');
+    if (!questionEl || !optionsWrap || !stepsEl) return;
+
+    state.workedExamplePrimer = primer || null;
+    hideWorkedExampleStatus();
+    setWorkedExampleActionLoading(false);
+
+    if (topicBadge) topicBadge.textContent = (primer && primer.topic) || (state.currentQuestion && state.currentQuestion.topic) || 'General';
+    if (diffBadge) {
+      var d = (primer && primer.difficulty) || 3;
+      diffBadge.textContent = DIFF_LABEL[d] || 'Medium';
+      diffBadge.className = 'aq-tag aq-tag-diff ' + (DIFF_CLASS[d] || '');
+    }
+    if (progress) {
+      progress.style.width = Math.round((state.questionsSeenSoFar / state.maxQuestionsCurrent) * 100) + '%';
+    }
+    if (titleEl) titleEl.textContent = (primer && primer.title) || 'Worked example';
+    if (subtitleEl) subtitleEl.textContent = (primer && primer.intro_text) || 'Here’s a solved example before you try again.';
+    questionEl.textContent = (primer && primer.question_text) || 'Example unavailable.';
+
+    var options = (primer && primer.options) || {};
+    var correctAnswer = primer && primer.correct_answer;
+    var correctKey = correctAnswer && correctAnswer.key ? correctAnswer.key : '';
+    optionsWrap.innerHTML = '';
+    ['A', 'B', 'C', 'D'].forEach(function (key) {
+      if (!options[key]) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'aq-opt aq-worked-example-option' + (key === correctKey ? ' correct' : '');
+      btn.disabled = true;
+      btn.innerHTML =
+        '<span class="aq-opt-key">' + key + '</span>' +
+        '<span class="aq-opt-text">' + escapeHtml(options[key]) + '</span>';
+      optionsWrap.appendChild(btn);
+    });
+
+    stepsEl.innerHTML = '';
+    ((primer && primer.worked_steps) || []).forEach(function (step) {
+      var li = document.createElement('li');
+      li.textContent = step;
+      stepsEl.appendChild(li);
+    });
+
+    if (noteEl) {
+      if (primer && primer.tempting_note) {
+        noteEl.textContent = primer.tempting_note;
+        noteEl.classList.remove('aq-hidden');
+      } else {
+        noteEl.textContent = '';
+        noteEl.classList.add('aq-hidden');
+      }
+    }
+  }
+
+  function openWorkedExampleScreen(primer) {
+    renderWorkedExampleScreen(primer);
+    showScreen('worked-example');
   }
 
   function renderQuestion(resp) {
@@ -759,6 +877,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.answered = false;
     state.questionStart = Date.now();
     state.lastFeedbackContext = null;
+    state.workedExamplePrimer = null;
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
     renderRecoveryIntro(q);
@@ -953,6 +1072,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var supportRow = $('#aq-support-row');
     if (supportRow) {
+      supportRow.classList.remove('aq-hidden');
       supportRow.innerHTML = '';
       var features = data.support_features || [];
 
@@ -1053,7 +1173,6 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     setRecoveryCardLoading(true);
     hideExplainStatus();
-    setExplanationLoading('Preparing your guided recovery step...');
 
     jQuery.ajax({
       type: 'POST',
@@ -1061,15 +1180,42 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({}),
       contentType: 'application/json',
       success: function (data) {
-        if (!(data && data.success && data.question)) {
+        if (!(data && data.success && data.worked_example_primer)) {
           setRecoveryCardLoading(false);
-          setExplanationText((state.currentQuestion && state.currentQuestion.explanation) || '');
-          showExplainStatus('Could not start the guided recovery step just now.');
+          showExplainStatus('Could not prepare the worked example just now.');
           return;
         }
 
-        setExplanationText(data.simpler_explanation || '');
         hideExplainStatus();
+        openWorkedExampleScreen(data.worked_example_primer);
+      },
+      error: function () {
+        setRecoveryCardLoading(false);
+        showExplainStatus('Could not prepare the worked example just now.');
+      }
+    });
+  }
+
+  function handlePracticeRecoveryStep() {
+    if (state.recoveryStartPending) return;
+
+    setWorkedExampleActionLoading(true, 'practice');
+    hideWorkedExampleStatus();
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlPracticeRecovery,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
+      success: function (data) {
+        if (!(data && data.success && data.question)) {
+          setWorkedExampleActionLoading(false);
+          showWorkedExampleStatus('Could not start the recovery practice just now.');
+          return;
+        }
+
+        state.workedExamplePrimer = null;
+        hideWorkedExampleStatus();
         setTimeout(function () {
           renderQuestion({
             success: true,
@@ -1080,9 +1226,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         }, 180);
       },
       error: function () {
-        setRecoveryCardLoading(false);
-        setExplanationText((state.currentQuestion && state.currentQuestion.explanation) || '');
-        showExplainStatus('Could not start the guided recovery step just now.');
+        setWorkedExampleActionLoading(false);
+        showWorkedExampleStatus('Could not start the recovery practice just now.');
       }
     });
   }
@@ -1107,6 +1252,33 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       error: function () {
         setRecoveryCardLoading(false);
         showExplainStatus('Could not continue normally just now.');
+      }
+    });
+  }
+
+  function handleContinueFromWorkedExample() {
+    if (state.recoveryStartPending) return;
+
+    setWorkedExampleActionLoading(true, 'continue');
+    hideWorkedExampleStatus();
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlDeclineRecovery,
+      data: JSON.stringify({}),
+      contentType: 'application/json',
+      success: function (data) {
+        setWorkedExampleActionLoading(false);
+        if (!(data && data.success)) {
+          showWorkedExampleStatus('Could not continue to the quiz just now.');
+          return;
+        }
+        state.workedExamplePrimer = null;
+        restoreFeedbackAfterRecoveryDecline();
+      },
+      error: function () {
+        setWorkedExampleActionLoading(false);
+        showWorkedExampleStatus('Could not continue to the quiz just now.');
       }
     });
   }
@@ -2293,6 +2465,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (recoveryContext.recovery_outcome === 'recovered') return 'recovered';
     if (recoveryContext.recovery_outcome === 'still_needs_review') return 'still needs review';
     if (recoveryContext.guided_recovery_used) return 'guided recovery used';
+    if (recoveryContext.worked_example_primer_used) {
+      if (recoveryContext.worked_example_primer_choice === 'continue_to_quiz') return 'worked example used';
+      if (recoveryContext.worked_example_primer_choice === 'practice_one_yourself') return 'worked example then practice';
+      return 'worked example viewed';
+    }
     if (recoveryContext.guided_recovery_offered) return 'guided recovery offered';
     return 'still needs review';
   }
@@ -2408,6 +2585,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         recoveryChip.classList.remove('aq-hidden');
       } else if (q.recovery_context && q.recovery_context.guided_recovery_used) {
         recoveryChip.textContent = 'Guided Recovery Used';
+        recoveryChip.classList.remove('aq-hidden');
+      } else if (q.recovery_context && q.recovery_context.worked_example_primer_used) {
+        recoveryChip.textContent = 'Worked Example Used';
         recoveryChip.classList.remove('aq-hidden');
       } else {
         recoveryChip.classList.add('aq-hidden');
@@ -3121,6 +3301,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var recoverySkipBtn = $('#aq-btn-recovery-skip');
   if (recoverySkipBtn) recoverySkipBtn.onclick = handleDeclineRecoveryStep;
+
+  var workedContinueBtn = $('#aq-btn-worked-example-continue');
+  if (workedContinueBtn) workedContinueBtn.onclick = handleContinueFromWorkedExample;
+
+  var workedPracticeBtn = $('#aq-btn-worked-example-practice');
+  if (workedPracticeBtn) workedPracticeBtn.onclick = handlePracticeRecoveryStep;
 
   element.addEventListener('click', function (event) {
     var wrap = $('#aq-confidence-box');

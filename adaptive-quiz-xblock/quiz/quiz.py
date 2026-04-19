@@ -2028,6 +2028,41 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "error": (resp or {}).get("error", "Could not start the guided recovery step."),
             }
 
+        return {
+            "success": True,
+            "worked_example_primer": resp.get("worked_example_primer"),
+            "recovery_topic": resp.get("recovery_topic"),
+            "recovery_reason": resp.get("recovery_reason"),
+            "recovery_reason_label": resp.get("recovery_reason_label"),
+        }
+
+    @XBlock.json_handler
+    def practice_recovery_step(self, data, suffix=""):
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        if not question or not self.active_session_id:
+            return {"success": False, "error": "Recovery practice is not available right now."}
+
+        resp = self._api(
+            "/api/quiz/support/recovery/practice",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "session_id": self.active_session_id,
+                "question_id": question.get("question", "")[:80],
+                "question_text": question.get("question", ""),
+                "explanation": question.get("explanation", ""),
+                "topic": question.get("topic", self.current_topic),
+                "difficulty": question.get("difficulty", self.current_difficulty),
+                "source_text": self.session_source_text,
+            },
+            timeout=SIMILAR_QUESTION_TIMEOUT,
+        )
+        if not resp or not resp.get("success", True):
+            return {
+                "success": False,
+                "error": (resp or {}).get("error", "Could not start recovery practice."),
+            }
+
         recovery_question = resp.get("question")
         if recovery_question:
             self.current_question_json = json.dumps(recovery_question)
@@ -2035,7 +2070,6 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         return {
             "success": True,
             "question": recovery_question,
-            "simpler_explanation": resp.get("simpler_explanation", ""),
             "recovery_topic": resp.get("recovery_topic"),
             "recovery_reason": resp.get("recovery_reason"),
             "recovery_reason_label": resp.get("recovery_reason_label"),

@@ -32,6 +32,7 @@ from app.services.ai_engine import (
     generate_question,
     generate_question_with_metadata,
     generate_simple_explanation,
+    generate_worked_example_support,
     extract_content_metadata,
 )
 from app.services.pdf_parser import extract_text_from_pdf_base64
@@ -460,6 +461,192 @@ def _clear_recovery_state(state: dict) -> None:
     state["active_recovery_step"] = None
 
 
+def _build_worked_example_fallback(example_question: dict) -> dict:
+    correct_key = str(example_question.get("correct_answer") or "").strip()
+    options = example_question.get("options", {}) if isinstance(example_question.get("options"), dict) else {}
+    correct_text = str(options.get(correct_key) or "").strip()
+    explanation = str(example_question.get("explanation") or "").strip()
+    fallback_steps = [
+        "Start by identifying the key idea the question is testing.",
+        explanation or "Use the explanation to connect the concept to the correct choice.",
+    ]
+    if correct_text:
+        fallback_steps.append(f"That makes {correct_text} the best answer in this example.")
+
+    return {
+        "intro_text": "Here’s a solved example before you try again.",
+        "worked_steps": fallback_steps[:3],
+        "tempting_note": None,
+    }
+
+
+def _build_worked_example_payload(example_question: dict, support: dict, source: str) -> dict:
+    options = example_question.get("options", {}) if isinstance(example_question.get("options"), dict) else {}
+    correct_key = str(example_question.get("correct_answer") or "").strip()
+    correct_text = str(options.get(correct_key) or "").strip()
+    return {
+        "title": "Worked example",
+        "intro_text": str(
+            (support or {}).get("intro_text") or "Here’s a solved example before you try again."
+        ).strip(),
+        "question_text": str(example_question.get("question") or "").strip(),
+        "options": {
+            key: str(options.get(key) or "").strip()
+            for key in ["A", "B", "C", "D"]
+            if str(options.get(key) or "").strip()
+        },
+        "correct_answer": {
+            "key": correct_key,
+            "text": correct_text,
+        },
+        "worked_steps": [
+            str(step or "").strip()
+            for step in ((support or {}).get("worked_steps") or [])
+            if str(step or "").strip()
+        ],
+        "tempting_note": str((support or {}).get("tempting_note") or "").strip() or None,
+        "topic": str(example_question.get("topic") or "").strip(),
+        "difficulty": int(example_question.get("difficulty", 1) or 1),
+        "source": source,
+    }
+
+
+async def _update_recovery_offer_question_log(
+    *,
+    session_id: str,
+    question_logged_at: str | None,
+    patch: dict,
+) -> None:
+    if not session_id or not question_logged_at or not patch:
+        return
+
+    db = get_db()
+    set_doc = {
+        f"question_log.$[entry].{key}": value
+        for key, value in patch.items()
+    }
+    await db.student_session_history.update_one(
+        {"session_id": session_id},
+        {"$set": set_doc},
+        array_filters=[{
+            "entry.logged_at": question_logged_at,
+            "entry.is_recovery_step": False,
+        }],
+    )
+
+
+async def _select_worked_example_question(
+    *,
+    state: dict,
+    course_id: str,
+    topic: str,
+    difficulty: int,
+    source_text: str,
+) -> tuple[dict, str]:
+    source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(source_text)
+    prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+    recent_hashes = _recent_seen_hashes_from_state(state, course_id)
+    example_difficulty = max(1, int(difficulty) - 1)
+    cache_target = _cache_target_for_state(state, topic, example_difficulty)
+
+    cached = await _get_cached_question(
+        topic=topic,
+        difficulty=example_difficulty,
+        course_id=course_id,
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
+        excluded_hashes=recent_hashes,
+    )
+    if cached:
+        asyncio.create_task(
+            _replenish_cache(
+                topic=topic,
+                difficulty=example_difficulty,
+                course_id=course_id,
+                source_text=source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+                target=cache_target,
+            )
+        )
+        question = cached
+        source = "cache_reuse"
+    else:
+        question = await _generate_question_with_soft_dedupe(
+            topic=topic,
+            difficulty=example_difficulty,
+            source_text=source_text,
+            course_id=course_id,
+            recent_hashes=recent_hashes,
+        )
+        generated_difficulty = int(question.get("difficulty", example_difficulty) or example_difficulty)
+        asyncio.create_task(
+            _replenish_cache(
+                topic=topic,
+                difficulty=generated_difficulty,
+                course_id=course_id,
+                source_text=source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+                target=_cache_target_for_state(state, topic, generated_difficulty),
+            )
+        )
+        source = "generated"
+
+    _record_seen_question(
+        state=state,
+        question=question,
+        course_id=course_id,
+        topic=str(question.get("topic", topic)),
+        difficulty=int(question.get("difficulty", example_difficulty)),
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
+    )
+    return question, source
+
+
+async def _generate_recovery_practice_question(
+    *,
+    state: dict,
+    offer: dict,
+    req: RecoveryStartRequest,
+) -> tuple[dict, int]:
+    recovery_difficulty = max(1, int(offer.get("difficulty", req.difficulty)) - 1)
+    source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
+    prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+    recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
+
+    question = await _generate_question_with_soft_dedupe(
+        topic=req.topic,
+        difficulty=recovery_difficulty,
+        source_text=req.source_text,
+        course_id=req.course_id,
+        recent_hashes=recent_hashes,
+    )
+
+    generated_difficulty = min(
+        int(question.get("difficulty", recovery_difficulty)),
+        int(offer.get("difficulty", req.difficulty)),
+    )
+    question["difficulty"] = generated_difficulty
+    question["is_recovery_step"] = True
+    question["recovery_for_topic"] = req.topic
+    question["recovery_trigger_reason"] = offer.get("trigger_reason")
+    question["recovery_intro_title"] = "Guided recovery practice"
+    question["recovery_intro_text"] = "You’ve seen a solved example. Now try one yourself on the same topic."
+
+    _record_seen_question(
+        state=state,
+        question=question,
+        course_id=req.course_id,
+        topic=req.topic,
+        difficulty=generated_difficulty,
+        source_scope_key=source_scope_key,
+        prompt_version=prompt_version,
+    )
+    return question, generated_difficulty
+
+
 def _normalize_recovery_time_context(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
     if normalized in {"thinking", "distracted", "unknown"}:
@@ -552,6 +739,7 @@ def _set_pending_recovery_offer(
     difficulty: int,
     trigger_reason: str,
     question_id: str | None,
+    question_logged_at: str | None = None,
 ) -> None:
     state["pending_recovery_offer"] = {
         "session_id": session_id,
@@ -559,8 +747,10 @@ def _set_pending_recovery_offer(
         "difficulty": int(difficulty),
         "trigger_reason": trigger_reason,
         "question_id": str(question_id or "").strip(),
+        "question_logged_at": str(question_logged_at or "").strip() or None,
         "status": "offered",
         "offered_at": datetime.now(timezone.utc).isoformat(),
+        "worked_example_primer": None,
     }
     state["active_recovery_step"] = None
 
@@ -1910,6 +2100,14 @@ def _build_mistake_recovery_context(question_log: list[dict], question_index: in
         trigger_reason = str(entry.get("recovery_trigger_reason") or "").strip()
         if trigger_reason:
             context["trigger_reason"] = trigger_reason
+    if entry.get("worked_example_primer_shown"):
+        context["worked_example_primer_used"] = True
+        primer_source = str(entry.get("worked_example_primer_source") or "").strip()
+        primer_choice = str(entry.get("worked_example_primer_choice") or "").strip()
+        if primer_source:
+            context["worked_example_primer_source"] = primer_source
+        if primer_choice:
+            context["worked_example_primer_choice"] = primer_choice
 
     next_index = question_index + 1
     if next_index < len(question_log):
@@ -2794,6 +2992,7 @@ async def submit(req: SubmitRequest):
         prior_question_log = (session_doc_before or {}).get("question_log", [])
         answered_after_submission = int((session_doc_before or {}).get("questions_answered", 0)) + 1
         target_questions = int((session_doc_before or {}).get("target_questions", 10))
+        question_logged_at = datetime.now(timezone.utc).isoformat()
         recovery_reason = _detect_recovery_trigger(
             current_mode=current_mode,
             session_origin=current_session_origin,
@@ -2819,6 +3018,7 @@ async def submit(req: SubmitRequest):
             "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
             "confidence": normalized_confidence,
             "support_features_shown": support_features,
+            "logged_at": question_logged_at,
             "is_recovery_step": False,
             "counts_toward_session_score": True,
             "recovery_step_available": bool(recovery_reason),
@@ -2858,6 +3058,7 @@ async def submit(req: SubmitRequest):
                         difficulty=req.difficulty,
                         trigger_reason=recovery_reason,
                         question_id=req.question_id,
+                        question_logged_at=question_logged_at,
                     )
                     recovery_step_available = True
                     recovery_topic = req.topic
@@ -3610,55 +3811,148 @@ async def support_recovery_start(req: RecoveryStartRequest):
     if (
         offer.get("session_id") != req.session_id
         or offer.get("topic") != req.topic
-        or offer.get("status") != "offered"
     ):
         raise HTTPException(status_code=409, detail="Recovery step is not available for this question.")
 
-    simpler_explanation = req.explanation
+    if offer.get("status") == "primer_shown" and isinstance(offer.get("worked_example_primer"), dict):
+        return {
+            "success": True,
+            "worked_example_primer": offer.get("worked_example_primer"),
+            "recovery_topic": req.topic,
+            "recovery_reason": offer.get("trigger_reason"),
+            "recovery_reason_label": _recovery_reason_label(offer.get("trigger_reason")),
+        }
+
+    if offer.get("status") != "offered":
+        raise HTTPException(status_code=409, detail="Recovery step is not available for this question.")
+
     try:
-        simpler_explanation = await generate_simple_explanation(
+        example_question, source = await _select_worked_example_question(
+            state=state,
+            course_id=req.course_id,
+            topic=req.topic,
+            difficulty=int(offer.get("difficulty", req.difficulty)),
+            source_text=req.source_text,
+        )
+
+        support = await generate_worked_example_support(
+            topic=req.topic,
+            question=str(example_question.get("question") or "").strip(),
+            options=example_question.get("options", {}) or {},
+            correct_answer=str(example_question.get("correct_answer") or "").strip(),
+            explanation=str(example_question.get("explanation") or "").strip(),
+        )
+    except Exception:
+        if "example_question" in locals():
+            support = _build_worked_example_fallback(example_question)
+            source = locals().get("source", "generated")
+        else:
+            raise HTTPException(status_code=503, detail="Could not prepare the worked example just now.")
+
+    worked_example_primer = _build_worked_example_payload(example_question, support, source)
+    offer["status"] = "primer_shown"
+    offer["worked_example_primer"] = worked_example_primer
+    offer["primer_shown_at"] = datetime.now(timezone.utc).isoformat()
+    state["pending_recovery_offer"] = offer
+    await _save_state(state)
+    await _update_recovery_offer_question_log(
+        session_id=req.session_id,
+        question_logged_at=offer.get("question_logged_at"),
+        patch={
+            "worked_example_primer_shown": True,
+            "worked_example_primer_source": source,
+            "worked_example_primer_choice": "primer_viewed",
+        },
+    )
+
+    logger.info(
+        "[RECOVERY] Primer shown session=%s topic=%s source=%s reason=%s",
+        req.session_id,
+        req.topic,
+        source,
+        offer.get("trigger_reason"),
+    )
+
+    return {
+        "success": True,
+        "worked_example_primer": worked_example_primer,
+        "recovery_topic": req.topic,
+        "recovery_reason": offer.get("trigger_reason"),
+        "recovery_reason_label": _recovery_reason_label(offer.get("trigger_reason")),
+    }
+
+
+@router.post("/support/recovery/decline")
+async def support_recovery_decline(req: RecoveryDeclineRequest):
+    state = await _get_state(req.student_id, req.course_id, [req.topic])
+    offer = state.get("pending_recovery_offer") or {}
+    if offer.get("session_id") == req.session_id and offer.get("topic") == req.topic:
+        if offer.get("status") == "primer_shown":
+            await _update_recovery_offer_question_log(
+                session_id=req.session_id,
+                question_logged_at=offer.get("question_logged_at"),
+                patch={
+                    "worked_example_primer_shown": True,
+                    "worked_example_primer_source": (
+                        (offer.get("worked_example_primer") or {}).get("source")
+                    ),
+                    "worked_example_primer_choice": "continue_to_quiz",
+                },
+            )
+        _clear_recovery_state(state)
+        await _save_state(state)
+        logger.info("[RECOVERY] Declined session=%s topic=%s", req.session_id, req.topic)
+
+    return {"success": True}
+
+
+@router.post("/support/recovery/practice")
+async def support_recovery_practice(req: RecoveryStartRequest):
+    if not req.session_id:
+        raise HTTPException(status_code=400, detail="Recovery practice requires an active session.")
+
+    state = await _get_state(req.student_id, req.course_id, [req.topic])
+    offer = state.get("pending_recovery_offer") or {}
+    if (
+        offer.get("session_id") != req.session_id
+        or offer.get("topic") != req.topic
+        or offer.get("status") != "primer_shown"
+    ):
+        raise HTTPException(status_code=409, detail="Recovery practice is not available for this question.")
+
+    try:
+        question, generated_difficulty = await _generate_recovery_practice_question(
+            state=state,
+            offer=offer,
+            req=req,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    guided_explanation = ""
+    try:
+        guided_explanation = await generate_simple_explanation(
             topic=req.topic,
             question=req.question_text,
             explanation=req.explanation,
         )
     except Exception:
-        simpler_explanation = req.explanation + "\n\n(Tip: Try breaking this concept into smaller steps.)"
-
-    recovery_difficulty = max(1, int(offer.get("difficulty", req.difficulty)) - 1)
-    source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
-    prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
-    recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
-
-    try:
-        question = await _generate_question_with_soft_dedupe(
-            topic=req.topic,
-            difficulty=recovery_difficulty,
-            source_text=req.source_text,
-            course_id=req.course_id,
-            recent_hashes=recent_hashes,
+        guided_explanation = (
+            "Keep the core idea in mind, compare the choices carefully, and eliminate anything "
+            "that does not fit the concept."
         )
-    except ValueError as e:
-        raise HTTPException(status_code=503, detail=str(e))
 
-    generated_difficulty = min(
-        int(question.get("difficulty", recovery_difficulty)),
-        int(offer.get("difficulty", req.difficulty)),
-    )
-    question["difficulty"] = generated_difficulty
-    question["is_recovery_step"] = True
-    question["recovery_for_topic"] = req.topic
-    question["recovery_trigger_reason"] = offer.get("trigger_reason")
-    question["recovery_intro_title"] = "Guided recovery step"
-    question["recovery_intro_text"] = simpler_explanation
+    question["recovery_intro_title"] = "Short reminder"
+    question["recovery_intro_text"] = guided_explanation
 
-    _record_seen_question(
-        state=state,
-        question=question,
-        course_id=req.course_id,
-        topic=req.topic,
-        difficulty=generated_difficulty,
-        source_scope_key=source_scope_key,
-        prompt_version=prompt_version,
+    await _update_recovery_offer_question_log(
+        session_id=req.session_id,
+        question_logged_at=offer.get("question_logged_at"),
+        patch={
+            "worked_example_primer_shown": True,
+            "worked_example_primer_source": ((offer.get("worked_example_primer") or {}).get("source")),
+            "worked_example_primer_choice": "practice_one_yourself",
+        },
     )
     _activate_recovery_step(
         state,
@@ -3671,7 +3965,7 @@ async def support_recovery_start(req: RecoveryStartRequest):
     await _save_state(state)
 
     logger.info(
-        "[RECOVERY] Started session=%s topic=%s difficulty=%s reason=%s",
+        "[RECOVERY] Practice started session=%s topic=%s difficulty=%s reason=%s",
         req.session_id,
         req.topic,
         generated_difficulty,
@@ -3680,24 +3974,11 @@ async def support_recovery_start(req: RecoveryStartRequest):
 
     return {
         "success": True,
-        "simpler_explanation": simpler_explanation,
         "question": question,
         "recovery_topic": req.topic,
         "recovery_reason": offer.get("trigger_reason"),
         "recovery_reason_label": _recovery_reason_label(offer.get("trigger_reason")),
     }
-
-
-@router.post("/support/recovery/decline")
-async def support_recovery_decline(req: RecoveryDeclineRequest):
-    state = await _get_state(req.student_id, req.course_id, [req.topic])
-    offer = state.get("pending_recovery_offer") or {}
-    if offer.get("session_id") == req.session_id and offer.get("topic") == req.topic:
-        _clear_recovery_state(state)
-        await _save_state(state)
-        logger.info("[RECOVERY] Declined session=%s topic=%s", req.session_id, req.topic)
-
-    return {"success": True}
 
 
 @router.post("/support/recovery/submit")
@@ -3729,6 +4010,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         "time_spent_ms": req.time_spent_ms,
         "time_context": _normalize_recovery_time_context(req.time_context) or "unknown",
         "confidence": normalized_confidence,
+        "logged_at": datetime.now(timezone.utc).isoformat(),
         "support_features_shown": [],
         "is_recovery_step": True,
         "recovery_for_topic": recovery_topic,

@@ -1175,6 +1175,126 @@
   color: var(--aq-text-muted);
 }
 
+.aq-worked-example-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: .7rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.aq-worked-example-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--aq-text);
+  font-size: .83rem;
+  line-height: 1.55;
+}
+
+.aq-worked-example-note {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(217, 119, 6, .08);
+  border: 1px solid rgba(217, 119, 6, .14);
+  color: #92400e;
+}
+
+.aq-worked-screen-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.aq-worked-screen-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.aq-worked-screen-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, .08);
+  color: #0f766e;
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.aq-worked-screen-title {
+  margin: 0;
+  font-size: 1.28rem;
+  line-height: 1.2;
+  color: var(--aq-text);
+}
+
+.aq-worked-screen-subtitle {
+  margin: 0;
+  font-size: .92rem;
+  line-height: 1.6;
+  color: var(--aq-text-muted);
+}
+
+.aq-worked-screen-section {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(248, 250, 252, .92);
+  border: 1px solid rgba(15, 23, 42, .06);
+}
+
+.aq-worked-screen-question {
+  margin-bottom: 0;
+  font-size: 1rem;
+}
+
+.aq-worked-screen-options {
+  gap: 10px;
+}
+
+.aq-worked-screen-options .aq-opt {
+  cursor: default;
+  background: #fff;
+}
+
+.aq-worked-screen-options .aq-opt:hover {
+  border-color: var(--aq-border);
+  background: #fff;
+  transform: none;
+}
+
+.aq-worked-screen-options .aq-opt.correct {
+  box-shadow: inset 0 0 0 1px rgba(5, 150, 105, .12);
+}
+
+.aq-worked-screen-steps-wrap {
+  background: linear-gradient(135deg, rgba(15, 118, 110, .05), rgba(16, 185, 129, .08));
+  border-color: rgba(15, 118, 110, .14);
+}
+
+.aq-worked-screen-status {
+  margin-top: -4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(220, 38, 38, .07);
+  border: 1px solid rgba(220, 38, 38, .14);
+  color: #991b1b;
+  font-size: .83rem;
+  line-height: 1.5;
+}
+
+.aq-worked-screen-actions {
+  margin-top: 4px;
+}
+
 .aq-recovery-card-actions {
   display: flex;
   gap: 10px;

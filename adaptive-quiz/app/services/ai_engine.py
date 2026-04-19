@@ -2350,6 +2350,143 @@ Respond with ONLY the simpler explanation text, no preamble.
 
     raise ValueError("All providers/models failed to produce a simpler explanation.\n" + "\n".join(all_failures))
 
+
+async def generate_worked_example_support(
+    *,
+    topic: str,
+    question: str,
+    options: dict[str, str],
+    correct_answer: str,
+    explanation: str,
+) -> dict:
+    correct_key = str(correct_answer or "").strip()
+    correct_text = str((options or {}).get(correct_key) or "").strip()
+    serialized_options = json.dumps(options or {}, ensure_ascii=False)
+    prompt = f"""
+Create a compact worked example primer for a student who is recovering from a wrong answer.
+
+Topic: {topic}
+Example question: {question}
+Options: {serialized_options}
+Correct answer key: {correct_key}
+Correct answer text: {correct_text}
+Original explanation: {explanation}
+
+Return ONLY valid JSON with this shape:
+{{
+  "intro_text": "Here’s a solved example before you try again.",
+  "worked_steps": ["...", "...", "..."],
+  "tempting_note": "..."
+}}
+
+Rules:
+- Keep it compact and supportive.
+- "worked_steps" must contain 2 to 4 short steps.
+- Each step should reflect the reasoning path, not just restate the answer.
+- Keep everything grounded in the provided question and explanation.
+- "tempting_note" is optional, but if included it should be one short sentence.
+- Do not mention answer letters inside the steps unless absolutely necessary.
+- Do not introduce new facts beyond what is already implied by the explanation.
+"""
+
+    all_failures = []
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for provider_name in PROVIDER_ORDER:
+            provider_cfg = PROVIDERS.get(provider_name)
+            if not provider_cfg:
+                logger.info(f"[LLM] Skipping provider={provider_name} for worked example support")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss for worked example support",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
+                continue
+
+            if not provider_cfg["api_key"]:
+                logger.info(f"[LLM] Skipping provider={provider_name} for worked example support")
+                continue
+
+            models = PROVIDER_MODELS.get(provider_name, [])
+            for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss for worked example support",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
+                try:
+                    raw = await _call_model(client, provider_name, model, prompt)
+                    raw = _strip_markdown_fences(raw).strip()
+                    result = json.loads(raw)
+
+                    intro_text = str(
+                        result.get("intro_text") or "Here’s a solved example before you try again."
+                    ).strip()
+                    worked_steps = [
+                        str(step or "").strip()
+                        for step in (result.get("worked_steps") or [])
+                        if str(step or "").strip()
+                    ][:4]
+                    tempting_note = str(result.get("tempting_note") or "").strip()
+
+                    if len(worked_steps) < 2:
+                        msg = (
+                            f"[LLM] Worked example support missing steps "
+                            f"provider={provider_name} model={model}"
+                        )
+                        logger.warning(msg)
+                        all_failures.append(msg)
+                        continue
+
+                    logger.info(
+                        "[LLM] SUCCESS worked_example_support provider=%s model=%s",
+                        provider_name,
+                        model,
+                    )
+                    return {
+                        "intro_text": intro_text,
+                        "worked_steps": worked_steps,
+                        "tempting_note": tempting_note or None,
+                    }
+
+                except ProviderHTTPError as e:
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
+                    msg = (
+                        f"[LLM] HTTP failure worked_example_support "
+                        f"provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
+                    )
+                    logger.warning(msg)
+                    all_failures.append(msg)
+
+                    if e.status_code == 400:
+                        raise ValueError(
+                            f"Bad request sent to {e.provider}/{e.model}. Details: {e.message}"
+                        )
+
+                    continue
+
+                except Exception as e:
+                    msg = (
+                        f"[LLM] Unexpected worked_example_support error "
+                        f"provider={provider_name} model={model} error={_safe_exception_text(e)}"
+                    )
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+    raise ValueError(
+        "All providers/models failed to produce worked example support.\n" + "\n".join(all_failures)
+    )
+
 async def extract_content_metadata(sample_text: str) -> dict:
     """
     Use the LLM fallback chain to extract metadata only from lecture text.
