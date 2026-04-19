@@ -35,14 +35,16 @@ from app.services.ai_engine import (
     generate_worked_example_support,
     extract_content_metadata,
     derive_concept_focus,
+    derive_question_family,
     ensure_question_concept_focus,
+    is_csen603_git_workflow_scope,
 )
 from app.services.pdf_parser import extract_text_from_pdf_base64
 from app.db.mongodb import get_db
 import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
-CACHE_PROMPT_VERSION = "quiz-cache-v5"
+CACHE_PROMPT_VERSION = "quiz-cache-v6"
 CACHE_UNUSED_TTL_DAYS = 14
 CACHE_USED_TTL_DAYS = 7
 DEFAULT_CACHE_TARGET = 1
@@ -285,6 +287,7 @@ def _prune_recent_question_history(history: list[dict] | None) -> list[dict]:
             "source_scope_key": str(entry.get("source_scope_key", "")).strip(),
             "prompt_version": str(entry.get("prompt_version", "")).strip(),
             "concept_focus": _normalized_concept_focus(entry.get("concept_focus")),
+            "question_family": _normalized_question_family(entry.get("question_family")),
             "session_id": str(entry.get("session_id", "")).strip(),
             "seen_at": seen_at.isoformat(),
         })
@@ -326,6 +329,10 @@ def _normalized_concept_focus(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+def _normalized_question_family(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
 def _question_concept_focus(question: dict) -> str | None:
     if not isinstance(question, dict):
         return None
@@ -338,6 +345,22 @@ def _question_concept_focus(question: dict) -> str | None:
     if concept_focus:
         question["concept_focus"] = concept_focus
         return concept_focus
+
+    return None
+
+
+def _question_family(question: dict, course_id: str | None = None) -> str | None:
+    if not isinstance(question, dict):
+        return None
+
+    question_family = _normalized_question_family(question.get("question_family"))
+    if question_family:
+        return question_family
+
+    question_family = _normalized_question_family(derive_question_family(question, course_id))
+    if question_family:
+        question["question_family"] = question_family
+        return question_family
 
     return None
 
@@ -376,6 +399,40 @@ def _concept_dedupe_policy(
     }
 
 
+def _git_family_variety_policy(
+    target_questions: int | None,
+    mode: str | None,
+) -> dict[str, int | bool]:
+    normalized_mode = str(mode or "").strip().lower()
+    try:
+        total = int(target_questions or 0)
+    except (TypeError, ValueError):
+        total = 0
+
+    if total <= 0:
+        total = 10
+
+    if total <= 5:
+        return {
+            "recent_window": 4 if normalized_mode == "challenge" else 3,
+            "avoid_anywhere": True,
+            "live_attempts": 3,
+        }
+
+    if total <= 8 or normalized_mode == "challenge":
+        return {
+            "recent_window": 3,
+            "avoid_anywhere": False,
+            "live_attempts": 2,
+        }
+
+    return {
+        "recent_window": 2,
+        "avoid_anywhere": False,
+        "live_attempts": 1,
+    }
+
+
 def _recent_concept_focuses_from_question_log(question_log: list[dict] | None) -> list[str]:
     concepts: list[str] = []
 
@@ -391,6 +448,27 @@ def _recent_concept_focuses_from_question_log(question_log: list[dict] | None) -
         concepts.append(concept_focus)
 
     return concepts[-CONCEPT_DEDUPE_SESSION_SCAN_LIMIT:]
+
+
+def _recent_question_families_from_question_log(
+    question_log: list[dict] | None,
+    *,
+    course_id: str | None = None,
+) -> list[str]:
+    families: list[str] = []
+
+    for entry in question_log or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("is_recovery_step") or entry.get("counts_toward_session_score") is False:
+            continue
+
+        question_family = _question_family(entry, course_id=course_id)
+        if not question_family:
+            continue
+        families.append(question_family)
+
+    return families[-CONCEPT_DEDUPE_SESSION_SCAN_LIMIT:]
 
 
 def _concept_repeats_too_soon(
@@ -412,6 +490,27 @@ def _concept_repeats_too_soon(
         return True
 
     return concept_focus in recent_concepts[-recent_window:] if recent_window > 0 else False
+
+
+def _question_family_repeats_too_soon(
+    question_family: str | None,
+    recent_families: list[str],
+    *,
+    target_questions: int | None,
+    mode: str | None,
+) -> bool:
+    question_family = _normalized_question_family(question_family)
+    if not question_family or not recent_families:
+        return False
+
+    policy = _git_family_variety_policy(target_questions, mode)
+    recent_window = int(policy.get("recent_window", 0) or 0)
+    avoid_anywhere = bool(policy.get("avoid_anywhere"))
+
+    if avoid_anywhere and question_family in recent_families:
+        return True
+
+    return question_family in recent_families[-recent_window:] if recent_window > 0 else False
 
 
 async def _load_active_session_doc(
@@ -477,6 +576,7 @@ def _record_seen_question(
     history = _prepare_recent_question_history(state)
     now_iso = datetime.now(timezone.utc).isoformat()
     concept_focus = _question_concept_focus(question)
+    question_family = _question_family(question, course_id=course_id)
 
     history = [
         entry for entry in history
@@ -494,6 +594,7 @@ def _record_seen_question(
         "source_scope_key": source_scope_key,
         "prompt_version": prompt_version,
         "concept_focus": concept_focus or "",
+        "question_family": question_family or "",
         "session_id": str(session_id or "").strip(),
         "seen_at": now_iso,
     })
@@ -514,13 +615,17 @@ async def _generate_question_with_soft_dedupe(
     course_id: str,
     recent_hashes: list[str],
     recent_concepts: list[str] | None = None,
+    recent_families: list[str] | None = None,
     target_questions: int | None = None,
     mode: str | None = None,
+    git_workflow_scope: bool = False,
 ) -> dict:
     recent_hash_set = set(recent_hashes)
     concept_policy = _concept_dedupe_policy(target_questions, mode)
     concept_attempts = int(concept_policy.get("live_attempts", 1) or 1) if recent_concepts else 1
-    attempts = max(LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1, concept_attempts)
+    family_policy = _git_family_variety_policy(target_questions, mode)
+    family_attempts = int(family_policy.get("live_attempts", 1) or 1) if git_workflow_scope and recent_families else 1
+    attempts = max(LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1, concept_attempts, family_attempts)
 
     for attempt in range(1, attempts + 1):
         question = await generate_question(
@@ -529,9 +634,10 @@ async def _generate_question_with_soft_dedupe(
             source_text=source_text,
             course_id=course_id,
         )
-        question = ensure_question_concept_focus(question)
+        question = ensure_question_concept_focus(question, course_id=course_id)
         question_hash = _question_hash_for_tracking(question)
         concept_focus = _question_concept_focus(question)
+        question_family = _question_family(question, course_id=course_id)
         hash_duplicate = question_hash in recent_hash_set
         concept_duplicate = _concept_repeats_too_soon(
             concept_focus,
@@ -539,8 +645,14 @@ async def _generate_question_with_soft_dedupe(
             target_questions=target_questions,
             mode=mode,
         )
+        family_duplicate = git_workflow_scope and _question_family_repeats_too_soon(
+            question_family,
+            recent_families or [],
+            target_questions=target_questions,
+            mode=mode,
+        )
 
-        if not hash_duplicate and not concept_duplicate:
+        if not hash_duplicate and not concept_duplicate and not family_duplicate:
             return question
 
         if hash_duplicate:
@@ -563,8 +675,18 @@ async def _generate_question_with_soft_dedupe(
                 concept_focus or "unknown",
             )
 
+        if family_duplicate:
+            logger.info(
+                "[FAMILY] Live Git family repeat course=%s topic=%s difficulty=%s attempt=%s family=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempt,
+                question_family or "unknown",
+            )
+
         if attempt < attempts:
-            retry_reason = "hash_or_concept"
+            retry_reason = "hash_concept_or_family"
             logger.info(
                 "[DEDUPE] Live retry course=%s topic=%s difficulty=%s attempt=%s reason=%s",
                 course_id,
@@ -576,12 +698,13 @@ async def _generate_question_with_soft_dedupe(
             continue
 
         logger.info(
-            "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s concept=%s",
+            "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s concept=%s family=%s",
             course_id,
             topic,
             difficulty,
             attempts,
             concept_focus or "unknown",
+            question_family or "unknown",
         )
         return question
 
@@ -2476,8 +2599,10 @@ async def _get_cached_question(
     prompt_version: str,
     excluded_hashes: list[str] | None = None,
     recent_concepts: list[str] | None = None,
+    recent_families: list[str] | None = None,
     target_questions: int | None = None,
     mode: str | None = None,
+    git_workflow_scope: bool = False,
     allow_relaxed_fallback: bool = True,
 ) -> dict | None:
     db = get_db()
@@ -2498,10 +2623,19 @@ async def _get_cached_question(
     async def _claim_specific(doc: dict, concept_focus: str | None = None) -> dict | None:
         question = await _claim(
             {"_id": doc["_id"], "used": False},
-            extra_updates={"concept_focus": concept_focus} if concept_focus and not doc.get("concept_focus") else None,
+            extra_updates={
+                key: value
+                for key, value in {
+                    "concept_focus": concept_focus if concept_focus and not doc.get("concept_focus") else None,
+                    "question_family": _question_family(doc, course_id=course_id) if git_workflow_scope and not doc.get("question_family") else None,
+                }.items()
+                if value is not None
+            } or None,
         )
         if question and concept_focus and not question.get("concept_focus"):
             question["concept_focus"] = concept_focus
+        if question and git_workflow_scope and not question.get("question_family"):
+            question["question_family"] = _question_family(doc, course_id=course_id)
         return question
 
     base_query = {
@@ -2519,8 +2653,13 @@ async def _get_cached_question(
         for value in (recent_concepts or [])
         if _normalized_concept_focus(value)
     ]
+    normalized_recent_families = [
+        _normalized_question_family(value)
+        for value in (recent_families or [])
+        if _normalized_question_family(value)
+    ]
 
-    if normalized_recent_concepts:
+    if normalized_recent_concepts or (git_workflow_scope and normalized_recent_families):
         preferred_query = dict(base_query)
         if excluded_hashes:
             preferred_query["question_hash"] = {"$nin": excluded_hashes}
@@ -2532,6 +2671,7 @@ async def _get_cached_question(
 
         for candidate in candidates:
             concept_focus = _question_concept_focus(candidate)
+            question_family = _question_family(candidate, course_id=course_id)
             if _concept_repeats_too_soon(
                 concept_focus,
                 normalized_recent_concepts,
@@ -2547,14 +2687,30 @@ async def _get_cached_question(
                 )
                 continue
 
+            if git_workflow_scope and _question_family_repeats_too_soon(
+                question_family,
+                normalized_recent_families,
+                target_questions=target_questions,
+                mode=mode,
+            ):
+                logger.info(
+                    "[FAMILY] Cache candidate skipped course=%s topic=%s difficulty=%s family=%s",
+                    course_id,
+                    topic,
+                    difficulty,
+                    question_family,
+                )
+                continue
+
             question = await _claim_specific(candidate, concept_focus)
             if question:
                 logger.info(
-                    "[CONCEPT] Cache preferred concept course=%s topic=%s difficulty=%s concept=%s",
+                    "[CONCEPT] Cache preferred concept course=%s topic=%s difficulty=%s concept=%s family=%s",
                     course_id,
                     topic,
                     difficulty,
                     concept_focus or "unknown",
+                    question_family or "unknown",
                 )
                 break
 
@@ -2584,7 +2740,7 @@ async def _get_cached_question(
         question = await _claim(base_query)
 
     if question:
-        question = ensure_question_concept_focus(question)
+        question = ensure_question_concept_focus(question, course_id=course_id)
         question["used"] = True
         question["used_at"] = used_at
         question["expires_at"] = expires_at
@@ -2652,7 +2808,7 @@ async def _replenish_cache(
                     source_text,
                     course_id=course_id,
                 )
-                q = ensure_question_concept_focus(q)
+                q = ensure_question_concept_focus(q, course_id=course_id)
                 now = datetime.now(timezone.utc)
                 generated_at = now.isoformat()
                 expires_at = _cache_unused_expires_at(now)
@@ -2957,7 +3113,12 @@ async def generate(req: GenerateRequest):
         session_id = str((session_doc or {}).get("session_id") or req.session_id or "").strip() or None
         session_target_questions = int((session_doc or {}).get("target_questions", req.question_count or 10) or 10)
         session_mode = str((session_doc or {}).get("selected_mode") or state.get("current_session_mode") or req.mode or "normal_practice")
+        git_workflow_scope = is_csen603_git_workflow_scope(req.course_id, req.topic, req.source_text)
         recent_concepts = _recent_concept_focuses_from_question_log((session_doc or {}).get("question_log") or [])
+        recent_families = (
+            _recent_question_families_from_question_log((session_doc or {}).get("question_log") or [], course_id=req.course_id)
+            if git_workflow_scope else []
+        )
         source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
         prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
         recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
@@ -2973,8 +3134,10 @@ async def generate(req: GenerateRequest):
             prompt_version=prompt_version,
             excluded_hashes=recent_hashes,
             recent_concepts=recent_concepts,
+            recent_families=recent_families,
             target_questions=session_target_questions,
             mode=session_mode,
+            git_workflow_scope=git_workflow_scope,
             allow_relaxed_fallback=not preferred_only,
         )
         if cached:
@@ -3026,8 +3189,10 @@ async def generate(req: GenerateRequest):
                     prompt_version=prompt_version,
                     excluded_hashes=recent_hashes,
                     recent_concepts=recent_concepts,
+                    recent_families=recent_families,
                     target_questions=session_target_questions,
                     mode=session_mode,
+                    git_workflow_scope=git_workflow_scope,
                     allow_relaxed_fallback=False,
                 )
                 if recovered:
@@ -3055,8 +3220,10 @@ async def generate(req: GenerateRequest):
                         prompt_version=prompt_version,
                         excluded_hashes=None,
                         recent_concepts=recent_concepts,
+                        recent_families=recent_families,
                         target_questions=session_target_questions,
                         mode=session_mode,
+                        git_workflow_scope=git_workflow_scope,
                     )
                     if recovered:
                         logger.info(
@@ -3108,8 +3275,10 @@ async def generate(req: GenerateRequest):
             course_id=req.course_id,
             recent_hashes=recent_hashes,
             recent_concepts=recent_concepts,
+            recent_families=recent_families,
             target_questions=session_target_questions,
             mode=session_mode,
+            git_workflow_scope=git_workflow_scope,
         )
         generated_difficulty = int(question.get("difficulty", req.difficulty))
         logger.info(
@@ -3272,6 +3441,7 @@ async def submit(req: SubmitRequest):
             "recovery_trigger_reason": recovery_reason,
         }
         question_entry["concept_focus"] = _question_concept_focus(question_entry)
+        question_entry["question_family"] = _question_family(question_entry, course_id=req.course_id)
 
         await _append_question_log(
             session_id=req.session_id,
@@ -4270,6 +4440,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         "counts_toward_session_score": False,
     }
     question_entry["concept_focus"] = _question_concept_focus(question_entry)
+    question_entry["question_family"] = _question_family(question_entry, course_id=req.course_id)
     await _append_question_log(
         session_id=req.session_id,
         question_entry=question_entry,

@@ -739,7 +739,7 @@ def _topic_is_design_or_pattern_family(topic: str) -> bool:
     )
 
 
-def _is_csen603_git_workflow_scope(
+def is_csen603_git_workflow_scope(
     course_id: str | None,
     topic: str,
     source_text: str | None,
@@ -839,7 +839,7 @@ def _build_git_workflow_style_block(
     generation_profile: str,
     source_text: str | None,
 ) -> str:
-    if not _is_csen603_git_workflow_scope(course_id, topic, source_text):
+    if not is_csen603_git_workflow_scope(course_id, topic, source_text):
         return ""
 
     topic_hint = _git_workflow_topic_hint(topic, source_text)
@@ -850,10 +850,14 @@ CSEN603 Git workflow lecture profile:
 - Stay strictly within Git or GitHub workflow and software-engineering collaboration scope grounded in the provided lecture text.
 - Do NOT ask about GitHub web UI or product trivia such as pull-request pages, issues, stars, forks pages, Actions YAML syntax, repo settings, README details, or interface details.
 - Prefer short exam-style MCQs about clone versus pull, commit versus push, local working copy versus remote repository, branch versus trunk or mainline, merge and merge conflicts, distributed version control, commit-message quality, CI after commit, and continuous delivery versus continuous deployment.
+- Prefer coverage across distinct Git workflow families such as clone-first checkout, pull remote updates, commit versus push visibility, branch isolation, branch versus trunk, remote-ahead push rejection, merge conflict resolution, merge-commit graph interpretation, commit-message quality, CI per commit, delivery versus deployment, and workflow-sequence reasoning.
 - Prefer mini team scenarios with named developers when that stays grounded in the lecture text.
+- Vary stem shapes across questions. Use forms such as what went wrong, what should happen next, which workflow mistake occurred, which sequence is correct, what does the commit graph imply, which action best isolates risky work, or which practice helps the team most.
+- Vary actor templates. Sometimes use named developers, but also use a teammate, a maintainer, a new developer, a contributor, the local branch, or the remote repository. Do NOT overuse Alice or Bob style pairs.
 - Prefer one clearly best answer rather than multiple broadly correct workflow statements.
 - Git workflow topic hint: {topic_hint}
 - Git workflow difficulty guidance: {difficulty_hint}
+- For hard and very hard Git questions, avoid collapsing into repeated basic clone-versus-pull discrimination. Prefer remote-ahead push rejection, merge/conflict reasoning, commit-versus-push visibility traps, merge-graph interpretation, CI/CD discrimination, or workflow-sequence reasoning when the lecture text supports them.
 - Keep the answer inferable from the lecture text only.
 """.rstrip()
 
@@ -2807,6 +2811,36 @@ def _concept_rule_matches(text: str, phrases: list[str]) -> bool:
     return _count_text_phrase_matches(text, phrases) >= 2
 
 
+def _question_family_from_git_workflow(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["push rejected", "remote is ahead", "rejected because", "pull before pushing"]) >= 2:
+        return "remote_ahead_push_rejected"
+    if _count_text_phrase_matches(text, ["merge conflict", "overlapping edits", "resolve", "conflict resolution", "same lines"]) >= 2:
+        return "merge_conflict_resolution"
+    if _count_text_phrase_matches(text, ["two parent", "two previous commits", "merged histories", "points to both", "points to c3 and c4"]) >= 1:
+        return "merge_commit_graph"
+    if _count_text_phrase_matches(text, ["continuous delivery", "continuous deployment"]) >= 2:
+        return "delivery_vs_deployment"
+    if _count_text_phrase_matches(text, ["continuous integration", "after commit", "after pushing", "build", "test", "commit triggers"]) >= 2:
+        return "ci_build_per_commit"
+    if _count_text_phrase_matches(text, ["commit message", "meaningful", "descriptive", "clear summary", "good message"]) >= 2:
+        return "commit_message_quality"
+    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
+        return "branch_vs_trunk"
+    if _count_text_phrase_matches(text, ["isolated", "feature branch", "without affecting", "experimental change", "radical changes"]) >= 2:
+        return "branch_isolation"
+    if _count_text_phrase_matches(text, ["committed locally", "local commit", "teammates still", "still do not see", "push"]) >= 2:
+        return "commit_vs_push"
+    if _count_text_phrase_matches(text, ["already has a local", "already has the repository", "teammate", "pushed", "remote is ahead", "pull", "latest changes"]) >= 2:
+        return "pull_remote_updates"
+    if _count_text_phrase_matches(text, ["join the team", "first time", "first day", "local copy", "clone"]) >= 2:
+        return "clone_first_checkout"
+    if _count_text_phrase_matches(text, ["distributed version control", "full repository", "local history", "full copy of history", "each developer has a full repository"]) >= 2:
+        return "distributed_vcs"
+    if _count_text_phrase_matches(text, ["sequence", "order", "what happens next", "next step", "workflow"]) >= 2:
+        return "workflow_sequence"
+    return None
+
+
 def _concept_focus_from_git_workflow(text: str) -> str | None:
     if _count_text_phrase_matches(text, ["continuous delivery", "continuous deployment"]) >= 2:
         return "delivery_vs_deployment"
@@ -2903,6 +2937,30 @@ def _concept_focus_from_design(text: str) -> str | None:
     return None
 
 
+def derive_question_family(question: dict, course_id: str | None = None) -> str | None:
+    if not isinstance(question, dict):
+        return None
+
+    existing = str(question.get("question_family", "")).strip().lower()
+    if existing:
+        return existing
+
+    text_blob = " ".join([
+        str(question.get("topic", "")),
+        str(question.get("question", "") or question.get("question_text", "")),
+        " ".join(str(v) for v in (question.get("options", {}) or {}).values()),
+        str(question.get("explanation", "")),
+    ])
+    text = _normalized_text(text_blob)
+    if not text:
+        return None
+
+    if is_csen603_git_workflow_scope(course_id, str(question.get("topic", "")), text_blob):
+        return _question_family_from_git_workflow(text)
+
+    return None
+
+
 def derive_concept_focus(question: dict) -> str | None:
     if not isinstance(question, dict):
         return None
@@ -2958,13 +3016,17 @@ def derive_concept_focus(question: dict) -> str | None:
     return None
 
 
-def ensure_question_concept_focus(question: dict) -> dict:
+def ensure_question_concept_focus(question: dict, course_id: str | None = None) -> dict:
     if not isinstance(question, dict):
         return question
 
     concept_focus = derive_concept_focus(question)
     if concept_focus:
         question["concept_focus"] = concept_focus
+
+    question_family = derive_question_family(question, course_id or question.get("course_id"))
+    if question_family:
+        question["question_family"] = question_family
     return question
 
 
@@ -3214,7 +3276,7 @@ async def _generate_question_once(
                     raw = _strip_markdown_fences(raw)
 
                     q = json.loads(raw)
-                    q = ensure_question_concept_focus(q)
+                    q = ensure_question_concept_focus(q, course_id=course_id)
 
                     validation_profile = "diagnostic" if generation_profile == "diagnostic" else "default"
                     is_valid, reasons = validate_question(
