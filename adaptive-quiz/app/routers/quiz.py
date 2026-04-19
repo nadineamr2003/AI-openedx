@@ -42,7 +42,7 @@ from app.db.mongodb import get_db
 import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
-CACHE_PROMPT_VERSION = "quiz-cache-v4"
+CACHE_PROMPT_VERSION = "quiz-cache-v5"
 CACHE_UNUSED_TTL_DAYS = 14
 CACHE_USED_TTL_DAYS = 7
 DEFAULT_CACHE_TARGET = 1

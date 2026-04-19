@@ -440,11 +440,141 @@ CONCEPT_FOCUS_TOKEN_MAP = {
     "liskov_substitution": "lsp",
     "abstraction": "abstraction",
     "information_hiding": "information_hiding",
-    "coupling": "high_cohesion_low_coupling",
-    "cohesion": "high_cohesion_low_coupling",
+    "coupling": "low_coupling",
+    "cohesion": "high_cohesion",
 }
 
 CONCEPT_FOCUS_RULES = [
+    (
+        "adapter_wrapper_stack",
+        [
+            "linked list",
+            "stack",
+            "wrapper",
+            "without modifying",
+        ],
+    ),
+    (
+        "wrapper_vs_modify_existing_class",
+        [
+            "wrapper",
+            "modify the existing class",
+            "without modifying",
+            "existing class",
+        ],
+    ),
+    (
+        "clone_first_checkout",
+        [
+            "join the team",
+            "first time",
+            "local copy",
+            "clone",
+        ],
+    ),
+    (
+        "pull_remote_updates",
+        [
+            "already has a local",
+            "teammate",
+            "pushed",
+            "pull",
+        ],
+    ),
+    (
+        "commit_vs_push",
+        [
+            "committed locally",
+            "teammates still",
+            "push",
+        ],
+    ),
+    (
+        "local_vs_remote_repo",
+        [
+            "local repository",
+            "remote repository",
+        ],
+    ),
+    (
+        "branch_isolation",
+        [
+            "isolated",
+            "feature branch",
+            "without affecting",
+        ],
+    ),
+    (
+        "branch_vs_trunk",
+        [
+            "branch",
+            "trunk",
+            "mainline",
+        ],
+    ),
+    (
+        "merge_commit_graph",
+        [
+            "two parent",
+            "two previous commits",
+            "merged histories",
+        ],
+    ),
+    (
+        "merge_conflict_resolution",
+        [
+            "merge conflict",
+            "overlapping edits",
+            "resolve",
+        ],
+    ),
+    (
+        "distributed_vcs",
+        [
+            "distributed version control",
+            "full repository",
+            "local history",
+        ],
+    ),
+    (
+        "commit_message_quality",
+        [
+            "commit message",
+            "descriptive",
+            "meaningful",
+        ],
+    ),
+    (
+        "ci_build_per_commit",
+        [
+            "continuous integration",
+            "after commit",
+            "build",
+        ],
+    ),
+    (
+        "delivery_vs_deployment",
+        [
+            "continuous delivery",
+            "continuous deployment",
+        ],
+    ),
+    (
+        "early_user_involvement",
+        [
+            "involve users early",
+            "real users early",
+            "user feedback early",
+        ],
+    ),
+    (
+        "low_fidelity_iterative_design",
+        [
+            "low fidelity",
+            "iterative",
+            "paper prototype",
+        ],
+    ),
     (
         "aggregate_questions_single_dialog",
         [
@@ -466,30 +596,102 @@ CONCEPT_FOCUS_RULES = [
         ],
     ),
     (
-        "horizontal_vs_vertical_prototype",
+        "horizontal_prototype",
         [
             "horizontal prototype",
+        ],
+    ),
+    (
+        "vertical_prototype",
+        [
             "vertical prototype",
         ],
     ),
     ("t_prototype", ["t prototype", "t-shaped prototype", "t shaped prototype"]),
     ("local_prototype", ["local prototype"]),
     (
-        "static_analyzers_vs_inspections",
+        "visible_feedback",
         [
-            "static analyzer",
-            "static analyzers",
-            "inspection",
-            "inspections",
+            "visible feedback",
+            "feedback after action",
+            "acknowledgment after action",
         ],
     ),
     (
-        "dynamic_vs_static_verification",
+        "visible_state",
+        [
+            "visible system state",
+            "visible state",
+            "show current state",
+        ],
+    ),
+    (
+        "reduce_memory_load",
+        [
+            "recognition rather than recall",
+            "memory load",
+            "reduce memory load",
+        ],
+    ),
+    (
+        "accessibility_text_labels",
+        [
+            "text label",
+            "icons alone",
+            "screen reader",
+            "accessible label",
+        ],
+    ),
+    (
+        "goal_of_testing",
+        [
+            "goal of testing",
+            "find errors",
+            "find defects",
+        ],
+    ),
+    (
+        "static_vs_dynamic_verification",
         [
             "dynamic verification",
             "static verification",
-            "verification and validation",
-            "verification vs validation",
+        ],
+    ),
+    ("static_verification", ["static verification"]),
+    ("dynamic_verification", ["dynamic verification"]),
+    ("inspections", ["inspection", "inspections", "formal review"]),
+    ("static_analyzers", ["static analyzer", "static analyzers", "static analysis tool"]),
+    (
+        "programmer_vs_independent_tester",
+        [
+            "independent tester",
+            "programmer tests",
+            "separate tester",
+        ],
+    ),
+    ("equivalence_partitioning", ["equivalence partition", "equivalence class"]),
+    (
+        "most_likely_to_find_errors",
+        [
+            "most likely to find",
+            "find the most errors",
+            "find more defects",
+        ],
+    ),
+    (
+        "white_box_code_knowledge",
+        [
+            "white box",
+            "internal structure",
+            "source code knowledge",
+        ],
+    ),
+    (
+        "test_suite_efficiency",
+        [
+            "test suite",
+            "same coverage",
+            "fewer test cases",
         ],
     ),
 ]
@@ -516,6 +718,16 @@ def _topic_contains_any(topic: str, keywords: list[str]) -> bool:
     return any(keyword in normalized_topic for keyword in keywords)
 
 
+def _text_contains_any(text: str, phrases: list[str] | tuple[str, ...]) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return any(phrase in normalized for phrase in phrases)
+
+
+def _count_text_phrase_matches(text: str, phrases: list[str] | tuple[str, ...]) -> int:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return sum(1 for phrase in phrases if phrase in normalized)
+
+
 def _topic_is_design_or_pattern_family(topic: str) -> bool:
     return _topic_contains_any(
         topic,
@@ -525,6 +737,125 @@ def _topic_is_design_or_pattern_family(topic: str) -> bool:
             "oop", "object oriented",
         ],
     )
+
+
+def _is_csen603_git_workflow_scope(
+    course_id: str | None,
+    topic: str,
+    source_text: str | None,
+) -> bool:
+    if not _is_csen603_course(course_id):
+        return False
+
+    combined = " ".join([
+        str(topic or ""),
+        str(source_text or ""),
+    ]).lower()
+
+    repository_markers = [
+        "git", "github", "version control", "repository", "repo",
+        "distributed version control",
+    ]
+    workflow_markers = [
+        "clone", "pull", "push", "commit", "branch", "merge",
+        "merge conflict", "working copy", "remote repository",
+        "continuous integration", "continuous delivery", "continuous deployment",
+        "mainline", "trunk", "commit message",
+    ]
+
+    return _text_contains_any(combined, repository_markers) and _count_text_phrase_matches(combined, workflow_markers) >= 2
+
+
+def _git_workflow_topic_hint(topic: str, source_text: str | None = None) -> str:
+    combined = " ".join([str(topic or ""), str(source_text or "")]).lower()
+
+    if _text_contains_any(combined, ["clone", "local working copy", "local repository", "remote repository", "pull", "push"]):
+        return (
+            "Prefer short workflow scenarios that distinguish clone, pull, commit, and push "
+            "based on whether the developer already has a local repository and whether teammates "
+            "need to see the change remotely."
+        )
+
+    if _text_contains_any(combined, ["merge conflict", "merge", "remote is ahead", "overlapping edits"]):
+        return (
+            "Prefer two-developer scenarios about remote-ahead push rejection, merge, and "
+            "merge-conflict resolution grounded in repository history."
+        )
+
+    if _text_contains_any(combined, ["branch", "trunk", "mainline", "main branch"]):
+        return (
+            "Prefer isolated feature-work versus shared baseline scenarios that distinguish "
+            "branching from trunk or mainline work."
+        )
+
+    if _text_contains_any(combined, ["commit", "commit message", "push"]):
+        return (
+            "Prefer local-versus-shared visibility and commit-message-quality scenarios rather "
+            "than command trivia."
+        )
+
+    if _text_contains_any(combined, ["continuous integration", "continuous delivery", "continuous deployment", "ci", "cd"]):
+        return (
+            "Prefer repository-triggered build, test, release, and delivery-versus-deployment "
+            "discrimination without tool syntax or web-UI details."
+        )
+
+    if _text_contains_any(combined, ["distributed version control", "configuration management", "repository history"]):
+        return (
+            "Prefer conceptual workflow discrimination grounded in collaboration, version history, "
+            "and local-versus-remote repository behavior."
+        )
+
+    return (
+        "Prefer short team workflow scenarios about local versus remote state, collaboration, "
+        "branching, merging, and CI/CD consequences."
+    )
+
+
+def _git_workflow_difficulty_hint(difficulty: int, generation_profile: str) -> str:
+    if generation_profile == "diagnostic":
+        return (
+            "Diagnostic tone: keep it clean and answerable. Prefer modest workflow discrimination "
+            "such as clone versus pull, commit versus push, or local versus remote."
+        )
+
+    if difficulty <= 2:
+        return (
+            "Difficulty 1-2: prefer clean command or concept discrimination such as clone versus pull, "
+            "commit versus push, branch versus trunk, or local versus remote."
+        )
+    if difficulty == 3:
+        return "Difficulty 3: prefer short two-developer workflow scenarios."
+    return (
+        "Difficulty 4-5: prefer merge or conflict reasoning, commit-visibility traps, CI/CD discrimination, "
+        "or multi-step workflow reasoning that remains lecture-grounded."
+    )
+
+
+def _build_git_workflow_style_block(
+    course_id: str | None,
+    topic: str,
+    difficulty: int,
+    generation_profile: str,
+    source_text: str | None,
+) -> str:
+    if not _is_csen603_git_workflow_scope(course_id, topic, source_text):
+        return ""
+
+    topic_hint = _git_workflow_topic_hint(topic, source_text)
+    difficulty_hint = _git_workflow_difficulty_hint(difficulty, generation_profile)
+    return f"""
+
+CSEN603 Git workflow lecture profile:
+- Stay strictly within Git or GitHub workflow and software-engineering collaboration scope grounded in the provided lecture text.
+- Do NOT ask about GitHub web UI or product trivia such as pull-request pages, issues, stars, forks pages, Actions YAML syntax, repo settings, README details, or interface details.
+- Prefer short exam-style MCQs about clone versus pull, commit versus push, local working copy versus remote repository, branch versus trunk or mainline, merge and merge conflicts, distributed version control, commit-message quality, CI after commit, and continuous delivery versus continuous deployment.
+- Prefer mini team scenarios with named developers when that stays grounded in the lecture text.
+- Prefer one clearly best answer rather than multiple broadly correct workflow statements.
+- Git workflow topic hint: {topic_hint}
+- Git workflow difficulty guidance: {difficulty_hint}
+- Keep the answer inferable from the lecture text only.
+""".rstrip()
 
 
 def _build_hard_question_quality_block(
@@ -726,14 +1057,15 @@ def _build_course_style_block(
     topic: str,
     difficulty: int,
     generation_profile: str,
+    source_text: str | None = None,
 ) -> str:
-    if not _is_csen603_course(course_id):
-        return ""
+    blocks: list[str] = []
 
-    style_hint = _csen603_style_hint(topic, difficulty, generation_profile)
-    difficulty_hint = _csen603_difficulty_style_hint(difficulty, generation_profile)
-    stem_guardrail_hint = _csen603_stem_guardrail_hint(difficulty, generation_profile)
-    return f"""
+    if _is_csen603_course(course_id):
+        style_hint = _csen603_style_hint(topic, difficulty, generation_profile)
+        difficulty_hint = _csen603_difficulty_style_hint(difficulty, generation_profile)
+        stem_guardrail_hint = _csen603_stem_guardrail_hint(difficulty, generation_profile)
+        blocks.append(f"""
 
 CSEN603 exam-style framing:
 - Prefer scenario-based MCQs over pure definitions when the lecture text supports it.
@@ -749,7 +1081,19 @@ CSEN603 exam-style framing:
 - Do NOT invent GitHub-specific, Jira-specific, CI/CD platform-specific, or deployment-specific behavior unless the lecture text clearly supports that level of detail.
 - Keep the scenario minimal. If an applied framing would become unsupported or overly complex, choose the safest grounded applied form available.
 - If the lecture text does not support a realistic scenario cleanly, prefer a grounded conceptual or applied question instead.
-""".rstrip()
+""".rstrip())
+
+    git_workflow_block = _build_git_workflow_style_block(
+        course_id=course_id,
+        topic=topic,
+        difficulty=difficulty,
+        generation_profile=generation_profile,
+        source_text=source_text,
+    )
+    if git_workflow_block:
+        blocks.append(git_workflow_block)
+
+    return "\n\n".join(blocks)
 
 
 def _build_hard_short_scope_policy(
@@ -2450,6 +2794,115 @@ def _stem_option_mismatch_reason(q: dict) -> str | None:
     return None
 
 
+def _concept_rule_matches(text: str, phrases: list[str]) -> bool:
+    if not phrases:
+        return False
+
+    if len(phrases) == 1:
+        return _text_contains_any(text, phrases)
+
+    if len(phrases) == 2:
+        return all(phrase in text for phrase in phrases)
+
+    return _count_text_phrase_matches(text, phrases) >= 2
+
+
+def _concept_focus_from_git_workflow(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["continuous delivery", "continuous deployment"]) >= 2:
+        return "delivery_vs_deployment"
+    if _count_text_phrase_matches(text, ["continuous integration", "after commit", "after pushing", "build", "test", "commit triggers"]) >= 2:
+        return "ci_build_per_commit"
+    if _count_text_phrase_matches(text, ["commit message", "meaningful", "descriptive", "clear summary", "good message"]) >= 2:
+        return "commit_message_quality"
+    if _count_text_phrase_matches(text, ["merge conflict", "overlapping edits", "resolve", "conflict resolution", "same lines"]) >= 2:
+        return "merge_conflict_resolution"
+    if _count_text_phrase_matches(text, ["two parent", "two previous commits", "merged histories", "points to both", "points to c3 and c4"]) >= 1:
+        return "merge_commit_graph"
+    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
+        return "branch_vs_trunk"
+    if _count_text_phrase_matches(text, ["isolated", "feature branch", "without affecting", "experimental change", "radical changes"]) >= 2:
+        return "branch_isolation"
+    if _count_text_phrase_matches(text, ["local repository", "remote repository", "local repo", "remote repo", "working copy", "shared repository"]) >= 2:
+        return "local_vs_remote_repo"
+    if _count_text_phrase_matches(text, ["committed locally", "local commit", "teammates still", "still do not see", "push"]) >= 2:
+        return "commit_vs_push"
+    if _count_text_phrase_matches(text, ["already has a local", "already has the repository", "teammate", "pushed", "remote is ahead", "pull", "latest changes"]) >= 2:
+        return "pull_remote_updates"
+    if _count_text_phrase_matches(text, ["join the team", "first time", "first day", "local copy", "clone"]) >= 2:
+        return "clone_first_checkout"
+    if _count_text_phrase_matches(text, ["distributed version control", "full repository", "local history", "full copy of history", "each developer has a full repository"]) >= 2:
+        return "distributed_vcs"
+    return None
+
+
+def _concept_focus_from_ui_ux(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["aggregate related questions", "single dialog", "single dialogue", "many related questions"]) >= 2:
+        return "aggregate_questions_single_dialog"
+    if _count_text_phrase_matches(text, ["text label", "icons alone", "screen reader", "accessible label"]) >= 2:
+        return "accessibility_text_labels"
+    if _count_text_phrase_matches(text, ["recognition rather than recall", "memory load", "reduce memory load"]) >= 2:
+        return "reduce_memory_load"
+    if _count_text_phrase_matches(text, ["reversible action", "confirmation dialog", "undo instead", "confirmation before"]) >= 2:
+        return "reversible_actions_vs_confirmation"
+    if _count_text_phrase_matches(text, ["visible system state", "visible state", "show current state", "status visibility"]) >= 2:
+        return "visible_state"
+    if _count_text_phrase_matches(text, ["visible feedback", "feedback after action", "acknowledgment after action"]) >= 2:
+        return "visible_feedback"
+    if "horizontal prototype" in text:
+        return "horizontal_prototype"
+    if "vertical prototype" in text:
+        return "vertical_prototype"
+    if "t prototype" in text or "t-shaped prototype" in text or "t shaped prototype" in text:
+        return "t_prototype"
+    if "local prototype" in text:
+        return "local_prototype"
+    if _count_text_phrase_matches(text, ["low fidelity", "paper prototype", "iterative", "rough prototype"]) >= 2:
+        return "low_fidelity_iterative_design"
+    if _count_text_phrase_matches(text, ["involve users early", "real users early", "user feedback early", "users early in design"]) >= 2:
+        return "early_user_involvement"
+    return None
+
+
+def _concept_focus_from_testing(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["static verification", "dynamic verification"]) >= 2:
+        return "static_vs_dynamic_verification"
+    if _count_text_phrase_matches(text, ["test suite", "same coverage", "fewer test cases", "efficiency"]) >= 2:
+        return "test_suite_efficiency"
+    if _count_text_phrase_matches(text, ["white box", "internal structure", "source code knowledge"]) >= 2:
+        return "white_box_code_knowledge"
+    if _count_text_phrase_matches(text, ["most likely to find", "find the most errors", "find more defects"]) >= 2:
+        return "most_likely_to_find_errors"
+    if _count_text_phrase_matches(text, ["equivalence partition", "equivalence class"]) >= 1:
+        return "equivalence_partitioning"
+    if _count_text_phrase_matches(text, ["independent tester", "programmer tests", "separate tester"]) >= 2:
+        return "programmer_vs_independent_tester"
+    if _count_text_phrase_matches(text, ["static analyzer", "static analyzers", "static analysis tool"]) >= 1:
+        return "static_analyzers"
+    if _count_text_phrase_matches(text, ["inspection", "inspections", "formal review"]) >= 1:
+        return "inspections"
+    if "dynamic verification" in text:
+        return "dynamic_verification"
+    if "static verification" in text:
+        return "static_verification"
+    if _count_text_phrase_matches(text, ["goal of testing", "find errors", "find defects"]) >= 2:
+        return "goal_of_testing"
+    return None
+
+
+def _concept_focus_from_design(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["linked list", "stack", "wrapper", "without modifying"]) >= 2:
+        return "adapter_wrapper_stack"
+    if _count_text_phrase_matches(text, ["wrapper", "modify the existing class", "without modifying", "existing class"]) >= 2:
+        return "wrapper_vs_modify_existing_class"
+    if "adapter pattern" in text or ("adapter" in text and "wrapper" in text):
+        return "adapter_pattern"
+    if _count_text_phrase_matches(text, ["high cohesion", "cohesion"]) >= 1:
+        return "high_cohesion"
+    if _count_text_phrase_matches(text, ["low coupling", "loosely coupled", "reduce dependencies"]) >= 1:
+        return "low_coupling"
+    return None
+
+
 def derive_concept_focus(question: dict) -> str | None:
     if not isinstance(question, dict):
         return None
@@ -2468,6 +2921,16 @@ def derive_concept_focus(question: dict) -> str | None:
     if not text:
         return None
 
+    for resolver in (
+        _concept_focus_from_git_workflow,
+        _concept_focus_from_ui_ux,
+        _concept_focus_from_testing,
+        _concept_focus_from_design,
+    ):
+        concept_focus = resolver(text)
+        if concept_focus:
+            return concept_focus
+
     for canonical, aliases in NAMED_CONCEPT_ALIASES.items():
         option_aliases = OPTION_ONLY_CONCEPT_ALIASES.get(canonical, [])
         if any(alias in text for alias in list(aliases) + list(option_aliases)):
@@ -2484,22 +2947,13 @@ def derive_concept_focus(question: dict) -> str | None:
             return CONCEPT_FOCUS_TOKEN_MAP.get(canonical, canonical)
 
     for token, phrases in CONCEPT_FOCUS_RULES:
-        if all(phrase in text for phrase in phrases[:2]) and len(phrases) == 2:
-            return token
-        if any(phrase in text for phrase in phrases):
+        if _concept_rule_matches(text, phrases):
             return token
 
-    if (
-        ("high cohesion" in text or "low coupling" in text or "tight coupling" in text)
-        and ("cohesion" in text or "coupling" in text)
-    ):
-        return "high_cohesion_low_coupling"
-
-    if (
-        ("static" in text and "dynamic" in text)
-        and any(marker in text for marker in ("verification", "validation", "testing", "analysis"))
-    ):
-        return "dynamic_vs_static_verification"
+    if "abstraction" in text:
+        return "abstraction"
+    if "information hiding" in text or "encapsulation" in text:
+        return "information_hiding"
 
     return None
 
@@ -2645,6 +3099,7 @@ async def _generate_question_once(
         topic,
         difficulty,
         generation_profile,
+        selected_context,
     )
     hard_quality_block = _build_hard_question_quality_block(
         course_id,
