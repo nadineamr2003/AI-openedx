@@ -1993,6 +1993,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
                 "topic": self.current_topic,
                 "difficulty": self.current_difficulty,
                 "source_text": self.session_source_text,
+                "session_id": self.active_session_id or None,
             },
             timeout=SIMILAR_QUESTION_TIMEOUT,
         )

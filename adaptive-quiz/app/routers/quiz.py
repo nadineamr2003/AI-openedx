@@ -34,6 +34,8 @@ from app.services.ai_engine import (
     generate_simple_explanation,
     generate_worked_example_support,
     extract_content_metadata,
+    derive_concept_focus,
+    ensure_question_concept_focus,
 )
 from app.services.pdf_parser import extract_text_from_pdf_base64
 from app.db.mongodb import get_db
@@ -54,6 +56,8 @@ _REPLENISH_IN_FLIGHT: set[str] = set()
 RECENT_QUESTION_HISTORY_LIMIT = 40
 RECENT_QUESTION_HISTORY_MAX_AGE = timedelta(days=14)
 LIVE_DEDUPE_MAX_ATTEMPTS = 3
+CONCEPT_DEDUPE_CACHE_SCAN_LIMIT = 8
+CONCEPT_DEDUPE_SESSION_SCAN_LIMIT = 12
 CHALLENGE_READY_AVG_MASTERY = TARGET_BAND[0]
 CHALLENGE_NOT_READY_ERROR = "challenge_not_ready"
 DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS = 3
@@ -280,6 +284,8 @@ def _prune_recent_question_history(history: list[dict] | None) -> list[dict]:
             "difficulty": difficulty,
             "source_scope_key": str(entry.get("source_scope_key", "")).strip(),
             "prompt_version": str(entry.get("prompt_version", "")).strip(),
+            "concept_focus": _normalized_concept_focus(entry.get("concept_focus")),
+            "session_id": str(entry.get("session_id", "")).strip(),
             "seen_at": seen_at.isoformat(),
         })
 
@@ -316,6 +322,126 @@ def _hash_preview(question_hash: str) -> str:
     return question_hash[:12] if question_hash else "unknown"
 
 
+def _normalized_concept_focus(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _question_concept_focus(question: dict) -> str | None:
+    if not isinstance(question, dict):
+        return None
+
+    concept_focus = _normalized_concept_focus(question.get("concept_focus"))
+    if concept_focus:
+        return concept_focus
+
+    concept_focus = _normalized_concept_focus(derive_concept_focus(question))
+    if concept_focus:
+        question["concept_focus"] = concept_focus
+        return concept_focus
+
+    return None
+
+
+def _concept_dedupe_policy(
+    target_questions: int | None,
+    mode: str | None,
+) -> dict[str, int | bool]:
+    normalized_mode = str(mode or "").strip().lower()
+    try:
+        total = int(target_questions or 0)
+    except (TypeError, ValueError):
+        total = 0
+
+    if total <= 0:
+        total = 10
+
+    if total <= 5:
+        return {
+            "recent_window": 3 if normalized_mode == "challenge" else 2,
+            "avoid_anywhere": True,
+            "live_attempts": 2,
+        }
+
+    if total <= 8 or normalized_mode == "challenge":
+        return {
+            "recent_window": 2,
+            "avoid_anywhere": False,
+            "live_attempts": 2,
+        }
+
+    return {
+        "recent_window": 1,
+        "avoid_anywhere": False,
+        "live_attempts": 1,
+    }
+
+
+def _recent_concept_focuses_from_question_log(question_log: list[dict] | None) -> list[str]:
+    concepts: list[str] = []
+
+    for entry in question_log or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("is_recovery_step") or entry.get("counts_toward_session_score") is False:
+            continue
+
+        concept_focus = _question_concept_focus(entry)
+        if not concept_focus:
+            continue
+        concepts.append(concept_focus)
+
+    return concepts[-CONCEPT_DEDUPE_SESSION_SCAN_LIMIT:]
+
+
+def _concept_repeats_too_soon(
+    concept_focus: str | None,
+    recent_concepts: list[str],
+    *,
+    target_questions: int | None,
+    mode: str | None,
+) -> bool:
+    concept_focus = _normalized_concept_focus(concept_focus)
+    if not concept_focus or not recent_concepts:
+        return False
+
+    policy = _concept_dedupe_policy(target_questions, mode)
+    recent_window = int(policy.get("recent_window", 0) or 0)
+    avoid_anywhere = bool(policy.get("avoid_anywhere"))
+
+    if avoid_anywhere and concept_focus in recent_concepts:
+        return True
+
+    return concept_focus in recent_concepts[-recent_window:] if recent_window > 0 else False
+
+
+async def _load_active_session_doc(
+    student_id: str,
+    course_id: str,
+    session_id: str | None = None,
+) -> dict | None:
+    db = get_db()
+    session_id = str(session_id or "").strip()
+
+    if session_id:
+        doc = await db.student_session_history.find_one({"session_id": session_id})
+        return doc if _is_resumable_session_doc(doc) else None
+
+    docs = await db.student_session_history.find(
+        {
+            "student_id": student_id,
+            "course_id": course_id,
+            "ended_at": None,
+            "abandoned_at": {"$exists": False},
+        }
+    ).sort("started_at", -1).to_list(length=3)
+
+    for doc in docs:
+        if _is_resumable_session_doc(doc):
+            return doc
+
+    return None
+
+
 def _cache_unused_expires_at(now: datetime) -> datetime:
     return now + timedelta(days=CACHE_UNUSED_TTL_DAYS)
 
@@ -345,10 +471,12 @@ def _record_seen_question(
     difficulty: int,
     source_scope_key: str,
     prompt_version: str,
+    session_id: str | None = None,
 ) -> str:
     question_hash = _question_hash_for_tracking(question)
     history = _prepare_recent_question_history(state)
     now_iso = datetime.now(timezone.utc).isoformat()
+    concept_focus = _question_concept_focus(question)
 
     history = [
         entry for entry in history
@@ -365,6 +493,8 @@ def _record_seen_question(
         "difficulty": int(difficulty),
         "source_scope_key": source_scope_key,
         "prompt_version": prompt_version,
+        "concept_focus": concept_focus or "",
+        "session_id": str(session_id or "").strip(),
         "seen_at": now_iso,
     })
     state["recent_question_history"] = _prune_recent_question_history(history)
@@ -383,9 +513,14 @@ async def _generate_question_with_soft_dedupe(
     source_text: str,
     course_id: str,
     recent_hashes: list[str],
+    recent_concepts: list[str] | None = None,
+    target_questions: int | None = None,
+    mode: str | None = None,
 ) -> dict:
     recent_hash_set = set(recent_hashes)
-    attempts = LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1
+    concept_policy = _concept_dedupe_policy(target_questions, mode)
+    concept_attempts = int(concept_policy.get("live_attempts", 1) or 1) if recent_concepts else 1
+    attempts = max(LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1, concept_attempts)
 
     for attempt in range(1, attempts + 1):
         question = await generate_question(
@@ -394,36 +529,59 @@ async def _generate_question_with_soft_dedupe(
             source_text=source_text,
             course_id=course_id,
         )
+        question = ensure_question_concept_focus(question)
         question_hash = _question_hash_for_tracking(question)
-
-        if question_hash not in recent_hash_set:
-            return question
-
-        logger.info(
-            "[DEDUPE] Live repeat detected course=%s topic=%s difficulty=%s attempt=%s hash=%s",
-            course_id,
-            topic,
-            difficulty,
-            attempt,
-            _hash_preview(question_hash),
+        concept_focus = _question_concept_focus(question)
+        hash_duplicate = question_hash in recent_hash_set
+        concept_duplicate = _concept_repeats_too_soon(
+            concept_focus,
+            recent_concepts or [],
+            target_questions=target_questions,
+            mode=mode,
         )
 
-        if attempt < attempts:
+        if not hash_duplicate and not concept_duplicate:
+            return question
+
+        if hash_duplicate:
             logger.info(
-                "[DEDUPE] Live repeat retry course=%s topic=%s difficulty=%s attempt=%s",
+                "[DEDUPE] Live repeat detected course=%s topic=%s difficulty=%s attempt=%s hash=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempt,
+                _hash_preview(question_hash),
+            )
+
+        if concept_duplicate:
+            logger.info(
+                "[CONCEPT] Live concept repeat course=%s topic=%s difficulty=%s attempt=%s concept=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempt,
+                concept_focus or "unknown",
+            )
+
+        if attempt < attempts:
+            retry_reason = "hash_or_concept"
+            logger.info(
+                "[DEDUPE] Live retry course=%s topic=%s difficulty=%s attempt=%s reason=%s",
                 course_id,
                 topic,
                 difficulty,
                 attempt + 1,
+                retry_reason,
             )
             continue
 
         logger.info(
-            "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s",
+            "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s concept=%s",
             course_id,
             topic,
             difficulty,
             attempts,
+            concept_focus or "unknown",
         )
         return question
 
@@ -2317,6 +2475,9 @@ async def _get_cached_question(
     source_scope_key: str,
     prompt_version: str,
     excluded_hashes: list[str] | None = None,
+    recent_concepts: list[str] | None = None,
+    target_questions: int | None = None,
+    mode: str | None = None,
     allow_relaxed_fallback: bool = True,
 ) -> dict | None:
     db = get_db()
@@ -2324,12 +2485,24 @@ async def _get_cached_question(
     used_at = now.isoformat()
     expires_at = _cache_used_expires_at(now)
 
-    async def _claim(query: dict) -> dict | None:
+    async def _claim(query: dict, extra_updates: dict | None = None) -> dict | None:
+        update_set = {"used": True, "used_at": used_at, "expires_at": expires_at}
+        if extra_updates:
+            update_set.update(extra_updates)
         return await db.questions_cache.find_one_and_update(
             query,
-            {"$set": {"used": True, "used_at": used_at, "expires_at": expires_at}},
+            {"$set": update_set},
             sort=[("generated_at", -1)],
         )
+
+    async def _claim_specific(doc: dict, concept_focus: str | None = None) -> dict | None:
+        question = await _claim(
+            {"_id": doc["_id"], "used": False},
+            extra_updates={"concept_focus": concept_focus} if concept_focus and not doc.get("concept_focus") else None,
+        )
+        if question and concept_focus and not question.get("concept_focus"):
+            question["concept_focus"] = concept_focus
+        return question
 
     base_query = {
         "topic": topic,
@@ -2341,11 +2514,56 @@ async def _get_cached_question(
     }
 
     question = None
+    normalized_recent_concepts = [
+        _normalized_concept_focus(value)
+        for value in (recent_concepts or [])
+        if _normalized_concept_focus(value)
+    ]
+
+    if normalized_recent_concepts:
+        preferred_query = dict(base_query)
+        if excluded_hashes:
+            preferred_query["question_hash"] = {"$nin": excluded_hashes}
+
+        candidates = await db.questions_cache.find(preferred_query).sort(
+            "generated_at",
+            -1,
+        ).to_list(length=CONCEPT_DEDUPE_CACHE_SCAN_LIMIT)
+
+        for candidate in candidates:
+            concept_focus = _question_concept_focus(candidate)
+            if _concept_repeats_too_soon(
+                concept_focus,
+                normalized_recent_concepts,
+                target_questions=target_questions,
+                mode=mode,
+            ):
+                logger.info(
+                    "[CONCEPT] Cache candidate skipped course=%s topic=%s difficulty=%s concept=%s",
+                    course_id,
+                    topic,
+                    difficulty,
+                    concept_focus,
+                )
+                continue
+
+            question = await _claim_specific(candidate, concept_focus)
+            if question:
+                logger.info(
+                    "[CONCEPT] Cache preferred concept course=%s topic=%s difficulty=%s concept=%s",
+                    course_id,
+                    topic,
+                    difficulty,
+                    concept_focus or "unknown",
+                )
+                break
+
     if excluded_hashes:
-        question = await _claim({
-            **base_query,
-            "question_hash": {"$nin": excluded_hashes},
-        })
+        if question is None:
+            question = await _claim({
+                **base_query,
+                "question_hash": {"$nin": excluded_hashes},
+            })
         if question:
             logger.info(
                 "[DEDUPE] Cache preferred course=%s topic=%s difficulty=%s",
@@ -2366,6 +2584,7 @@ async def _get_cached_question(
         question = await _claim(base_query)
 
     if question:
+        question = ensure_question_concept_focus(question)
         question["used"] = True
         question["used_at"] = used_at
         question["expires_at"] = expires_at
@@ -2433,6 +2652,7 @@ async def _replenish_cache(
                     source_text,
                     course_id=course_id,
                 )
+                q = ensure_question_concept_focus(q)
                 now = datetime.now(timezone.utc)
                 generated_at = now.isoformat()
                 expires_at = _cache_unused_expires_at(now)
@@ -2655,6 +2875,7 @@ async def _generate_first_question(
         difficulty=int(question.get("difficulty", difficulty)),
         source_scope_key=source_scope_key,
         prompt_version=CACHE_PROMPT_VERSION,
+        session_id=session_id,
     )
     await _save_state(state)
 
@@ -2732,6 +2953,11 @@ async def generate(req: GenerateRequest):
     """Generate next question — serve from cache if available."""
     try:
         state = await _get_state(req.student_id, req.course_id, [req.topic])
+        session_doc = await _load_active_session_doc(req.student_id, req.course_id, req.session_id)
+        session_id = str((session_doc or {}).get("session_id") or req.session_id or "").strip() or None
+        session_target_questions = int((session_doc or {}).get("target_questions", req.question_count or 10) or 10)
+        session_mode = str((session_doc or {}).get("selected_mode") or state.get("current_session_mode") or req.mode or "normal_practice")
+        recent_concepts = _recent_concept_focuses_from_question_log((session_doc or {}).get("question_log") or [])
         source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
         prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
         recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
@@ -2746,6 +2972,9 @@ async def generate(req: GenerateRequest):
             source_scope_key=source_scope_key,
             prompt_version=prompt_version,
             excluded_hashes=recent_hashes,
+            recent_concepts=recent_concepts,
+            target_questions=session_target_questions,
+            mode=session_mode,
             allow_relaxed_fallback=not preferred_only,
         )
         if cached:
@@ -2769,6 +2998,7 @@ async def generate(req: GenerateRequest):
                 difficulty=int(cached.get("difficulty", req.difficulty)),
                 source_scope_key=source_scope_key,
                 prompt_version=prompt_version,
+                session_id=session_id,
             )
             await _save_state(state)
             return cached
@@ -2795,6 +3025,9 @@ async def generate(req: GenerateRequest):
                     source_scope_key=source_scope_key,
                     prompt_version=prompt_version,
                     excluded_hashes=recent_hashes,
+                    recent_concepts=recent_concepts,
+                    target_questions=session_target_questions,
+                    mode=session_mode,
                     allow_relaxed_fallback=False,
                 )
                 if recovered:
@@ -2821,6 +3054,9 @@ async def generate(req: GenerateRequest):
                         source_scope_key=source_scope_key,
                         prompt_version=prompt_version,
                         excluded_hashes=None,
+                        recent_concepts=recent_concepts,
+                        target_questions=session_target_questions,
+                        mode=session_mode,
                     )
                     if recovered:
                         logger.info(
@@ -2849,6 +3085,7 @@ async def generate(req: GenerateRequest):
                     difficulty=int(recovered.get("difficulty", req.difficulty)),
                     source_scope_key=source_scope_key,
                     prompt_version=prompt_version,
+                    session_id=session_id,
                 )
                 await _save_state(state)
                 return recovered
@@ -2870,6 +3107,9 @@ async def generate(req: GenerateRequest):
             source_text=req.source_text,
             course_id=req.course_id,
             recent_hashes=recent_hashes,
+            recent_concepts=recent_concepts,
+            target_questions=session_target_questions,
+            mode=session_mode,
         )
         generated_difficulty = int(question.get("difficulty", req.difficulty))
         logger.info(
@@ -2897,6 +3137,7 @@ async def generate(req: GenerateRequest):
             difficulty=generated_difficulty,
             source_scope_key=source_scope_key,
             prompt_version=prompt_version,
+            session_id=session_id,
         )
         await _save_state(state)
         return question
@@ -3030,6 +3271,7 @@ async def submit(req: SubmitRequest):
             "recovery_step_available": bool(recovery_reason),
             "recovery_trigger_reason": recovery_reason,
         }
+        question_entry["concept_focus"] = _question_concept_focus(question_entry)
 
         await _append_question_log(
             session_id=req.session_id,
@@ -4027,6 +4269,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         "recovery_outcome": "recovered" if is_correct else "still_needs_review",
         "counts_toward_session_score": False,
     }
+    question_entry["concept_focus"] = _question_concept_focus(question_entry)
     await _append_question_log(
         session_id=req.session_id,
         question_entry=question_entry,
@@ -4458,6 +4701,7 @@ async def resume_session(req: SessionResumeRequest):
         mode=selected_mode,
         session_origin=session_origin,
         content_ids=scope["content_ids"],
+        session_id=req.session_id,
     ))
 
     return {

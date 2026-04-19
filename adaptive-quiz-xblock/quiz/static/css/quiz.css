@@ -773,10 +773,18 @@
   border-radius: 999px;
   background: rgba(255, 255, 255, .9);
   color: var(--aq-text-muted);
-  font-size: 1rem;
+  font-size: 1.2rem;  /* Slightly larger for better visual weight */
   line-height: 1;
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
+  
+  /* Add these three properties to center the "×" perfectly */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  
+  /* Optional: remove default button padding that might cause offset */
+  padding: 0;
 }
 
 .aq-confidence-close:hover {

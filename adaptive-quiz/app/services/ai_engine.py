@@ -425,6 +425,75 @@ DESCRIBED_CONCEPT_HINTS = {
     },
 }
 
+CONCEPT_FOCUS_TOKEN_MAP = {
+    "command": "command_pattern",
+    "observer": "observer_pattern",
+    "strategy": "strategy_pattern",
+    "factory_method": "factory_method_pattern",
+    "decorator": "decorator_pattern",
+    "adapter": "adapter_pattern",
+    "singleton": "singleton_pattern",
+    "dependency_inversion": "dip",
+    "open_closed": "ocp",
+    "single_responsibility": "srp",
+    "interface_segregation": "isp",
+    "liskov_substitution": "lsp",
+    "abstraction": "abstraction",
+    "information_hiding": "information_hiding",
+    "coupling": "high_cohesion_low_coupling",
+    "cohesion": "high_cohesion_low_coupling",
+}
+
+CONCEPT_FOCUS_RULES = [
+    (
+        "aggregate_questions_single_dialog",
+        [
+            "single dialog",
+            "single dialogue",
+            "aggregate related questions",
+            "aggregate many related questions",
+            "many related questions into a single dialog",
+        ],
+    ),
+    (
+        "reversible_actions_vs_confirmation",
+        [
+            "reversible action",
+            "reversible actions",
+            "confirmation dialog",
+            "confirmation before",
+            "undo instead",
+        ],
+    ),
+    (
+        "horizontal_vs_vertical_prototype",
+        [
+            "horizontal prototype",
+            "vertical prototype",
+        ],
+    ),
+    ("t_prototype", ["t prototype", "t-shaped prototype", "t shaped prototype"]),
+    ("local_prototype", ["local prototype"]),
+    (
+        "static_analyzers_vs_inspections",
+        [
+            "static analyzer",
+            "static analyzers",
+            "inspection",
+            "inspections",
+        ],
+    ),
+    (
+        "dynamic_vs_static_verification",
+        [
+            "dynamic verification",
+            "static verification",
+            "verification and validation",
+            "verification vs validation",
+        ],
+    ),
+]
+
 
 def _brittle_reason_subset(reasons: list[str]) -> list[str]:
     return [reason for reason in reasons if reason in HIGH_DIFFICULTY_BRITTLE_REASONS]
@@ -2381,6 +2450,70 @@ def _stem_option_mismatch_reason(q: dict) -> str | None:
     return None
 
 
+def derive_concept_focus(question: dict) -> str | None:
+    if not isinstance(question, dict):
+        return None
+
+    existing = str(question.get("concept_focus", "")).strip().lower()
+    if existing:
+        return existing
+
+    text_blob = " ".join([
+        str(question.get("topic", "")),
+        str(question.get("question", "") or question.get("question_text", "")),
+        " ".join(str(v) for v in (question.get("options", {}) or {}).values()),
+        str(question.get("explanation", "")),
+    ])
+    text = _normalized_text(text_blob)
+    if not text:
+        return None
+
+    for canonical, aliases in NAMED_CONCEPT_ALIASES.items():
+        option_aliases = OPTION_ONLY_CONCEPT_ALIASES.get(canonical, [])
+        if any(alias in text for alias in list(aliases) + list(option_aliases)):
+            return CONCEPT_FOCUS_TOKEN_MAP.get(canonical, canonical)
+
+    for canonical, config in DESCRIBED_CONCEPT_HINTS.items():
+        groups = config.get("groups", [])
+        threshold = int(config.get("threshold", 2) or 2)
+        score = 0
+        for group in groups:
+            if any(phrase in text for phrase in group):
+                score += 1
+        if score >= threshold:
+            return CONCEPT_FOCUS_TOKEN_MAP.get(canonical, canonical)
+
+    for token, phrases in CONCEPT_FOCUS_RULES:
+        if all(phrase in text for phrase in phrases[:2]) and len(phrases) == 2:
+            return token
+        if any(phrase in text for phrase in phrases):
+            return token
+
+    if (
+        ("high cohesion" in text or "low coupling" in text or "tight coupling" in text)
+        and ("cohesion" in text or "coupling" in text)
+    ):
+        return "high_cohesion_low_coupling"
+
+    if (
+        ("static" in text and "dynamic" in text)
+        and any(marker in text for marker in ("verification", "validation", "testing", "analysis"))
+    ):
+        return "dynamic_vs_static_verification"
+
+    return None
+
+
+def ensure_question_concept_focus(question: dict) -> dict:
+    if not isinstance(question, dict):
+        return question
+
+    concept_focus = derive_concept_focus(question)
+    if concept_focus:
+        question["concept_focus"] = concept_focus
+    return question
+
+
 def _difficulty_mismatch_reasons(
     q: dict,
     source_text: str | None = None,
@@ -2626,6 +2759,7 @@ async def _generate_question_once(
                     raw = _strip_markdown_fences(raw)
 
                     q = json.loads(raw)
+                    q = ensure_question_concept_focus(q)
 
                     validation_profile = "diagnostic" if generation_profile == "diagnostic" else "default"
                     is_valid, reasons = validate_question(

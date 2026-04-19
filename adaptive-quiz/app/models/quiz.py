@@ -12,6 +12,7 @@ class GenerateRequest(BaseModel):
     content_ids:   list[str] = []
     focus_topics:  list[str] | None = None
     question_count: int = 10
+    session_id:    str | None = None
 
 
 class SubmitRequest(BaseModel):
