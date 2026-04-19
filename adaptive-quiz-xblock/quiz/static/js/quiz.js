@@ -1078,7 +1078,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
       if (features.indexOf('explain_simpler') !== -1) {
         supportRow.appendChild(
-          makeSupportBtn('💬 Simpler explanation', handleExplainSimpler)
+          makeSupportBtn('💬 Explain with an analogy', handleExplainSimpler)
         );
       }
 

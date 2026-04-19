@@ -2276,7 +2276,7 @@ Original explanation: {explanation}
 Rewrite the explanation in much simpler language for a beginner student.
 - Keep it factually consistent with the original explanation.
 - Define any technical term briefly if needed.
-- Use an analogy only if it genuinely clarifies the concept.
+- Use an analogy to genuinely clarify the concept.
 - Be concise — 2 to 3 sentences maximum.
 - Do not introduce new topics or extra facts not already implied by the original explanation.
 
