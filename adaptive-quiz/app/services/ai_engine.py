@@ -22,6 +22,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY")
+FIREWORKS_API_BASE = os.getenv("FIREWORKS_API_BASE", "https://api.fireworks.ai/inference/v1").strip()
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_API_BASE = os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1").strip()
 
 # =========================
 # HELPERS
@@ -32,26 +36,85 @@ def _csv_env(name: str, default: List[str]) -> List[str]:
         return default
     return [x.strip() for x in raw.split(",") if x.strip()]
 
+
+def _append_configured_provider_fallbacks(order: list[str]) -> list[str]:
+    normalized = []
+    seen = set()
+    for provider_name in order:
+        if provider_name in seen:
+            continue
+        seen.add(provider_name)
+        normalized.append(provider_name)
+
+    for provider_name, api_key in (
+        ("fireworks", FIREWORKS_API_KEY),
+        ("mistral", MISTRAL_API_KEY),
+    ):
+        if api_key and provider_name not in seen:
+            normalized.append(provider_name)
+            seen.add(provider_name)
+
+    return normalized
+
 PROVIDER_ORDER = _csv_env(
     "PROVIDER_ORDER",
-    ["gemini", "groq", "cerebras", "openrouter", "huggingface"]
+    ["gemini", "groq", "cerebras", "fireworks", "mistral", "openrouter", "huggingface"]
 )
+PROVIDER_ORDER = _append_configured_provider_fallbacks(PROVIDER_ORDER)
 
 DIAGNOSTIC_PROVIDER_PRIORITY = ["cerebras", "huggingface", "groq"]
+GIT_CHALLENGE_SAFE_PROVIDER_ORDER = [
+    "groq",
+    "cerebras",
+    "huggingface",
+    "fireworks",
+    "mistral",
+]
+GIT_CHALLENGE_SAFE_MODEL_PREFERENCES = {
+    "groq": ["llama-3.1-8b-instant"],
+    "cerebras": ["llama-3.1-8b", "qwen-3-235b-a22b-instruct-2507"],
+    "huggingface": ["meta-llama/Llama-3.1-8B-Instruct:cerebras"],
+    "fireworks": ["accounts/fireworks/models/deepseek-v3p1"],
+    "mistral": ["mistral-small-latest"],
+}
 
 # Keep provider model lists in env so you can tune them without editing code.
 PROVIDER_MODELS = {
     "gemini": _csv_env("GEMINI_MODELS", ["gemini-3-flash-preview"]),
     "groq": _csv_env("GROQ_MODELS", ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
-    "cerebras": _csv_env("CEREBRAS_MODELS", ["llama3.1-8b"]),
+    "cerebras": _csv_env(
+        "CEREBRAS_MODELS",
+        [
+            "llama-3.1-8b",
+            "qwen-3-235b-a22b-instruct-2507",
+        ],
+    ),
+    "fireworks": _csv_env(
+        "FIREWORKS_MODELS",
+        [
+            "accounts/fireworks/models/deepseek-v3p1",
+            "accounts/fireworks/models/deepseek-v3p2",
+        ],
+    ),
+    "mistral": _csv_env(
+        "MISTRAL_MODELS",
+        [
+            "mistral-small-latest",
+            "mistral-medium-latest",
+            "mistral-large-latest",
+        ],
+    ),
     "openrouter": _csv_env(
         "OPENROUTER_MODELS",
         [
+            "openrouter/free",
+            "openai/gpt-oss-120b:free",
+            "openai/gpt-oss-20b:free",
             "z-ai/glm-4.5-air:free",
+            "google/gemma-4-26b-a4b-it:free",
             "qwen/qwen3-next-80b-a3b-instruct:free",
             "meta-llama/llama-3.3-70b-instruct:free",
             "google/gemma-3-4b-it:free",
-            "openrouter/free",
         ],
     ),
     # Example syntax shown by HF docs. Replace with another available model/provider if needed.
@@ -71,6 +134,14 @@ PROVIDERS = {
         "endpoint": "https://api.cerebras.ai/v1/chat/completions",
         "api_key": CEREBRAS_API_KEY,
     },
+    "fireworks": {
+        "endpoint": f"{FIREWORKS_API_BASE.rstrip('/')}/chat/completions",
+        "api_key": FIREWORKS_API_KEY,
+    },
+    "mistral": {
+        "endpoint": f"{MISTRAL_API_BASE.rstrip('/')}/chat/completions",
+        "api_key": MISTRAL_API_KEY,
+    },
     "openrouter": {
         "endpoint": "https://openrouter.ai/api/v1/chat/completions",
         "api_key": OPENROUTER_API_KEY,
@@ -81,6 +152,76 @@ PROVIDERS = {
     },
 }
 
+
+def _provider_registry_audit() -> None:
+    ordered_registry = list(dict.fromkeys(list(PROVIDER_ORDER) + list(PROVIDERS.keys())))
+    configured_from_env: list[str] = []
+    active_providers: list[str] = []
+    skipped_providers: list[str] = []
+
+    for provider_name in ordered_registry:
+        provider_cfg = PROVIDERS.get(provider_name)
+        provider_models = list(PROVIDER_MODELS.get(provider_name, []))
+        provider_in_order = provider_name in PROVIDER_ORDER
+        provider_has_key = bool(provider_cfg and provider_cfg.get("api_key"))
+        provider_has_endpoint = bool(provider_cfg and provider_cfg.get("endpoint"))
+
+        if provider_has_key:
+            configured_from_env.append(provider_name)
+
+        if provider_cfg and provider_in_order and provider_has_key and provider_has_endpoint and provider_models:
+            active_providers.append(provider_name)
+            logger.info(
+                "[LLM] Provider models loaded provider=%s models=%s",
+                provider_name,
+                provider_models,
+            )
+            continue
+
+        reason_parts: list[str] = []
+        if not provider_cfg:
+            reason_parts.append("missing_registry_entry")
+        else:
+            if not provider_in_order:
+                reason_parts.append("not_in_provider_order")
+            if not provider_has_key:
+                reason_parts.append("missing_api_key")
+            if not provider_has_endpoint:
+                reason_parts.append("missing_endpoint")
+            if not provider_models:
+                reason_parts.append("no_models_configured")
+        skipped_providers.append(f"{provider_name}({'+'.join(reason_parts) or 'inactive'})")
+
+    logger.info(
+        "[LLM] Configured providers from env: %s",
+        ", ".join(configured_from_env) if configured_from_env else "none",
+    )
+    logger.info(
+        "[LLM] Active providers: %s",
+        ", ".join(active_providers) if active_providers else "none",
+    )
+    if skipped_providers:
+        logger.info("[LLM] Skipped providers: %s", ", ".join(skipped_providers))
+
+    if FIREWORKS_API_KEY and "fireworks" not in active_providers:
+        logger.warning(
+            "[LLM] Provider key present but inactive provider=fireworks in_order=%s models=%s registered=%s",
+            "fireworks" in PROVIDER_ORDER,
+            bool(PROVIDER_MODELS.get("fireworks")),
+            "fireworks" in PROVIDERS,
+        )
+    if MISTRAL_API_KEY and "mistral" not in active_providers:
+        logger.warning(
+            "[LLM] Provider key present but inactive provider=mistral in_order=%s models=%s registered=%s",
+            "mistral" in PROVIDER_ORDER,
+            bool(PROVIDER_MODELS.get("mistral")),
+            "mistral" in PROVIDERS,
+        )
+
+
+_provider_registry_audit()
+_PROVIDER_RUNTIME_AUDIT_LOGGED = False
+
 DIAGNOSTIC_PROVIDER_MODEL_PREFERENCES = {
     "groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
 }
@@ -90,6 +231,8 @@ OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "").strip()
 _PROVIDER_COOLDOWNS: dict[str, float] = {}
 _MODEL_COOLDOWNS: dict[str, float] = {}
 _PROVIDER_503_FAILURES: dict[str, list[float]] = {}
+_GIT_CHALLENGE_MODEL_SUPPRESSIONS: dict[str, float] = {}
+_MODEL_INSTABILITY_EVENTS: dict[str, list[float]] = {}
 
 VERY_EASY_EASY_ANGLES = [
     "Focus on the definition or core concept.",
@@ -320,6 +463,17 @@ HIGH_DIFFICULTY_BRITTLE_REASONS = {
     "slogan_recall_high_difficulty",
     "stem_option_mismatch_named_concept",
     "stem_option_mismatch_described_concept",
+    "git_visibility_push_vs_pull_confusion",
+    "git_local_update_wrong_action",
+    "git_branch_isolation_wrong_action",
+    "git_merge_conflict_logic_failure",
+    "git_remote_ahead_sync_failure",
+    "git_branching_stem_too_elaborate",
+    "git_commit_quality_wrong_focus",
+    "git_ci_cd_topic_drift",
+    "git_topic_family_misalignment",
+    "git_merge_conflict_wording_failure",
+    "git_dual_correct_operational_options",
 }
 
 LAST_RESORT_BLOCKING_REASONS = {
@@ -330,6 +484,35 @@ LAST_RESORT_BLOCKING_REASONS = {
     "slogan_recall_high_difficulty",
     "stem_option_mismatch_named_concept",
     "stem_option_mismatch_described_concept",
+    "git_visibility_push_vs_pull_confusion",
+    "git_local_update_wrong_action",
+    "git_branch_isolation_wrong_action",
+    "git_merge_conflict_logic_failure",
+    "git_remote_ahead_sync_failure",
+    "git_branching_stem_too_elaborate",
+    "git_commit_quality_wrong_focus",
+    "git_ci_cd_topic_drift",
+    "git_topic_family_misalignment",
+    "git_merge_conflict_wording_failure",
+    "git_dual_correct_operational_options",
+}
+
+GIT_FRAGILE_TOPIC_BUCKETS = {
+    "merge_conflicts",
+    "commit_quality",
+    "distributed_vcs",
+    "ci_cd_fundamentals",
+}
+
+GIT_FRAGILE_LAST_RESORT_REASONS = {
+    "git_topic_family_misalignment",
+    "git_commit_quality_wrong_focus",
+    "git_ci_cd_topic_drift",
+    "git_merge_conflict_logic_failure",
+    "git_merge_conflict_wording_failure",
+    "git_local_update_wrong_action",
+    "git_visibility_push_vs_pull_confusion",
+    "git_dual_correct_operational_options",
 }
 
 NAMED_CONCEPT_ALIASES = {
@@ -705,6 +888,56 @@ def _blocks_last_resort_accept(reasons: list[str]) -> bool:
     return any(reason in LAST_RESORT_BLOCKING_REASONS for reason in reasons)
 
 
+def _blocks_last_resort_accept_for_candidate(
+    q: dict,
+    reasons: list[str],
+    *,
+    source_text: str | None = None,
+    course_id: str | None = None,
+) -> bool:
+    if _blocks_last_resort_accept(reasons):
+        return True
+
+    if not is_csen603_git_workflow_scope(course_id, str(q.get("topic", "")), source_text):
+        return False
+
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    question_text = _git_question_text(q)
+    question_blob = _git_text_blob(q)
+
+    if topic_bucket == "branching_and_merging":
+        if _git_branching_stem_is_overelaborate(question_text) or _git_branching_has_advanced_drift(question_blob):
+            return True
+        if "too_many_out_of_source_specifics" in reasons:
+            return _git_family(q, course_id) not in {
+                "branch_isolation",
+                "branch_vs_trunk",
+                "merge_commit_graph",
+                "merge_conflict_resolution",
+            }
+
+    if topic_bucket == "commit_quality":
+        return (
+            "git_commit_quality_wrong_focus" in reasons
+            or not _git_commit_quality_template_match(question_text, question_blob)
+            or _git_family(q, course_id) != "commit_message_quality"
+        )
+
+    if topic_bucket == "distributed_vcs":
+        return not _git_dvc_reserve_focus_ok(q)
+
+    if not _is_fragile_git_topic_bucket(topic_bucket):
+        return False
+
+    if any(reason in GIT_FRAGILE_LAST_RESORT_REASONS for reason in reasons):
+        return True
+
+    if "too_many_out_of_source_specifics" in reasons and _git_fragile_topic_reserve_drift(q, course_id):
+        return True
+
+    return False
+
+
 def _normalize_course_signal(course_id: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(course_id or "").strip().lower())
 
@@ -767,7 +1000,47 @@ def is_csen603_git_workflow_scope(
 
 
 def _git_workflow_topic_hint(topic: str, source_text: str | None = None) -> str:
+    topic_bucket = _git_topic_bucket(topic)
     combined = " ".join([str(topic or ""), str(source_text or "")]).lower()
+
+    if topic_bucket == "branching_and_merging":
+        return (
+            "Prefer short exam-style branching questions about branch isolation, branch versus trunk or "
+            "mainline, merge-commit graph interpretation, or one simple lecture-grounded merge-conflict "
+            "case. Keep stems short, avoid rich project dressing, and avoid advanced workaround narratives "
+            "such as cherry-pick, revert, rename-file handling, or silent post-merge bug stories."
+        )
+
+    if topic_bucket == "merge_conflicts":
+        return (
+            "Prefer merge-conflict questions that stay on conflict-aware workflow: remote ahead, "
+            "sync first, overlapping edits, conflict after pull or merge, resolve conflicting files "
+            "locally, then continue the normal commit and push flow. Do NOT imply that push itself "
+            "directly creates a merge conflict or that remote history is overwritten automatically."
+        )
+
+    if topic_bucket == "commit_quality":
+        return (
+            "Prefer commit-message-quality questions that stay on one short message-quality scenario or one "
+            "pair of commit messages. Focus on clarity, specificity, what changed, why it changed, and "
+            "usefulness to teammates, reviewers, and project history. Do NOT drift into push or pull "
+            "workflow, merge-conflict handling, branch isolation, low-level repair commands, or GitHub review tooling."
+        )
+
+    if topic_bucket == "distributed_vcs":
+        return (
+            "Prefer distributed-version-control reasoning about each developer having a full local copy or "
+            "local repository, local history, offline work, and later synchronization with a remote. Do NOT "
+            "drift into merge-conflict handling, branch isolation, CI or CD, or routine pull-before-push basics."
+        )
+
+    if topic_bucket == "ci_cd_fundamentals":
+        return (
+            "Prefer CI/CD questions about commit-triggered build and test behavior, self-testing builds, "
+            "keeping the build fast, every commit building on the integration machine, and continuous "
+            "delivery versus continuous deployment. Do NOT drift into branch isolation, clone or pull basics, "
+            "merge-conflict handling, or generic remote-ahead workflow."
+        )
 
     if _text_contains_any(combined, ["clone", "local working copy", "local repository", "remote repository", "pull", "push"]):
         return (
@@ -812,7 +1085,8 @@ def _git_workflow_topic_hint(topic: str, source_text: str | None = None) -> str:
     )
 
 
-def _git_workflow_difficulty_hint(difficulty: int, generation_profile: str) -> str:
+def _git_workflow_difficulty_hint(topic: str, difficulty: int, generation_profile: str) -> str:
+    topic_bucket = _git_topic_bucket(topic)
     if generation_profile == "diagnostic":
         return (
             "Diagnostic tone: keep it clean and answerable. Prefer modest workflow discrimination "
@@ -826,10 +1100,65 @@ def _git_workflow_difficulty_hint(difficulty: int, generation_profile: str) -> s
         )
     if difficulty == 3:
         return "Difficulty 3: prefer short two-developer workflow scenarios."
+    if topic_bucket == "branching_and_merging":
+        return (
+            "Difficulty 4-5: keep the branching question short and exam-style. Prefer branch isolation, "
+            "branch versus trunk or mainline, merge-graph interpretation, or one simple merge-conflict case."
+        )
+    if topic_bucket == "distributed_vcs":
+        return (
+            "Difficulty 4-5: keep the DVC question conceptual and focused on full local copy, local history, "
+            "offline work, and later synchronization, not on generic remote-update workflow."
+        )
+    if topic_bucket == "commit_quality":
+        return (
+            "Difficulty 4-5: keep the Commit Quality question short and tightly anchored to commit-message "
+            "specificity, what changed, why it changed, and usefulness to review or history."
+        )
     return (
         "Difficulty 4-5: prefer merge or conflict reasoning, commit-visibility traps, CI/CD discrimination, "
         "or multi-step workflow reasoning that remains lecture-grounded."
     )
+
+
+def _git_topic_micro_profile(topic: str) -> str:
+    topic_bucket = _git_topic_bucket(topic)
+    if topic_bucket == "branching_and_merging":
+        return (
+            "Git subtopic micro-profile: Branching and Merging\n"
+            "- Focus on branch isolation, branch versus trunk or mainline, merge-commit graph meaning, and only simple lecture-grounded merge-conflict reasoning.\n"
+            "- Keep hard stems to one or two short sentences when possible.\n"
+            "- Do NOT use elaborate project deadlines, competing team constraints, critical shared config stories, cherry-pick or revert narratives, rename-file workarounds, or rich post-merge bug stories."
+        )
+    if topic_bucket == "merge_conflicts":
+        return (
+            "Git subtopic micro-profile: Merge Conflicts\n"
+            "- Focus on remote ahead, overlapping edits, conflict after pull or merge, local conflict resolution, and then continuing the normal commit or push flow.\n"
+            "- Do NOT imply that push itself creates the conflict, that remote history is overwritten automatically, or that the conflict resolves itself."
+        )
+    if topic_bucket == "commit_quality":
+        return (
+            "Git subtopic micro-profile: Commit Quality\n"
+            "- HARD TEMPLATE: use only a short commit-message-quality shape.\n"
+            "- Allowed shapes: compare a vague versus specific commit message, ask what a good commit message should communicate, or ask how vague messages hurt review, history, or maintenance.\n"
+            "- Focus on clear, specific, useful commit messages that describe what changed and why, and that help teammates, reviewers, and future history-reading.\n"
+            "- Keep the stem short, prefer one short scenario or one pair of messages, and avoid project-heavy workflow stories.\n"
+            "- Do NOT make push or pull workflow, merge conflicts, branch isolation, CI/CD, pull requests, GitHub review tooling, or low-level repair commands the main concept."
+        )
+    if topic_bucket == "distributed_vcs":
+        return (
+            "Git subtopic micro-profile: Distributed Version Control\n"
+            "- Focus on each developer having a full local repository and history, offline work, and later synchronization with a remote.\n"
+            "- Prefer concept focus such as distributed VCS, full local copy, local history, and offline work.\n"
+            "- Do NOT make merge-conflict resolution, branch isolation, CI or CD, or ordinary local-update workflow the main concept."
+        )
+    if topic_bucket == "ci_cd_fundamentals":
+        return (
+            "Git subtopic micro-profile: CI and CD Fundamentals\n"
+            "- Focus on commit-triggered build and test behavior, self-testing builds, keeping the build fast, every commit building on the integration machine, and delivery versus deployment.\n"
+            "- Do NOT turn the question into branch isolation, clone or pull basics, merge-conflict handling, or remote-ahead workflow."
+        )
+    return ""
 
 
 def _build_git_workflow_style_block(
@@ -842,8 +1171,32 @@ def _build_git_workflow_style_block(
     if not is_csen603_git_workflow_scope(course_id, topic, source_text):
         return ""
 
+    topic_bucket = _git_topic_bucket(topic)
     topic_hint = _git_workflow_topic_hint(topic, source_text)
-    difficulty_hint = _git_workflow_difficulty_hint(difficulty, generation_profile)
+    difficulty_hint = _git_workflow_difficulty_hint(topic, difficulty, generation_profile)
+    micro_profile = _git_topic_micro_profile(topic)
+    extra_guardrail = ""
+    if topic_bucket == "commit_quality":
+        extra_guardrail = (
+            "\n- Commit Quality hard template: choose only one of these shapes: "
+            "(1) compare a vague versus specific commit message, "
+            "(2) ask what a good commit message should communicate about what changed and why, or "
+            "(3) ask how a vague message hurts review, history, or maintenance."
+            "\n- For Commit Quality, keep the stem short, prefer one short scenario or one pair of messages, "
+            "avoid project-heavy nouns unless they are harmless example text, and do NOT make push, pull, "
+            "merge, branches, pull requests, CI/CD, or repair commands the main concept."
+        )
+    elif topic_bucket == "branching_and_merging":
+        extra_guardrail = (
+            "\n- For Branching and Merging, keep hard stems to one or two sentences when possible."
+            "\n- Prefer branch isolation, branch versus trunk or mainline, merge-commit graph meaning, "
+            "or one simple merge-conflict case."
+        )
+    elif topic_bucket == "distributed_vcs":
+        extra_guardrail = (
+            "\n- For Distributed Version Control, keep the question centered on full local copy, local history, "
+            "offline work, and later synchronization with a remote."
+        )
     return f"""
 
 CSEN603 Git workflow lecture profile:
@@ -856,7 +1209,10 @@ CSEN603 Git workflow lecture profile:
 - Vary actor templates. Sometimes use named developers, but also use a teammate, a maintainer, a new developer, a contributor, the local branch, or the remote repository. Do NOT overuse Alice or Bob style pairs.
 - Prefer one clearly best answer rather than multiple broadly correct workflow statements.
 - Git workflow topic hint: {topic_hint}
+- Git workflow micro-profile:
+{micro_profile or "- No special Git subtopic micro-profile beyond the current lecture scope."}
 - Git workflow difficulty guidance: {difficulty_hint}
+- Topic-specific generation guardrail:{extra_guardrail or " None beyond the current Git lecture scope."}
 - For hard and very hard Git questions, avoid collapsing into repeated basic clone-versus-pull discrimination. Prefer remote-ahead push rejection, merge/conflict reasoning, commit-versus-push visibility traps, merge-graph interpretation, CI/CD discrimination, or workflow-sequence reasoning when the lecture text supports them.
 - Keep the answer inferable from the lecture text only.
 """.rstrip()
@@ -1179,6 +1535,7 @@ def validate_question(
     q: dict,
     source_text: str | None = None,
     validation_profile: str = "default",
+    course_id: str | None = None,
 ) -> tuple[bool, list[str]]:
     reasons = []
     required = ["question", "options", "correct_answer", "explanation", "topic", "difficulty"]
@@ -1201,7 +1558,14 @@ def validate_question(
         reasons.append("admin_question")
     if _looks_like_misframed_misconception_question(q):
         reasons.append("misframed_misconception")
-    reasons.extend(_difficulty_mismatch_reasons(q, source_text, validation_profile=validation_profile))
+    reasons.extend(
+        _difficulty_mismatch_reasons(
+            q,
+            source_text,
+            validation_profile=validation_profile,
+            course_id=course_id,
+        )
+    )
     return len(reasons) == 0, reasons
 
 def validate_question_core_only(q: dict) -> tuple[bool, list[str]]:
@@ -1372,6 +1736,60 @@ def _model_cooldown_remaining(provider_name: str, model: str) -> float:
         _MODEL_COOLDOWNS.pop(key, None)
         return 0.0
     return expires_at - now
+
+
+def _git_challenge_model_suppression_remaining(provider_name: str, model: str) -> float:
+    now = time.time()
+    key = _provider_model_key(provider_name, model)
+    expires_at = _GIT_CHALLENGE_MODEL_SUPPRESSIONS.get(key, 0.0)
+    if expires_at <= now:
+        _GIT_CHALLENGE_MODEL_SUPPRESSIONS.pop(key, None)
+        return 0.0
+    return expires_at - now
+
+
+def _set_git_challenge_model_suppression(
+    provider_name: str,
+    model: str,
+    seconds: int,
+    reason: str,
+) -> None:
+    seconds = max(1, int(seconds))
+    now = time.time()
+    key = _provider_model_key(provider_name, model)
+    expires_at = max(_GIT_CHALLENGE_MODEL_SUPPRESSIONS.get(key, 0.0), now + seconds)
+    _GIT_CHALLENGE_MODEL_SUPPRESSIONS[key] = expires_at
+    logger.info(
+        "[LLM] Git challenge model suppression provider=%s model=%s seconds=%s reason=%s",
+        provider_name,
+        model,
+        int(expires_at - now),
+        reason,
+    )
+
+
+def _record_git_challenge_model_instability(
+    provider_name: str,
+    model: str,
+    failure_kind: str,
+) -> None:
+    now = time.time()
+    key = f"{_provider_model_key(provider_name, model)}:{failure_kind}"
+    events = [stamp for stamp in _MODEL_INSTABILITY_EVENTS.get(key, []) if now - stamp <= 900]
+    events.append(now)
+    _MODEL_INSTABILITY_EVENTS[key] = events
+    if len(events) < 2:
+        return
+
+    seconds = 900
+    if provider_name == "fireworks" and model == "accounts/fireworks/models/deepseek-v3p2" and failure_kind == "json_parse_failure":
+        seconds = 1800
+    elif provider_name == "mistral" and failure_kind == "upstream_503_overflow":
+        seconds = 1800
+    elif failure_kind == "read_timeout":
+        seconds = 1200
+
+    _set_git_challenge_model_suppression(provider_name, model, seconds, failure_kind)
 
 
 def _set_provider_cooldown(provider_name: str, seconds: int) -> None:
@@ -1784,6 +2202,14 @@ DIAGNOSTIC_GENERIC_REASONING_TERMS = GENERIC_REASONING_TERMS | {
 
 
 def _provider_order_for_generation(generation_profile: str = "default") -> list[str]:
+    global _PROVIDER_RUNTIME_AUDIT_LOGGED
+    if not _PROVIDER_RUNTIME_AUDIT_LOGGED:
+        _provider_registry_audit()
+        _PROVIDER_RUNTIME_AUDIT_LOGGED = True
+
+    if generation_profile == "git_challenge":
+        return list(GIT_CHALLENGE_SAFE_PROVIDER_ORDER)
+
     if generation_profile != "diagnostic":
         return list(PROVIDER_ORDER)
 
@@ -1799,6 +2225,19 @@ def _provider_order_for_generation(generation_profile: str = "default") -> list[
 
 def _provider_models_for_generation(provider_name: str, generation_profile: str = "default") -> list[str]:
     models = list(PROVIDER_MODELS.get(provider_name, []))
+    if generation_profile == "git_challenge":
+        preferred = GIT_CHALLENGE_SAFE_MODEL_PREFERENCES.get(provider_name, [])
+        if not preferred:
+            return []
+        ordered = []
+        seen = set()
+        for model in preferred + models:
+            if model in seen or model not in models:
+                continue
+            seen.add(model)
+            ordered.append(model)
+        return ordered
+
     if generation_profile != "diagnostic":
         return models
 
@@ -2194,9 +2633,15 @@ def _unsupported_specifics_breakdown(
     source_text: str,
     *,
     generic_terms: set[str] | None = None,
+    course_id: str | None = None,
 ) -> dict:
     generic_terms = generic_terms or GENERIC_REASONING_TERMS
     allowed_terms = _allowed_domain_terms_for_question(str(q.get("topic", "")), source_text)
+    allowed_terms |= _git_safe_vocabulary_terms(
+        q,
+        source_text,
+        course_id=course_id,
+    )
     stem_terms = _significant_terms(str(q.get("question", "")))
     stem_unsupported = stem_terms - allowed_terms
     stem_filtered_generic = stem_unsupported & generic_terms
@@ -2239,6 +2684,74 @@ def _unsupported_specifics_breakdown(
     }
 
 
+def _git_out_of_source_calibration_bucket(
+    q: dict,
+    source_text: str,
+    course_id: str | None,
+) -> str | None:
+    if not is_csen603_git_workflow_scope(course_id, str(q.get("topic", "")), source_text):
+        return None
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    if topic_bucket in {"branching_and_merging", "distributed_vcs", "commit_quality"}:
+        return topic_bucket
+    return None
+
+
+def _git_out_of_source_semantic_drift_terms(topic_bucket: str | None) -> set[str]:
+    drift_phrases: dict[str | None, tuple[str, ...]] = {
+        "branching_and_merging": (
+            "deadline",
+            "critical shared config",
+            "competing priorities",
+            "team lead",
+            "incident",
+            "production",
+            "staging",
+            "database",
+            "authentication",
+            "ticket",
+            "jira",
+            "cherry-pick",
+            "cherry pick",
+            "revert",
+            "rename file",
+            "workaround",
+        ),
+        "distributed_vcs": (
+            "pull before pushing",
+            "push rejected",
+            "merge conflict",
+            "feature branch",
+            "branch isolation",
+            "continuous integration",
+            "continuous delivery",
+            "continuous deployment",
+            "pipeline",
+            "pull request",
+        ),
+        "commit_quality": (
+            "push",
+            "pull",
+            "merge conflict",
+            "feature branch",
+            "continuous integration",
+            "continuous delivery",
+            "continuous deployment",
+            "pipeline",
+            "pull request",
+            "github",
+            "git commit --amend",
+            "amend",
+            "recommit",
+            "rebase",
+        ),
+    }
+    terms: set[str] = set()
+    for phrase in drift_phrases.get(topic_bucket, ()):
+        terms.update(_significant_terms(phrase))
+    return terms
+
+
 def _significant_ngrams(text: str, n: int = 3) -> set[str]:
     tokens = [
         token for token in re.split(r"[^a-z0-9]+", (text or "").lower())
@@ -2274,6 +2787,7 @@ def _introduces_too_many_out_of_source_specifics(
     source_text: str,
     *,
     validation_profile: str = "default",
+    course_id: str | None = None,
 ) -> bool:
     try:
         difficulty = int(q.get("difficulty", 3))
@@ -2288,12 +2802,23 @@ def _introduces_too_many_out_of_source_specifics(
         if validation_profile == "diagnostic"
         else GENERIC_REASONING_TERMS
     )
-    breakdown = _unsupported_specifics_breakdown(q, source_text, generic_terms=generic_terms)
+    breakdown = _unsupported_specifics_breakdown(
+        q,
+        source_text,
+        generic_terms=generic_terms,
+        course_id=course_id,
+    )
     stem_term_count = len(breakdown["stem_terms"])
     distinct_count = len(breakdown["distinct_terms"])
     option_specific_count = breakdown["option_specific_count"]
     options_with_any_unsupported = breakdown["options_with_any_unsupported"]
     total_mentions = breakdown["total_mentions"]
+    calibration_bucket = _git_out_of_source_calibration_bucket(q, source_text, course_id)
+    semantic_drift_terms = (
+        breakdown["distinct_terms"] & _git_out_of_source_semantic_drift_terms(calibration_bucket)
+        if calibration_bucket
+        else set()
+    )
 
     default_should_reject = (
         distinct_count >= 8
@@ -2324,12 +2849,69 @@ def _introduces_too_many_out_of_source_specifics(
     else:
         should_reject = default_should_reject
 
+    if calibration_bucket == "branching_and_merging":
+        calibrated_should_reject = (
+            len(semantic_drift_terms) >= 2
+            and distinct_count >= 8
+            and (stem_term_count >= 2 or total_mentions >= 10)
+        ) or (
+            _git_branching_stem_is_overelaborate(str(q.get("question", "")))
+            and distinct_count >= 8
+            and len(semantic_drift_terms) >= 1
+        ) or (
+            distinct_count >= 12
+            and options_with_any_unsupported >= 3
+            and total_mentions >= 14
+        )
+        if default_should_reject and not calibrated_should_reject:
+            logger.info(
+                "[LLM] Git branching out-of-source leniency topic=%s semantic_drift=%s",
+                q.get("topic"),
+                sorted(semantic_drift_terms)[:5],
+            )
+        should_reject = calibrated_should_reject
+    elif calibration_bucket == "distributed_vcs":
+        calibrated_should_reject = (
+            len(semantic_drift_terms) >= 2
+            and distinct_count >= 7
+            and (stem_term_count >= 2 or total_mentions >= 9)
+        ) or (
+            distinct_count >= 12
+            and option_specific_count >= 2
+            and total_mentions >= 14
+        )
+        if default_should_reject and not calibrated_should_reject:
+            logger.info(
+                "[LLM] Git DVC out-of-source leniency topic=%s semantic_drift=%s",
+                q.get("topic"),
+                sorted(semantic_drift_terms)[:5],
+            )
+        should_reject = calibrated_should_reject
+    elif calibration_bucket == "commit_quality":
+        calibrated_should_reject = (
+            len(semantic_drift_terms) >= 1
+            and distinct_count >= 7
+            and (stem_term_count >= 2 or total_mentions >= 9)
+        ) or (
+            distinct_count >= 11
+            and option_specific_count >= 2
+            and total_mentions >= 13
+        )
+        if default_should_reject and not calibrated_should_reject:
+            logger.info(
+                "[LLM] Git commit-quality out-of-source leniency topic=%s semantic_drift=%s",
+                q.get("topic"),
+                sorted(semantic_drift_terms)[:5],
+            )
+        should_reject = calibrated_should_reject
+
     if should_reject:
         logger.info(
-            "[LLM] Out-of-source specifics topic=%s filtered_generic=%s counted_terms=%s option_count=%s",
+            "[LLM] Out-of-source specifics topic=%s filtered_generic=%s counted_terms=%s semantic_drift=%s option_count=%s",
             q.get("topic"),
             sorted(breakdown["filtered_generic_terms"])[:5],
             sorted(breakdown["distinct_terms"])[:5],
+            sorted(semantic_drift_terms)[:5],
             option_specific_count,
         )
 
@@ -2812,6 +3394,24 @@ def _concept_rule_matches(text: str, phrases: list[str]) -> bool:
 
 
 def _question_family_from_git_workflow(text: str) -> str | None:
+    if _count_text_phrase_matches(
+        text,
+        [
+            "distributed version control",
+            "full repository",
+            "local history",
+            "full copy of history",
+            "full local copy",
+            "local repository",
+            "local copy",
+            "offline",
+            "work offline",
+            "later sync",
+            "later synchronize",
+            "each developer has a full repository",
+        ],
+    ) >= 2:
+        return "distributed_vcs"
     if _count_text_phrase_matches(text, ["push rejected", "remote is ahead", "rejected because", "pull before pushing"]) >= 2:
         return "remote_ahead_push_rejected"
     if _count_text_phrase_matches(text, ["merge conflict", "overlapping edits", "resolve", "conflict resolution", "same lines"]) >= 2:
@@ -2822,26 +3422,65 @@ def _question_family_from_git_workflow(text: str) -> str | None:
         return "delivery_vs_deployment"
     if _count_text_phrase_matches(text, ["continuous integration", "after commit", "after pushing", "build", "test", "commit triggers"]) >= 2:
         return "ci_build_per_commit"
-    if _count_text_phrase_matches(text, ["commit message", "meaningful", "descriptive", "clear summary", "good message"]) >= 2:
+    if _count_text_phrase_matches(
+        text,
+        [
+            "commit message",
+            "meaningful",
+            "descriptive",
+            "clear summary",
+            "good message",
+            "specific",
+            "vague",
+            "what changed",
+            "why",
+            "history",
+            "review",
+        ],
+    ) >= 2:
         return "commit_message_quality"
-    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
-        return "branch_vs_trunk"
+    if _count_text_phrase_matches(text, ["local repository", "remote repository", "local repo", "remote repo", "working copy", "shared repository"]) >= 2:
+        return "local_vs_remote_repo"
     if _count_text_phrase_matches(text, ["isolated", "feature branch", "without affecting", "experimental change", "radical changes"]) >= 2:
         return "branch_isolation"
+    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
+        return "branch_vs_trunk"
     if _count_text_phrase_matches(text, ["committed locally", "local commit", "teammates still", "still do not see", "push"]) >= 2:
         return "commit_vs_push"
     if _count_text_phrase_matches(text, ["already has a local", "already has the repository", "teammate", "pushed", "remote is ahead", "pull", "latest changes"]) >= 2:
         return "pull_remote_updates"
     if _count_text_phrase_matches(text, ["join the team", "first time", "first day", "local copy", "clone"]) >= 2:
         return "clone_first_checkout"
-    if _count_text_phrase_matches(text, ["distributed version control", "full repository", "local history", "full copy of history", "each developer has a full repository"]) >= 2:
-        return "distributed_vcs"
     if _count_text_phrase_matches(text, ["sequence", "order", "what happens next", "next step", "workflow"]) >= 2:
         return "workflow_sequence"
     return None
 
 
 def _concept_focus_from_git_workflow(text: str) -> str | None:
+    if _count_text_phrase_matches(text, ["full local copy", "full repository", "repository copy", "local copy", "local repository"]) >= 1:
+        return "full_local_copy"
+    if _count_text_phrase_matches(text, ["local history", "full copy of history", "repository history"]) >= 1:
+        return "local_history"
+    if _count_text_phrase_matches(text, ["offline work", "offline", "work offline", "without constant remote access"]) >= 1:
+        return "offline_work"
+    if _count_text_phrase_matches(
+        text,
+        [
+            "distributed version control",
+            "full repository",
+            "local history",
+            "full copy of history",
+            "full local copy",
+            "local repository",
+            "local copy",
+            "offline",
+            "work offline",
+            "later sync",
+            "later synchronize",
+            "each developer has a full repository",
+        ],
+    ) >= 2:
+        return "distributed_vcs"
     if _count_text_phrase_matches(text, ["continuous delivery", "continuous deployment"]) >= 2:
         return "delivery_vs_deployment"
     if _count_text_phrase_matches(text, ["continuous integration", "after commit", "after pushing", "build", "test", "commit triggers"]) >= 2:
@@ -2852,20 +3491,18 @@ def _concept_focus_from_git_workflow(text: str) -> str | None:
         return "merge_conflict_resolution"
     if _count_text_phrase_matches(text, ["two parent", "two previous commits", "merged histories", "points to both", "points to c3 and c4"]) >= 1:
         return "merge_commit_graph"
-    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
-        return "branch_vs_trunk"
-    if _count_text_phrase_matches(text, ["isolated", "feature branch", "without affecting", "experimental change", "radical changes"]) >= 2:
-        return "branch_isolation"
     if _count_text_phrase_matches(text, ["local repository", "remote repository", "local repo", "remote repo", "working copy", "shared repository"]) >= 2:
         return "local_vs_remote_repo"
+    if _count_text_phrase_matches(text, ["isolated", "feature branch", "without affecting", "experimental change", "radical changes"]) >= 2:
+        return "branch_isolation"
+    if _count_text_phrase_matches(text, ["branch", "trunk", "mainline", "main branch"]) >= 2:
+        return "branch_vs_trunk"
     if _count_text_phrase_matches(text, ["committed locally", "local commit", "teammates still", "still do not see", "push"]) >= 2:
         return "commit_vs_push"
     if _count_text_phrase_matches(text, ["already has a local", "already has the repository", "teammate", "pushed", "remote is ahead", "pull", "latest changes"]) >= 2:
         return "pull_remote_updates"
     if _count_text_phrase_matches(text, ["join the team", "first time", "first day", "local copy", "clone"]) >= 2:
         return "clone_first_checkout"
-    if _count_text_phrase_matches(text, ["distributed version control", "full repository", "local history", "full copy of history", "each developer has a full repository"]) >= 2:
-        return "distributed_vcs"
     return None
 
 
@@ -3030,11 +3667,651 @@ def ensure_question_concept_focus(question: dict, course_id: str | None = None) 
     return question
 
 
+def _git_topic_bucket(topic: str) -> str | None:
+    text = _normalized_text(topic)
+    if not text:
+        return None
+
+    if _text_contains_any(text, ["local vs remote", "local remote", "remote repository", "working copy"]):
+        return "local_vs_remote"
+    if _text_contains_any(text, ["merge conflict", "merge conflicts"]):
+        return "merge_conflicts"
+    if _text_contains_any(text, ["branching and merging", "branching", "merging", "branch", "mainline", "trunk"]):
+        return "branching_and_merging"
+    if _text_contains_any(text, ["commit quality", "commit message", "commit messages"]):
+        return "commit_quality"
+    if _text_contains_any(text, ["distributed version control", "version control"]):
+        return "distributed_vcs"
+    if _text_contains_any(text, ["ci and cd", "continuous integration", "continuous delivery", "continuous deployment", "ci/cd"]):
+        return "ci_cd_fundamentals"
+    if _text_contains_any(text, ["git workflow basics", "git workflow", "git basics"]):
+        return "git_workflow_basics"
+    return None
+
+
+def _is_fragile_git_topic_bucket(topic_bucket: str | None) -> bool:
+    return topic_bucket in GIT_FRAGILE_TOPIC_BUCKETS
+
+
+def _git_safe_vocabulary_terms(
+    q: dict,
+    source_text: str | None,
+    *,
+    course_id: str | None = None,
+) -> set[str]:
+    if not is_csen603_git_workflow_scope(course_id, str(q.get("topic", "")), source_text):
+        return set()
+
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    safe_phrases: dict[str, tuple[str, ...]] = {
+        "branching_and_merging": (
+            "branch",
+            "feature branch",
+            "mainline",
+            "trunk",
+            "merge",
+            "merge commit",
+            "conflict",
+            "reconcile",
+            "integrate",
+            "parallel development",
+            "local branch",
+            "main branch",
+        ),
+        "merge_conflicts": (
+            "conflict",
+            "conflicting",
+            "resolve",
+            "resolved",
+            "manual",
+            "manually",
+            "files",
+            "edit",
+            "edited",
+            "combine",
+            "reconcile",
+        ),
+        "commit_quality": (
+            "clear",
+            "descriptive",
+            "context",
+            "message",
+            "useful",
+            "meaningful",
+            "specific",
+            "specificity",
+            "vague",
+            "clarity",
+            "review",
+            "reviewers",
+            "teammates",
+            "history",
+            "what changed",
+            "why it changed",
+        ),
+        "distributed_vcs": (
+            "offline",
+            "local copy",
+            "local history",
+            "full copy",
+            "synchronize",
+            "synchronization",
+            "later sync",
+            "work offline",
+            "collaboration",
+            "local repository",
+            "repository history",
+            "distributed copy",
+            "repository copy",
+        ),
+        "ci_cd_fundamentals": (
+            "build",
+            "test",
+            "pipeline",
+            "integration machine",
+            "release-ready",
+            "deploy",
+            "deployment",
+            "delivery",
+        ),
+    }
+    phrases = safe_phrases.get(topic_bucket, ())
+    safe_terms: set[str] = set()
+    for phrase in phrases:
+        safe_terms.update(_significant_terms(phrase))
+    return safe_terms
+
+
+def _git_correct_option_text(q: dict) -> str:
+    options = q.get("options", {}) or {}
+    correct_letter = q.get("correct_answer")
+    return _normalized_text(str(options.get(correct_letter, "")))
+
+
+def _git_question_text(q: dict) -> str:
+    return _normalized_text(str(q.get("question", "")))
+
+
+def _git_text_blob(q: dict) -> str:
+    return _normalized_text(
+        " ".join(
+            [
+                str(q.get("topic", "")),
+                str(q.get("question", "")),
+                " ".join(str(value) for value in (q.get("options", {}) or {}).values()),
+                str(q.get("explanation", "")),
+            ]
+        )
+    )
+
+
+def _git_family(q: dict, course_id: str | None) -> str | None:
+    return derive_question_family(q, course_id)
+
+
+def _text_has_push_visibility_signal(text: str) -> bool:
+    return _count_text_phrase_matches(
+        text,
+        [
+            "teammate does not see",
+            "teammates do not see",
+            "visible to teammates",
+            "share the change",
+            "available to teammates",
+            "visible to the team",
+        ],
+    ) >= 1
+
+
+def _text_has_local_update_signal(text: str) -> bool:
+    return _count_text_phrase_matches(
+        text,
+        [
+            "already has a local",
+            "already has the repository",
+            "latest changes",
+            "teammate pushed",
+            "update local",
+            "update the local repository",
+        ],
+    ) >= 1
+
+
+def _question_sentence_count(text: str) -> int:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return 0
+    parts = [part for part in re.split(r"(?<=[.!?])\s+", stripped) if part.strip()]
+    return len(parts) or 1
+
+
+def _git_commit_quality_focus_score(text: str) -> int:
+    groups = [
+        ["commit message", "message"],
+        ["specific", "specificity", "descriptive", "meaningful", "clear", "vague"],
+        ["what changed", "scope", "changed"],
+        ["why", "reason", "context", "purpose"],
+        ["history", "review", "reviewer", "teammate", "maintenance", "future understanding"],
+    ]
+    return sum(1 for group in groups if _text_contains_any(text, group))
+
+
+def _git_commit_quality_has_workflow_drift(text: str) -> bool:
+    return _text_contains_any(
+        text,
+        [
+            "push",
+            "pull",
+            "merge conflict",
+            "feature branch",
+            "branch isolation",
+            "continuous integration",
+            "continuous delivery",
+            "continuous deployment",
+            "pipeline",
+            "pull request",
+            "github",
+            "git commit --amend",
+            "amend",
+            "recommit",
+            "rebase",
+            "cherry-pick",
+            "cherry pick",
+        ],
+    )
+
+
+def _git_commit_quality_template_match(question_text: str, question_blob: str) -> bool:
+    if _git_commit_quality_has_workflow_drift(question_blob):
+        return False
+    if not _text_contains_any(question_blob, ["commit message", "message"]):
+        return False
+    return _git_commit_quality_focus_score(question_blob) >= 2
+
+
+def _git_branching_has_advanced_drift(text: str) -> bool:
+    return _text_contains_any(
+        text,
+        [
+            "cherry-pick",
+            "cherry pick",
+            "revert",
+            "rename file",
+            "renamed file",
+            "workaround",
+            "silent bug",
+            "critical shared config",
+            "team lead",
+            "deadline",
+            "competing priorities",
+        ],
+    )
+
+
+def _git_branching_stem_is_overelaborate(question_text: str) -> bool:
+    return _question_sentence_count(question_text) > 2 or _count_text_phrase_matches(
+        question_text,
+        [
+            "while",
+            "without",
+            "before",
+            "after",
+            "at the same time",
+            "must also",
+            "simultaneously",
+        ],
+    ) >= 3
+
+
+def _git_dvc_reserve_focus_ok(q: dict) -> bool:
+    concept_focus = derive_concept_focus(q) or ""
+    return concept_focus in {"distributed_vcs", "full_local_copy", "local_history", "offline_work"}
+
+
+def _git_challenge_safe_blocks_reserve_candidate(q: dict, reasons: list[str], course_id: str | None) -> bool:
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    question_text = _git_question_text(q)
+    question_blob = _git_text_blob(q)
+    question_family = _git_family(q, course_id)
+
+    if any(
+        reason in reasons
+        for reason in (
+            "git_ci_cd_topic_drift",
+            "git_commit_quality_wrong_focus",
+            "git_topic_family_misalignment",
+            "git_branching_stem_too_elaborate",
+            "git_merge_conflict_logic_failure",
+            "git_visibility_push_vs_pull_confusion",
+        )
+    ):
+        return True
+
+    if "too_many_out_of_source_specifics" in reasons and topic_bucket in {
+        "distributed_vcs",
+        "commit_quality",
+        "ci_cd_fundamentals",
+        "merge_conflicts",
+        "branching_and_merging",
+    }:
+        return True
+
+    if topic_bucket == "branching_and_merging":
+        return _git_branching_stem_is_overelaborate(question_text) or _git_branching_has_advanced_drift(question_blob)
+
+    if topic_bucket == "ci_cd_fundamentals":
+        if question_family not in {"ci_build_per_commit", "delivery_vs_deployment"}:
+            return True
+        return any(
+            reason in reasons
+            for reason in (
+                "generic_benefit_stem_high_difficulty",
+                "slogan_recall_high_difficulty",
+                "plain_recall_high_difficulty",
+                "too_direct_high_difficulty",
+            )
+        )
+
+    if topic_bucket == "commit_quality":
+        return (
+            question_family != "commit_message_quality"
+            or not _git_commit_quality_template_match(question_text, question_blob)
+        )
+
+    if topic_bucket == "distributed_vcs":
+        return not _git_dvc_reserve_focus_ok(q)
+
+    return False
+
+
+def _git_topic_focus_markers(topic_bucket: str | None) -> tuple[str, ...]:
+    marker_map: dict[str | None, tuple[str, ...]] = {
+        "branching_and_merging": (
+            "branch",
+            "feature branch",
+            "trunk",
+            "mainline",
+            "main branch",
+            "merge",
+            "merge commit",
+            "parallel development",
+        ),
+        "merge_conflicts": ("merge conflict", "conflicting", "resolve", "reconcile", "overlapping edits"),
+        "commit_quality": ("commit message", "descriptive", "specific", "meaningful", "what changed", "why"),
+        "distributed_vcs": ("distributed version control", "full local copy", "local history", "full repository", "offline"),
+        "ci_cd_fundamentals": ("continuous integration", "continuous delivery", "continuous deployment", "build", "test", "pipeline", "integration machine"),
+    }
+    return marker_map.get(topic_bucket, ())
+
+
+def _git_action_family(option_text: str) -> str | None:
+    text = _normalized_text(option_text)
+    if not text:
+        return None
+    if "clone" in text:
+        return "clone"
+    if "push" in text:
+        return "push"
+    if "pull" in text or ("fetch" in text and any(token in text for token in ("merge", "rebase", "synchronize"))):
+        return "sync"
+    if any(token in text for token in ("feature branch", "separate branch", "create a branch", "branch")):
+        return "branch"
+    if any(token in text for token in ("resolve", "reconcile", "edit the conflicting", "fix the conflicting", "merge the changes")):
+        return "resolve_conflict"
+    if any(token in text for token in ("commit message", "descriptive", "specific", "meaningful", "what changed", "why")):
+        return "commit_quality"
+    if any(token in text for token in ("continuous integration", "continuous delivery", "continuous deployment", "build", "test", "pipeline")):
+        return "ci_cd"
+    if any(token in text for token in ("full repository", "local history", "full local copy", "offline", "distributed version control")):
+        return "distributed_vcs"
+    return None
+
+
+def _git_dual_correct_operational_options(q: dict, course_id: str | None) -> bool:
+    question_text = _git_question_text(q)
+    question_family = _git_family(q, course_id)
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    if not question_text or not any(
+        marker in question_text
+        for marker in ("what should", "best action", "which action", "which command", "what should happen next", "workflow mistake")
+    ):
+        return False
+
+    accepted_by_family: dict[str | None, set[str]] = {
+        "commit_vs_push": {"push"},
+        "pull_remote_updates": {"sync"},
+        "branch_isolation": {"branch"},
+        "remote_ahead_push_rejected": {"sync"},
+        "merge_conflict_resolution": {"resolve_conflict"},
+        "commit_message_quality": {"commit_quality"},
+        "ci_build_per_commit": {"ci_cd"},
+        "delivery_vs_deployment": {"ci_cd"},
+        "distributed_vcs": {"distributed_vcs"},
+    }
+    accepted_actions = accepted_by_family.get(question_family)
+    if not accepted_actions and topic_bucket == "ci_cd_fundamentals":
+        accepted_actions = {"ci_cd"}
+    if not accepted_actions and topic_bucket == "commit_quality":
+        accepted_actions = {"commit_quality"}
+    if not accepted_actions:
+        return False
+
+    matching_options = 0
+    for option_text in _option_texts(q):
+        option_action = _git_action_family(option_text)
+        if option_action in accepted_actions:
+            matching_options += 1
+    return matching_options >= 2
+
+
+def _git_fragile_topic_reserve_drift(q: dict, course_id: str | None) -> bool:
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    if not _is_fragile_git_topic_bucket(topic_bucket):
+        return False
+
+    text_blob = _git_text_blob(q)
+    focus_markers = _git_topic_focus_markers(topic_bucket)
+    if focus_markers and not any(marker in text_blob for marker in focus_markers):
+        return True
+
+    if topic_bucket == "ci_cd_fundamentals":
+        return _git_family(q, course_id) not in {"ci_build_per_commit", "delivery_vs_deployment", "workflow_sequence"}
+    if topic_bucket == "commit_quality":
+        return not _git_commit_quality_template_match(_git_question_text(q), text_blob)
+    if topic_bucket == "distributed_vcs":
+        return not _git_dvc_reserve_focus_ok(q)
+    if topic_bucket == "merge_conflicts":
+        return _git_family(q, course_id) not in {"merge_conflict_resolution", "remote_ahead_push_rejected", "merge_commit_graph"}
+    return False
+
+
+def _git_topic_family_alignment_reason(q: dict, course_id: str | None) -> str | None:
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    question_family = _git_family(q, course_id)
+    question_text = _git_question_text(q)
+    question_blob = _git_text_blob(q)
+    if not topic_bucket or not question_family:
+        return None
+
+    allowed: dict[str, set[str]] = {
+        "local_vs_remote": {
+            "clone_first_checkout",
+            "pull_remote_updates",
+            "commit_vs_push",
+            "local_vs_remote_repo",
+            "remote_ahead_push_rejected",
+            "workflow_sequence",
+        },
+        "merge_conflicts": {
+            "merge_conflict_resolution",
+            "remote_ahead_push_rejected",
+            "merge_commit_graph",
+        },
+        "branching_and_merging": {
+            "branch_isolation",
+            "branch_vs_trunk",
+            "merge_commit_graph",
+            "merge_conflict_resolution",
+        },
+        "commit_quality": {
+            "commit_message_quality",
+        },
+        "distributed_vcs": {
+            "distributed_vcs",
+            "local_vs_remote_repo",
+            "clone_first_checkout",
+        },
+        "git_workflow_basics": {
+            "clone_first_checkout",
+            "pull_remote_updates",
+            "commit_vs_push",
+            "local_vs_remote_repo",
+            "workflow_sequence",
+            "remote_ahead_push_rejected",
+            "branch_isolation",
+        },
+        "ci_cd_fundamentals": {
+            "ci_build_per_commit",
+            "delivery_vs_deployment",
+            "workflow_sequence",
+        },
+    }
+    soft_conditions = {
+        ("local_vs_remote", "workflow_sequence"): _text_contains_any(
+            question_blob,
+            [
+                "clone",
+                "pull",
+                "push",
+                "commit",
+                "local repository",
+                "remote repository",
+                "new local copy",
+                "existing local copy",
+                "latest remote changes",
+                "already has a local",
+            ],
+        ),
+        ("branching_and_merging", "merge_conflict_resolution"): _text_contains_any(
+            question_blob,
+            ["merge conflict", "conflicting", "resolve", "reconcile"],
+        ) and not _git_branching_has_advanced_drift(question_blob) and _question_sentence_count(question_text) <= 2,
+        ("merge_conflicts", "merge_commit_graph"): _text_contains_any(
+            question_blob,
+            ["two parent", "two previous commits", "merged histories", "merge history", "points to both"],
+        ),
+        ("distributed_vcs", "workflow_sequence"): _text_contains_any(
+            question_text,
+            ["distributed", "repository", "local copy", "local history", "offline", "full copy"],
+        ),
+        ("ci_cd_fundamentals", "workflow_sequence"): _text_contains_any(
+            question_text,
+            ["continuous integration", "continuous delivery", "continuous deployment", "build", "test", "pipeline"],
+        ),
+        ("commit_quality", "commit_message_quality"): _git_commit_quality_template_match(question_text, question_blob),
+        ("distributed_vcs", "local_vs_remote_repo"): _text_contains_any(
+            question_blob,
+            ["full local copy", "full repository", "local history", "local repository", "offline", "later sync", "later synchronize"],
+        ),
+        ("distributed_vcs", "clone_first_checkout"): _text_contains_any(
+            question_blob,
+            ["full local copy", "full repository", "local history", "local repository", "offline", "work offline"],
+        ),
+    }
+
+    if question_family in allowed.get(topic_bucket, set()):
+        if topic_bucket == "branching_and_merging" and question_family == "merge_conflict_resolution":
+            return None if soft_conditions[("branching_and_merging", "merge_conflict_resolution")] else "git_topic_family_misalignment"
+        if topic_bucket == "merge_conflicts" and question_family == "merge_commit_graph":
+            return None if soft_conditions[("merge_conflicts", "merge_commit_graph")] else "git_topic_family_misalignment"
+        if topic_bucket == "ci_cd_fundamentals" and question_family == "workflow_sequence":
+            return None if soft_conditions[("ci_cd_fundamentals", "workflow_sequence")] else "git_ci_cd_topic_drift"
+        if topic_bucket == "commit_quality" and question_family == "commit_message_quality":
+            return None if soft_conditions[("commit_quality", "commit_message_quality")] else "git_commit_quality_wrong_focus"
+        if topic_bucket == "distributed_vcs" and question_family == "local_vs_remote_repo":
+            return None if soft_conditions[("distributed_vcs", "local_vs_remote_repo")] else "git_topic_family_misalignment"
+        if topic_bucket == "distributed_vcs" and question_family == "clone_first_checkout":
+            return None if soft_conditions[("distributed_vcs", "clone_first_checkout")] else "git_topic_family_misalignment"
+        return None
+
+    if (topic_bucket, question_family) in soft_conditions and soft_conditions[(topic_bucket, question_family)]:
+        return None
+
+    if topic_bucket == "ci_cd_fundamentals":
+        return "git_ci_cd_topic_drift"
+    if topic_bucket == "commit_quality":
+        return "git_commit_quality_wrong_focus"
+    return "git_topic_family_misalignment"
+
+
+def _git_correctness_reasons(q: dict, source_text: str | None, course_id: str | None) -> list[str]:
+    if not is_csen603_git_workflow_scope(course_id, str(q.get("topic", "")), source_text):
+        return []
+
+    question_text = _git_question_text(q)
+    question_blob = _git_text_blob(q)
+    correct_text = _git_correct_option_text(q)
+    question_family = _git_family(q, course_id)
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    concept_focus = derive_concept_focus(q) or ""
+    reasons: list[str] = []
+    try:
+        difficulty = int(q.get("difficulty", 3))
+    except Exception:
+        difficulty = 3
+
+    if (
+        question_family == "commit_vs_push"
+        or _text_has_push_visibility_signal(question_text)
+    ):
+        if "push" not in correct_text or any(token in correct_text for token in ("pull", "clone")):
+            reasons.append("git_visibility_push_vs_pull_confusion")
+
+    if (
+        question_family == "pull_remote_updates"
+        or _text_has_local_update_signal(question_text)
+    ):
+        allows_update = (
+            "pull" in correct_text
+            or ("fetch" in correct_text and any(token in correct_text for token in ("merge", "rebase", "synchronize")))
+        )
+        if not allows_update or any(token in correct_text for token in ("clone", "push")):
+            reasons.append("git_local_update_wrong_action")
+
+    if question_family == "branch_isolation":
+        if not any(token in correct_text for token in ("branch", "feature branch")) or any(token in correct_text for token in ("trunk", "mainline", "main branch", "directly on main")):
+            reasons.append("git_branch_isolation_wrong_action")
+
+    if "merge conflict" in question_text or question_family == "merge_conflict_resolution":
+        if not any(token in correct_text for token in ("resolve", "reconcile", "edit the conflicting", "fix the conflicting", "merge the changes")):
+            reasons.append("git_merge_conflict_logic_failure")
+        elif any(token in correct_text for token in ("clone", "start a new branch")):
+            reasons.append("git_merge_conflict_logic_failure")
+        if any(
+            marker in question_blob
+            for marker in (
+                "push causes a merge conflict",
+                "pushing causes a merge conflict",
+                "push directly creates a merge conflict",
+                "merge conflict at push time",
+                "overwritten automatically",
+                "lost forever",
+                "overwrite the remote history",
+            )
+        ):
+            reasons.append("git_merge_conflict_wording_failure")
+
+    if question_family == "remote_ahead_push_rejected" or _text_contains_any(question_text, ["remote is ahead", "push rejected", "another developer pushed first"]):
+        if not any(token in correct_text for token in ("pull", "synchronize", "merge", "reconcile", "fetch")) or "push directly" in correct_text:
+            reasons.append("git_remote_ahead_sync_failure")
+
+    if topic_bucket == "branching_and_merging":
+        if difficulty >= 4 and (
+            _git_branching_stem_is_overelaborate(question_text)
+            or _git_branching_has_advanced_drift(question_blob)
+        ):
+            reasons.append("git_branching_stem_too_elaborate")
+
+    if topic_bucket == "commit_quality":
+        if not _git_commit_quality_template_match(question_text, question_blob):
+            reasons.append("git_commit_quality_wrong_focus")
+        elif not any(token in correct_text for token in ("specific", "descriptive", "meaningful", "what changed", "why", "context", "history", "review")):
+            reasons.append("git_commit_quality_wrong_focus")
+        if any(token in correct_text for token in ("recommit", "git commit --amend", "ignore the message")):
+            reasons.append("git_commit_quality_wrong_focus")
+
+    if topic_bucket == "ci_cd_fundamentals" and not any(marker in question_blob for marker in _git_topic_focus_markers(topic_bucket)):
+        reasons.append("git_ci_cd_topic_drift")
+
+    if topic_bucket == "distributed_vcs" and (
+        not any(marker in question_blob for marker in _git_topic_focus_markers(topic_bucket))
+        or concept_focus not in {"distributed_vcs", "full_local_copy", "local_history", "offline_work"}
+    ):
+        reasons.append("git_topic_family_misalignment")
+
+    if topic_bucket == "merge_conflicts" and not any(marker in question_blob for marker in _git_topic_focus_markers(topic_bucket)):
+        reasons.append("git_merge_conflict_logic_failure")
+
+    alignment_reason = _git_topic_family_alignment_reason(q, course_id)
+    if alignment_reason:
+        reasons.append(alignment_reason)
+
+    if _git_dual_correct_operational_options(q, course_id):
+        reasons.append("git_dual_correct_operational_options")
+
+    deduped: list[str] = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return deduped
+
+
 def _difficulty_mismatch_reasons(
     q: dict,
     source_text: str | None = None,
     *,
     validation_profile: str = "default",
+    course_id: str | None = None,
 ) -> list[str]:
     question_text = str(q.get("question", ""))
     reasons = []
@@ -3080,6 +4357,7 @@ def _difficulty_mismatch_reasons(
         q,
         source_text,
         validation_profile=validation_profile,
+        course_id=course_id,
     ):
         reasons.append("too_many_out_of_source_specifics")
 
@@ -3088,6 +4366,8 @@ def _difficulty_mismatch_reasons(
 
     if difficulty <= 2 and _looks_like_reasoning_question(question_text):
         reasons.append("too_reasoning_heavy_low_difficulty")
+
+    reasons.extend(_git_correctness_reasons(q, source_text, course_id))
 
     return reasons
 
@@ -3100,6 +4380,7 @@ async def _generate_question_once(
     return_metadata: bool = False,
     max_provider_model_attempts: int | None = None,
     generation_profile: str = "default",
+    allow_last_resort: bool = True,
 ) -> dict | tuple[dict, dict]:
     difficulty_label = {
     1: "very easy",
@@ -3198,9 +4479,11 @@ async def _generate_question_once(
         used_last_resort: bool,
         provider: str | None = None,
         model: str | None = None,
+        validation_reasons_at_accept: list[str] | None = None,
     ) -> dict:
         payload = {
             "used_last_resort": used_last_resort,
+            "validation_reasons_at_accept": list(validation_reasons_at_accept or []),
             "provider_model_attempts": provider_model_attempts,
             "budget_limited": effective_attempt_budget is not None,
             "max_provider_model_attempts": effective_attempt_budget,
@@ -3220,6 +4503,8 @@ async def _generate_question_once(
         provider_order = _provider_order_for_generation(generation_profile)
         if generation_profile == "diagnostic":
             logger.info("[DIAG] Provider preference order active topic=%s order=%s", topic, provider_order)
+        elif generation_profile == "git_challenge":
+            logger.info("[LLM] Git challenge safe provider subset topic=%s order=%s", topic, provider_order)
         for provider_name in provider_order:
             provider_cfg = PROVIDERS.get(provider_name)
             if not provider_cfg:
@@ -3270,6 +4555,17 @@ async def _generate_question_once(
                     )
                     continue
 
+                if generation_profile == "git_challenge":
+                    unstable_remaining = _git_challenge_model_suppression_remaining(provider_name, model)
+                    if unstable_remaining > 0:
+                        logger.info(
+                            "[LLM] Skipping unstable Git challenge model provider=%s model=%s remaining=%ss",
+                            provider_name,
+                            model,
+                            int(unstable_remaining),
+                        )
+                        continue
+
                 provider_model_attempts += 1
                 try:
                     raw = await _call_model(client, provider_name, model, prompt)
@@ -3283,6 +4579,7 @@ async def _generate_question_once(
                         q,
                         selected_context,
                         validation_profile=validation_profile,
+                        course_id=course_id,
                     )
                     if is_valid:
                         q = _shuffle_question_options(q)
@@ -3292,6 +4589,7 @@ async def _generate_question_once(
                                 used_last_resort=False,
                                 provider=provider_name,
                                 model=model,
+                                validation_reasons_at_accept=[],
                             )
                         return q
                     else:
@@ -3314,7 +4612,16 @@ async def _generate_question_once(
                         if (
                             core_valid
                             and reserve_candidate is None
-                            and not _blocks_last_resort_accept(reasons)
+                            and not _blocks_last_resort_accept_for_candidate(
+                                q,
+                                reasons,
+                                source_text=selected_context,
+                                course_id=course_id,
+                            )
+                            and not (
+                                generation_profile == "git_challenge"
+                                and _git_challenge_safe_blocks_reserve_candidate(q, reasons, course_id)
+                            )
                         ):
                             reserve_candidate = {
                                 "question": q,
@@ -3328,9 +4635,25 @@ async def _generate_question_once(
                                 model,
                                 reason_text,
                             )
-                        elif core_valid and _blocks_last_resort_accept(reasons):
+                        elif core_valid and _blocks_last_resort_accept_for_candidate(
+                            q,
+                            reasons,
+                            source_text=selected_context,
+                            course_id=course_id,
+                        ):
                             logger.info(
                                 "[LLM] Reserve candidate skipped provider=%s model=%s blocking_reasons=%s",
+                                provider_name,
+                                model,
+                                reason_text,
+                            )
+                        elif (
+                            core_valid
+                            and generation_profile == "git_challenge"
+                            and _git_challenge_safe_blocks_reserve_candidate(q, reasons, course_id)
+                        ):
+                            logger.info(
+                                "[LLM] Git challenge-safe reserve rejected provider=%s model=%s reasons=%s",
                                 provider_name,
                                 model,
                                 reason_text,
@@ -3355,6 +4678,14 @@ async def _generate_question_once(
 
                 except ProviderHTTPError as e:
                     _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
+                    lowered_message = str(e.message or "").lower()
+                    if (
+                        generation_profile == "git_challenge"
+                        and e.provider == "mistral"
+                        and e.status_code == 503
+                        and any(marker in lowered_message for marker in ("overflow", "overload", "upstream"))
+                    ):
+                        _record_git_challenge_model_instability(e.provider, e.model, "upstream_503_overflow")
                     msg = f"[LLM] HTTP failure provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -3389,6 +4720,8 @@ async def _generate_question_once(
                     continue
 
                 except json.JSONDecodeError as e:
+                    if generation_profile == "git_challenge":
+                        _record_git_challenge_model_instability(provider_name, model, "json_parse_failure")
                     msg = f"[LLM] JSON parse failed provider={provider_name} model={model} error={_safe_exception_text(e)}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -3413,6 +4746,10 @@ async def _generate_question_once(
                     raise
 
                 except Exception as e:
+                    if generation_profile == "git_challenge":
+                        lowered_error = _safe_exception_text(e).lower()
+                        if isinstance(e, httpx.ReadTimeout) or "read timeout" in lowered_error or "timed out" in lowered_error:
+                            _record_git_challenge_model_instability(provider_name, model, "read_timeout")
                     msg = f"[LLM] Unexpected error provider={provider_name} model={model} error={_safe_exception_text(e)}"
                     logger.warning(msg)
                     all_failures.append(msg)
@@ -3464,6 +4801,26 @@ async def _generate_question_once(
                 ),
             )
 
+    if reserve_candidate is not None and not allow_last_resort:
+        logger.warning(
+            "[LLM] Last resort disabled topic=%s difficulty=%s generation_profile=%s",
+            topic,
+            difficulty,
+            generation_profile,
+        )
+        raise NoValidQuestionError(
+            "All providers/models failed to produce a valid non-reserve question.",
+            fallback_context=_build_no_valid_question_context(
+                policy=brittle_policy,
+                requested_difficulty=difficulty,
+                provider_model_attempts=provider_model_attempts,
+                brittle_validation_failures=brittle_validation_failures,
+                provider_failures=provider_failures,
+                rate_limit_failures=rate_limit_failures,
+                exit_reason="last_resort_disabled",
+            ),
+        )
+
     if reserve_candidate is not None:
         question = _shuffle_question_options(reserve_candidate["question"])
         logger.warning(
@@ -3477,6 +4834,7 @@ async def _generate_question_once(
                 used_last_resort=True,
                 provider=reserve_candidate["provider"],
                 model=reserve_candidate["model"],
+                validation_reasons_at_accept=reserve_candidate.get("strict_reasons", []),
             )
         return question
 
@@ -3503,9 +4861,30 @@ async def generate_question_with_metadata(
     max_provider_model_attempts: int | None = None,
     allow_internal_fallback: bool = True,
     generation_profile: str = "default",
+    allow_last_resort: bool = True,
 ) -> tuple[dict, dict]:
-    attempted_difficulties = [difficulty]
-    current_difficulty = difficulty
+    git_challenge_safe_mode = (
+        generation_profile == "git_challenge"
+        and is_csen603_git_workflow_scope(course_id, topic, source_text)
+    )
+    if git_challenge_safe_mode and difficulty >= 5:
+        current_difficulty = 4
+        attempted_difficulties = [4]
+        logger.info(
+            "[LLM] Git challenge safe-mode difficulty cap topic=%s requested_difficulty=%s generation_difficulty=%s",
+            topic,
+            difficulty,
+            current_difficulty,
+        )
+    else:
+        attempted_difficulties = [difficulty]
+        current_difficulty = difficulty
+
+    git_fragile_topic_guard = (
+        difficulty >= 5
+        and is_csen603_git_workflow_scope(course_id, topic, source_text)
+        and _is_fragile_git_topic_bucket(_git_topic_bucket(topic))
+    )
 
     while True:
         try:
@@ -3517,6 +4896,7 @@ async def generate_question_with_metadata(
                 return_metadata=True,
                 max_provider_model_attempts=max_provider_model_attempts,
                 generation_profile=generation_profile,
+                allow_last_resort=allow_last_resort,
             )
             metadata = dict(metadata)
             metadata["requested_difficulty"] = difficulty
@@ -3529,6 +4909,17 @@ async def generate_question_with_metadata(
                 raise ValueError(str(error)) from error
 
             fallback_context = dict(getattr(error, "fallback_context", {}) or {})
+            if git_fragile_topic_guard and current_difficulty >= 5 and 4 not in attempted_difficulties:
+                logger.warning(
+                    "[LLM] Git fragile-topic difficulty fallback topic=%s requested_difficulty=%s fallback_difficulty=%s exit_reason=%s",
+                    topic,
+                    difficulty,
+                    4,
+                    fallback_context.get("exit_reason"),
+                )
+                attempted_difficulties.append(4)
+                current_difficulty = 4
+                continue
             if not fallback_context.get("risky_generation"):
                 raise ValueError(str(error)) from error
 
@@ -3562,12 +4953,18 @@ async def generate_question(
     source_text: str,
     *,
     course_id: str | None = None,
+    generation_profile: str = "default",
+    max_provider_model_attempts: int | None = None,
+    allow_last_resort: bool = True,
 ) -> dict:
     question, _ = await generate_question_with_metadata(
         topic,
         difficulty,
         source_text,
         course_id=course_id,
+        generation_profile=generation_profile,
+        max_provider_model_attempts=max_provider_model_attempts,
+        allow_last_resort=allow_last_resort,
     )
     return question
 

@@ -44,7 +44,7 @@ from app.db.mongodb import get_db
 import asyncio
 
 router = APIRouter(prefix="/api/quiz", tags=["quiz"])
-CACHE_PROMPT_VERSION = "quiz-cache-v6"
+CACHE_PROMPT_VERSION = "quiz-cache-v8"
 CACHE_UNUSED_TTL_DAYS = 14
 CACHE_USED_TTL_DAYS = 7
 DEFAULT_CACHE_TARGET = 1
@@ -63,6 +63,31 @@ CONCEPT_DEDUPE_SESSION_SCAN_LIMIT = 12
 CHALLENGE_READY_AVG_MASTERY = TARGET_BAND[0]
 CHALLENGE_NOT_READY_ERROR = "challenge_not_ready"
 DIAGNOSTIC_FAST_PATH_MAX_ATTEMPTS = 3
+GIT_OPENING_CHALLENGE_SAFE_BUCKET_ORDER = (
+    "local_vs_remote",
+    "git_workflow_basics",
+    "distributed_vcs",
+    "commit_quality",
+    "ci_cd_fundamentals",
+    "merge_conflicts",
+    "branching_and_merging",
+)
+GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS = 1
+GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN = "local_vs_remote_repo"
+GIT_CHALLENGE_SAFE_ALLOWED_DVC_CONCEPTS = {
+    "distributed_vcs",
+    "full_local_copy",
+    "local_history",
+    "offline_work",
+}
+GIT_CHALLENGE_SAFE_BLOCKING_REASONS = {
+    "git_ci_cd_topic_drift",
+    "git_commit_quality_wrong_focus",
+    "git_topic_family_misalignment",
+    "git_branching_stem_too_elaborate",
+    "git_merge_conflict_logic_failure",
+    "git_visibility_push_vs_pull_confusion",
+}
 RECOVERY_SUPPORT_MESSAGE = (
     "You seem to be struggling with this concept. I can simplify it and give you one focused "
     "recovery question before we continue."
@@ -365,6 +390,293 @@ def _question_family(question: dict, course_id: str | None = None) -> str | None
     return None
 
 
+def _git_topic_bucket(topic: str) -> str | None:
+    normalized = str(topic or "").strip().lower()
+    if not normalized:
+        return None
+
+    if any(token in normalized for token in ("local vs remote", "local remote", "remote repository", "working copy")):
+        return "local_vs_remote"
+    if "merge conflict" in normalized:
+        return "merge_conflicts"
+    if any(token in normalized for token in ("branching and merging", "branching", "merging", "mainline", "trunk")):
+        return "branching_and_merging"
+    if any(token in normalized for token in ("commit quality", "commit message", "commit messages")):
+        return "commit_quality"
+    if "distributed version control" in normalized:
+        return "distributed_vcs"
+    if any(token in normalized for token in ("ci and cd", "continuous integration", "continuous delivery", "continuous deployment", "ci/cd")):
+        return "ci_cd_fundamentals"
+    if any(token in normalized for token in ("git workflow basics", "git workflow", "git basics")):
+        return "git_workflow_basics"
+    return None
+
+
+def _is_git_challenge_scope(course_id: str, source_text: str, mode: str | None) -> bool:
+    return str(mode or "").strip().lower() == "challenge" and is_csen603_git_workflow_scope(
+        course_id,
+        "Git workflow challenge",
+        source_text,
+    )
+
+
+def _git_challenge_safe_generation_difficulty(topic: str, difficulty: int) -> int:
+    return min(int(difficulty), 4)
+
+
+def _git_challenge_safe_cache_difficulty(topic: str, difficulty: int) -> int:
+    return min(int(difficulty), 4)
+
+
+def _git_challenge_safe_candidate_allows_d5(candidate_topic_bucket: str | None, candidate_difficulty: int) -> bool:
+    return candidate_difficulty <= 4
+
+
+def _git_challenge_opening_topic_candidates(
+    topics: list[str],
+    *,
+    difficulty: int,
+) -> list[str]:
+    ordered_topics = _dedupe_keep_order([str(topic).strip() for topic in topics if str(topic).strip()])
+    if not ordered_topics:
+        return []
+
+    prioritized: list[str] = []
+    for bucket in GIT_OPENING_CHALLENGE_SAFE_BUCKET_ORDER:
+        for topic in ordered_topics:
+            if topic in prioritized:
+                continue
+            if _git_topic_bucket(topic) == bucket:
+                prioritized.append(topic)
+                break
+
+    return prioritized + [topic for topic in ordered_topics if topic not in prioritized]
+
+
+def _git_opening_generation_difficulty(topic: str, difficulty: int) -> int:
+    return _git_challenge_safe_generation_difficulty(topic, difficulty)
+
+
+def _apply_git_challenge_opening_guard(
+    topics: list[str],
+    *,
+    difficulty: int,
+    course_id: str,
+    source_text: str,
+    mode: str | None,
+) -> tuple[list[str], int]:
+    ordered_topics = _dedupe_keep_order(topics)
+    if not _is_git_challenge_scope(course_id, source_text, mode):
+        return ordered_topics, difficulty
+
+    opening_candidates = _git_challenge_opening_topic_candidates(
+        ordered_topics,
+        difficulty=difficulty,
+    )
+    if not opening_candidates:
+        return ordered_topics, difficulty
+
+    guarded_topics = opening_candidates + [topic for topic in ordered_topics if topic not in opening_candidates]
+    guarded_difficulty = _git_opening_generation_difficulty(guarded_topics[0], difficulty)
+    if guarded_topics != ordered_topics or guarded_difficulty != difficulty:
+        logger.info(
+            "[CHALLENGE] Git opening topic plan adjusted first_topic=%s->%s difficulty=%s->%s",
+            ordered_topics[0] if ordered_topics else "none",
+            guarded_topics[0] if guarded_topics else "none",
+            difficulty,
+            guarded_difficulty,
+        )
+    return guarded_topics, guarded_difficulty
+
+
+async def _update_session_opening_plan(
+    *,
+    state: dict,
+    session_id: str,
+    opening_topic: str,
+    opening_difficulty: int,
+) -> None:
+    session_topics = _dedupe_keep_order(state.get("session_topics") or [])
+    if opening_topic:
+        session_topics = [opening_topic] + [topic for topic in session_topics if topic != opening_topic]
+    state["session_topics"] = session_topics
+    state["current_difficulty"] = opening_difficulty
+
+    db = get_db()
+    await db.student_session_history.update_one(
+        {"session_id": session_id},
+        {
+            "$set": {
+                "session_topics": session_topics,
+                "start_difficulty": opening_difficulty,
+                "end_difficulty": opening_difficulty,
+            }
+        },
+    )
+
+
+def _git_recent_local_remote_repeat(
+    recent_concepts: list[str] | None,
+    recent_families: list[str] | None,
+) -> bool:
+    normalized_recent_concepts = {
+        _normalized_concept_focus(value)
+        for value in (recent_concepts or [])
+        if _normalized_concept_focus(value)
+    }
+    normalized_recent_families = {
+        _normalized_question_family(value)
+        for value in (recent_families or [])
+        if _normalized_question_family(value)
+    }
+    return (
+        GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN in normalized_recent_concepts
+        or GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN in normalized_recent_families
+    )
+
+
+def _git_challenge_alternate_topic(
+    session_topics: list[str] | None,
+    *,
+    current_topic: str,
+) -> str | None:
+    preferred_buckets = (
+        "local_vs_remote",
+        "git_workflow_basics",
+        "distributed_vcs",
+        "commit_quality",
+        "ci_cd_fundamentals",
+        "merge_conflicts",
+        "branching_and_merging",
+    )
+    normalized_topics = _dedupe_keep_order([str(topic).strip() for topic in (session_topics or []) if str(topic).strip()])
+    for bucket in preferred_buckets:
+        for topic in normalized_topics:
+            if topic == current_topic:
+                continue
+            if _git_topic_bucket(topic) == bucket:
+                return topic
+    return None
+
+
+def _apply_git_challenge_runtime_guard(
+    *,
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    source_text: str,
+    mode: str | None,
+    recent_concepts: list[str] | None = None,
+    recent_families: list[str] | None = None,
+    session_topics: list[str] | None = None,
+) -> tuple[str, int]:
+    if not _is_git_challenge_scope(course_id, source_text, mode):
+        return topic, difficulty
+
+    topic_bucket = _git_topic_bucket(topic)
+    local_remote_repeat = _git_recent_local_remote_repeat(recent_concepts, recent_families)
+    guarded_difficulty = _git_challenge_safe_generation_difficulty(topic, difficulty)
+
+    if topic_bucket == "git_workflow_basics" and local_remote_repeat:
+        alternate_topic = _git_challenge_alternate_topic(session_topics, current_topic=topic)
+        if alternate_topic:
+            return alternate_topic, _git_challenge_safe_generation_difficulty(alternate_topic, difficulty)
+        return topic, min(guarded_difficulty, 4)
+
+    if topic_bucket == "local_vs_remote" and difficulty >= 5 and local_remote_repeat:
+        return topic, 4
+
+    return topic, guarded_difficulty
+
+
+def _cache_validation_reasons(candidate: dict) -> list[str]:
+    value = candidate.get("validation_reasons_at_accept")
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def _git_cache_candidate_block_reason(
+    candidate: dict,
+    *,
+    topic: str,
+    difficulty: int,
+    course_id: str,
+    mode: str | None,
+    recent_concepts: list[str] | None = None,
+    recent_families: list[str] | None = None,
+) -> str | None:
+    if str(mode or "").strip().lower() != "challenge":
+        return None
+
+    candidate_topic_bucket = _git_topic_bucket(str(candidate.get("topic") or topic))
+    candidate_difficulty = int(candidate.get("difficulty", difficulty) or difficulty)
+    concept_focus = _question_concept_focus(candidate)
+    question_family = _question_family(candidate, course_id=course_id)
+    validation_reasons = _cache_validation_reasons(candidate)
+    local_remote_repeat = _git_recent_local_remote_repeat(recent_concepts, recent_families)
+    has_last_resort_metadata = "accepted_via_last_resort" in candidate
+
+    if not _git_challenge_safe_candidate_allows_d5(candidate_topic_bucket, candidate_difficulty):
+        return "git_challenge_safe_d5_blocked"
+    if candidate.get("accepted_via_last_resort") is True:
+        return "accepted_via_last_resort"
+    if "weak_distractors_high_difficulty" in validation_reasons and candidate_difficulty >= 4:
+        return "weak_distractors_high_difficulty"
+    if any(reason in GIT_CHALLENGE_SAFE_BLOCKING_REASONS for reason in validation_reasons):
+        return "git_challenge_safe_validation_block"
+    if (
+        "too_many_out_of_source_specifics" in validation_reasons
+        and candidate_topic_bucket in {"distributed_vcs", "commit_quality", "ci_cd_fundamentals", "merge_conflicts", "branching_and_merging"}
+    ):
+        return "git_challenge_fragile_out_of_source"
+    if not concept_focus or not question_family:
+        return "missing_concept_or_family_metadata"
+    if candidate_topic_bucket in {"distributed_vcs", "commit_quality", "ci_cd_fundamentals", "branching_and_merging", "local_vs_remote"} and not has_last_resort_metadata:
+        return "missing_acceptance_metadata"
+
+    if candidate_topic_bucket == "commit_quality" and question_family != "commit_message_quality":
+        return "commit_quality_wrong_family"
+
+    if candidate_topic_bucket == "distributed_vcs":
+        if concept_focus not in GIT_CHALLENGE_SAFE_ALLOWED_DVC_CONCEPTS:
+            return "distributed_vcs_wrong_concept"
+        if question_family not in {"distributed_vcs", "local_vs_remote_repo", "clone_first_checkout"}:
+            return "distributed_vcs_wrong_family"
+
+    if candidate_topic_bucket == "ci_cd_fundamentals":
+        if question_family not in {"ci_build_per_commit", "delivery_vs_deployment"}:
+            return "ci_cd_wrong_family"
+        if any(
+            reason in validation_reasons
+            for reason in (
+                "generic_benefit_stem_high_difficulty",
+                "slogan_recall_high_difficulty",
+                "plain_recall_high_difficulty",
+                "too_direct_high_difficulty",
+            )
+        ):
+            return "ci_cd_unstable_style"
+
+    if candidate_topic_bucket == "branching_and_merging":
+        if question_family not in {"branch_isolation", "branch_vs_trunk", "merge_commit_graph", "merge_conflict_resolution"}:
+            return "branching_wrong_family"
+        if "git_branching_stem_too_elaborate" in validation_reasons:
+            return "branching_stem_too_elaborate"
+
+    if candidate_topic_bucket == "git_workflow_basics" and local_remote_repeat:
+        if concept_focus == GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN or question_family == GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN:
+            return "git_workflow_basics_local_remote_repeat"
+
+    if candidate_topic_bucket == "local_vs_remote" and local_remote_repeat and candidate_difficulty >= 5:
+        if concept_focus == GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN or question_family == GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN:
+            return "local_remote_repeat_at_d5"
+
+    return None
+
+
 def _concept_dedupe_policy(
     target_questions: int | None,
     mode: str | None,
@@ -619,6 +931,9 @@ async def _generate_question_with_soft_dedupe(
     target_questions: int | None = None,
     mode: str | None = None,
     git_workflow_scope: bool = False,
+    max_live_attempts: int | None = None,
+    max_provider_model_attempts: int | None = None,
+    allow_last_resort: bool = True,
 ) -> dict:
     recent_hash_set = set(recent_hashes)
     concept_policy = _concept_dedupe_policy(target_questions, mode)
@@ -626,6 +941,13 @@ async def _generate_question_with_soft_dedupe(
     family_policy = _git_family_variety_policy(target_questions, mode)
     family_attempts = int(family_policy.get("live_attempts", 1) or 1) if git_workflow_scope and recent_families else 1
     attempts = max(LIVE_DEDUPE_MAX_ATTEMPTS if recent_hash_set else 1, concept_attempts, family_attempts)
+    if max_live_attempts is not None:
+        attempts = max(1, min(attempts, int(max_live_attempts)))
+    generation_profile = (
+        "git_challenge"
+        if git_workflow_scope and str(mode or "").strip().lower() == "challenge"
+        else "default"
+    )
 
     for attempt in range(1, attempts + 1):
         question = await generate_question(
@@ -633,6 +955,9 @@ async def _generate_question_with_soft_dedupe(
             difficulty=difficulty,
             source_text=source_text,
             course_id=course_id,
+            generation_profile=generation_profile,
+            max_provider_model_attempts=max_provider_model_attempts,
+            allow_last_resort=allow_last_resort,
         )
         question = ensure_question_concept_focus(question, course_id=course_id)
         question_hash = _question_hash_for_tracking(question)
@@ -1097,6 +1422,49 @@ def _cache_target_for_state(state: dict, topic: str, difficulty: int) -> int:
         return FOCUSED_FOLLOWUP_CACHE_TARGET
 
     return DEFAULT_CACHE_TARGET
+
+
+def _git_challenge_bank_target(topic: str) -> int:
+    target_map = {
+        "local_vs_remote": 2,
+        "git_workflow_basics": 2,
+        "distributed_vcs": 2,
+        "commit_quality": 1,
+        "ci_cd_fundamentals": 1,
+        "merge_conflicts": 1,
+        "branching_and_merging": 1,
+    }
+    return target_map.get(_git_topic_bucket(topic), DEFAULT_CACHE_TARGET)
+
+
+def _git_challenge_next_question_position(session_doc: dict | None) -> int:
+    try:
+        answered = int((session_doc or {}).get("questions_answered", 0) or 0)
+    except (TypeError, ValueError):
+        answered = 0
+    return answered + 1
+
+
+def _git_challenge_blocks_early_last_resort(question_position: int) -> bool:
+    return question_position <= 3
+
+
+def _git_challenge_live_model_attempt_budget(topic: str) -> int:
+    stable_buckets = {"local_vs_remote", "git_workflow_basics", "distributed_vcs"}
+    return 3 if _git_topic_bucket(topic) in stable_buckets else 1
+
+
+def _effective_cache_target(
+    state: dict,
+    topic: str,
+    difficulty: int,
+    *,
+    git_challenge_safe_mode: bool,
+) -> int:
+    base_target = _cache_target_for_state(state, topic, difficulty)
+    if not git_challenge_safe_mode:
+        return base_target
+    return max(base_target, _git_challenge_bank_target(topic))
 
 
 async def _wait_for_replenished_cache(
@@ -2648,6 +3016,7 @@ async def _get_cached_question(
     }
 
     question = None
+    git_challenge_mode = git_workflow_scope and str(mode or "").strip().lower() == "challenge"
     normalized_recent_concepts = [
         _normalized_concept_focus(value)
         for value in (recent_concepts or [])
@@ -2659,7 +3028,7 @@ async def _get_cached_question(
         if _normalized_question_family(value)
     ]
 
-    if normalized_recent_concepts or (git_workflow_scope and normalized_recent_families):
+    if normalized_recent_concepts or (git_workflow_scope and normalized_recent_families) or git_challenge_mode:
         preferred_query = dict(base_query)
         if excluded_hashes:
             preferred_query["question_hash"] = {"$nin": excluded_hashes}
@@ -2670,6 +3039,25 @@ async def _get_cached_question(
         ).to_list(length=CONCEPT_DEDUPE_CACHE_SCAN_LIMIT)
 
         for candidate in candidates:
+            block_reason = _git_cache_candidate_block_reason(
+                candidate,
+                topic=topic,
+                difficulty=difficulty,
+                course_id=course_id,
+                mode=mode,
+                recent_concepts=normalized_recent_concepts,
+                recent_families=normalized_recent_families,
+            ) if git_challenge_mode else None
+            if block_reason:
+                logger.info(
+                    "[CACHE] Git candidate blocked course=%s topic=%s difficulty=%s reason=%s",
+                    course_id,
+                    topic,
+                    difficulty,
+                    block_reason,
+                )
+                continue
+
             concept_focus = _question_concept_focus(candidate)
             question_family = _question_family(candidate, course_id=course_id)
             if _concept_repeats_too_soon(
@@ -2715,7 +3103,7 @@ async def _get_cached_question(
                 break
 
     if excluded_hashes:
-        if question is None:
+        if question is None and not git_challenge_mode:
             question = await _claim({
                 **base_query,
                 "question_hash": {"$nin": excluded_hashes},
@@ -2727,7 +3115,7 @@ async def _get_cached_question(
                 topic,
                 difficulty,
             )
-        elif allow_relaxed_fallback:
+        elif allow_relaxed_fallback and not git_challenge_mode:
             question = await _claim(base_query)
             if question:
                 logger.info(
@@ -2736,7 +3124,7 @@ async def _get_cached_question(
                     topic,
                     difficulty,
                 )
-    else:
+    elif not git_challenge_mode:
         question = await _claim(base_query)
 
     if question:
@@ -2755,6 +3143,29 @@ async def _get_cached_question(
             topic, difficulty, prompt_version
         )
         question.pop("_id", None)
+    elif git_challenge_mode and difficulty >= 5:
+        fallback_difficulty = _git_challenge_safe_cache_difficulty(topic, difficulty)
+        if fallback_difficulty != difficulty:
+            logger.info(
+                "[CACHE] Git challenge-safe cache fallback topic=%s difficulty=%s->%s",
+                topic,
+                difficulty,
+                fallback_difficulty,
+            )
+            return await _get_cached_question(
+                topic=topic,
+                difficulty=fallback_difficulty,
+                course_id=course_id,
+                source_scope_key=source_scope_key,
+                prompt_version=prompt_version,
+                excluded_hashes=excluded_hashes,
+                recent_concepts=recent_concepts,
+                recent_families=recent_families,
+                target_questions=target_questions,
+                mode=mode,
+                git_workflow_scope=git_workflow_scope,
+                allow_relaxed_fallback=allow_relaxed_fallback,
+            )
     return question
 
 
@@ -2766,6 +3177,8 @@ async def _replenish_cache(
     source_scope_key: str,
     prompt_version: str,
     target: int = DEFAULT_CACHE_TARGET,
+    mode: str | None = None,
+    git_workflow_scope: bool = False,
 ):
     bucket_key = _cache_bucket_key(
         topic=topic,
@@ -2783,6 +3196,8 @@ async def _replenish_cache(
 
     _REPLENISH_IN_FLIGHT.add(bucket_key)
     db = get_db()
+    git_challenge_safe_mode = git_workflow_scope and _is_git_challenge_scope(course_id, source_text, mode)
+    generation_difficulty = min(int(difficulty), 4) if git_challenge_safe_mode else int(difficulty)
     try:
         count = await db.questions_cache.count_documents({
             "topic": topic,
@@ -2802,11 +3217,14 @@ async def _replenish_cache(
         for _ in range(needed):
             try:
                 await asyncio.sleep(2)
-                q = await generate_question(
-                    topic,
-                    difficulty,
-                    source_text,
+                q, metadata = await generate_question_with_metadata(
+                    topic=topic,
+                    difficulty=generation_difficulty,
+                    source_text=source_text,
                     course_id=course_id,
+                    generation_profile="git_challenge" if git_challenge_safe_mode else "default",
+                    max_provider_model_attempts=_git_challenge_live_model_attempt_budget(topic) if git_challenge_safe_mode else None,
+                    allow_last_resort=not git_challenge_safe_mode,
                 )
                 q = ensure_question_concept_focus(q, course_id=course_id)
                 now = datetime.now(timezone.utc)
@@ -2820,6 +3238,30 @@ async def _replenish_cache(
                 q["source_scope_key"] = source_scope_key
                 q["prompt_version"] = prompt_version
                 q["question_hash"] = _make_question_hash(q)
+                q["accepted_via_last_resort"] = bool((metadata or {}).get("used_last_resort"))
+                q["validation_reasons_at_accept"] = list((metadata or {}).get("validation_reasons_at_accept", []))
+                q["provider_source"] = str((metadata or {}).get("source") or "").strip()
+                q["attempted_difficulties"] = list((metadata or {}).get("attempted_difficulties", []))
+                q["requested_difficulty"] = int((metadata or {}).get("requested_difficulty", difficulty) or difficulty)
+
+                if git_challenge_safe_mode:
+                    block_reason = _git_cache_candidate_block_reason(
+                        q,
+                        topic=topic,
+                        difficulty=difficulty,
+                        course_id=course_id,
+                        mode="challenge",
+                        recent_concepts=[],
+                        recent_families=[],
+                    )
+                    if block_reason:
+                        logger.info(
+                            "[CACHE] Git challenge-safe candidate rejected topic=%s difficulty=%s reason=%s",
+                            topic,
+                            difficulty,
+                            block_reason,
+                        )
+                        continue
 
                 result = await db.questions_cache.insert_one(q)
 
@@ -2889,36 +3331,86 @@ async def _generate_first_question(
     """Generate (or pull from cache) the first question for a freshly created session."""
     source_scope_key = _make_source_scope_key(source_text)
     recent_hashes = _recent_seen_hashes_from_state(state, course_id)
-    cache_target = _cache_target_for_state(state, topic, difficulty)
     preferred_only = _state_is_focused_followup(state)
-    cached = await _get_cached_question(
-        topic=topic,
-        difficulty=difficulty,
-        course_id=course_id,
-        source_scope_key=source_scope_key,
-        prompt_version=CACHE_PROMPT_VERSION,
-        excluded_hashes=recent_hashes,
-        allow_relaxed_fallback=not preferred_only,
-    )
-    if cached:
-        asyncio.create_task(
-            _replenish_cache(
-                topic=topic,
-                difficulty=difficulty,
-                course_id=course_id,
-                source_text=source_text,
-                source_scope_key=source_scope_key,
-                prompt_version=CACHE_PROMPT_VERSION,
-                target=cache_target,
-            )
+    session_mode = str(state.get("current_session_mode") or "").strip().lower()
+    git_opening_challenge = _is_git_challenge_scope(course_id, source_text, session_mode)
+    opening_question_position = 1
+    requested_opening_difficulty = int(difficulty)
+    opening_candidates = [topic]
+
+    if git_opening_challenge:
+        logger.info(
+            "[CHALLENGE] Git bank-first mode active session=%s opening_topic=%s requested_difficulty=%s",
+            session_id,
+            topic,
+            requested_opening_difficulty,
         )
-        question = cached
-    else:
+        opening_candidates = _git_challenge_opening_topic_candidates(
+            state.get("session_topics") or [topic],
+            difficulty=requested_opening_difficulty,
+        ) or [topic]
+        guarded_topic = opening_candidates[0]
+        guarded_difficulty = _git_opening_generation_difficulty(
+            guarded_topic,
+            requested_opening_difficulty,
+        )
+        if guarded_topic != topic or guarded_difficulty != requested_opening_difficulty:
+            logger.info(
+                "[CHALLENGE] Git opening guard applied session=%s topic=%s->%s difficulty=%s->%s",
+                session_id,
+                topic,
+                guarded_topic,
+                requested_opening_difficulty,
+                guarded_difficulty,
+            )
+            topic = guarded_topic
+            difficulty = guarded_difficulty
+            await _update_session_opening_plan(
+                state=state,
+                session_id=session_id,
+                opening_topic=topic,
+                opening_difficulty=difficulty,
+            )
+
+    async def _try_cached_topic(active_topic: str, active_difficulty: int) -> dict | None:
+        cached = await _get_cached_question(
+            topic=active_topic,
+            difficulty=active_difficulty,
+            course_id=course_id,
+            source_scope_key=source_scope_key,
+            prompt_version=CACHE_PROMPT_VERSION,
+            excluded_hashes=recent_hashes,
+            allow_relaxed_fallback=not preferred_only,
+            mode=session_mode,
+            git_workflow_scope=git_opening_challenge,
+        )
+        if cached:
+            cached_difficulty = int(cached.get("difficulty", active_difficulty) or active_difficulty)
+            asyncio.create_task(
+                _replenish_cache(
+                    topic=active_topic,
+                    difficulty=cached_difficulty,
+                    course_id=course_id,
+                    source_text=source_text,
+                    source_scope_key=source_scope_key,
+                    prompt_version=CACHE_PROMPT_VERSION,
+                    target=_effective_cache_target(
+                        state,
+                        active_topic,
+                        cached_difficulty,
+                        git_challenge_safe_mode=git_opening_challenge,
+                    ),
+                    mode=session_mode,
+                    git_workflow_scope=git_opening_challenge,
+                )
+            )
+            return cached
+
         question = None
         if _state_is_focused_followup(state):
             waited_for_cache = await _wait_for_replenished_cache(
-                topic=topic,
-                difficulty=difficulty,
+                topic=active_topic,
+                difficulty=active_difficulty,
                 course_id=course_id,
                 source_scope_key=source_scope_key,
                 prompt_version=CACHE_PROMPT_VERSION,
@@ -2926,102 +3418,175 @@ async def _generate_first_question(
             if waited_for_cache:
                 logger.info(
                     "[FOLLOWUP] Retrying preferred cache after wait topic=%s difficulty=%s",
-                    topic,
-                    difficulty,
+                    active_topic,
+                    active_difficulty,
                 )
                 question = await _get_cached_question(
-                    topic=topic,
-                    difficulty=difficulty,
+                    topic=active_topic,
+                    difficulty=active_difficulty,
                     course_id=course_id,
                     source_scope_key=source_scope_key,
                     prompt_version=CACHE_PROMPT_VERSION,
                     excluded_hashes=recent_hashes,
                     allow_relaxed_fallback=False,
+                    mode=session_mode,
+                    git_workflow_scope=git_opening_challenge,
                 )
                 if question:
                     logger.info(
                         "[FOLLOWUP] Cache recovered after wait topic=%s difficulty=%s",
-                        topic,
-                        difficulty,
+                        active_topic,
+                        active_difficulty,
                     )
                 else:
                     logger.info(
                         "[FOLLOWUP] Preferred cache unavailable after wait topic=%s difficulty=%s",
-                        topic,
-                        difficulty,
+                        active_topic,
+                        active_difficulty,
                     )
                     logger.info(
                         "[FOLLOWUP] Trying relaxed cache after wait topic=%s difficulty=%s",
-                        topic,
-                        difficulty,
+                        active_topic,
+                        active_difficulty,
                     )
                     question = await _get_cached_question(
-                        topic=topic,
-                        difficulty=difficulty,
+                        topic=active_topic,
+                        difficulty=active_difficulty,
                         course_id=course_id,
                         source_scope_key=source_scope_key,
                         prompt_version=CACHE_PROMPT_VERSION,
                         excluded_hashes=None,
+                        mode=session_mode,
+                        git_workflow_scope=git_opening_challenge,
                     )
                     if question:
                         logger.info(
                             "[FOLLOWUP] Relaxed cache recovered after wait topic=%s difficulty=%s",
-                            topic,
-                            difficulty,
+                            active_topic,
+                            active_difficulty,
                         )
 
             if question:
+                recovered_difficulty = int(question.get("difficulty", active_difficulty) or active_difficulty)
                 asyncio.create_task(
                     _replenish_cache(
-                        topic=topic,
-                        difficulty=difficulty,
+                        topic=active_topic,
+                        difficulty=recovered_difficulty,
                         course_id=course_id,
                         source_text=source_text,
                         source_scope_key=source_scope_key,
                         prompt_version=CACHE_PROMPT_VERSION,
-                        target=cache_target,
+                        target=_effective_cache_target(
+                            state,
+                            active_topic,
+                            recovered_difficulty,
+                            git_challenge_safe_mode=git_opening_challenge,
+                        ),
+                        mode=session_mode,
+                        git_workflow_scope=git_opening_challenge,
                     )
                 )
 
-        if question is None:
-            if _state_is_focused_followup(state):
-                logger.info(
-                    "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
-                    topic,
-                    difficulty,
-                )
+        return question
+
+    async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
+        logger.info(
+            "[CHALLENGE] Git bank-first entering live generation topic=%s difficulty=%s",
+            active_topic,
+            active_difficulty,
+        )
+
+        if _state_is_focused_followup(state):
             logger.info(
-                "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
-                topic, difficulty, CACHE_PROMPT_VERSION
+                "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
+                active_topic,
+                active_difficulty,
             )
-            try:
-                question = await _generate_question_with_soft_dedupe(
-                    topic=topic,
-                    difficulty=difficulty,
-                    source_text=source_text,
-                    course_id=course_id,
-                    recent_hashes=recent_hashes,
-                )
-                generated_difficulty = int(question.get("difficulty", difficulty))
-                logger.info(
-                    "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
-                    topic,
-                    difficulty,
+        logger.info(
+            "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
+            active_topic,
+            active_difficulty,
+            CACHE_PROMPT_VERSION,
+        )
+        question = await _generate_question_with_soft_dedupe(
+            topic=active_topic,
+            difficulty=active_difficulty,
+            source_text=source_text,
+            course_id=course_id,
+            recent_hashes=recent_hashes,
+            target_questions=max_questions,
+            mode=session_mode,
+            git_workflow_scope=git_opening_challenge,
+            max_live_attempts=GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS if git_opening_challenge else None,
+            max_provider_model_attempts=_git_challenge_live_model_attempt_budget(active_topic) if git_opening_challenge else None,
+            allow_last_resort=not _git_challenge_blocks_early_last_resort(opening_question_position),
+        )
+        generated_difficulty = int(question.get("difficulty", active_difficulty))
+        logger.info(
+            "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
+            active_topic,
+            active_difficulty,
+            generated_difficulty,
+        )
+        asyncio.create_task(
+            _replenish_cache(
+                topic=active_topic,
+                difficulty=generated_difficulty,
+                course_id=course_id,
+                source_text=source_text,
+                source_scope_key=source_scope_key,
+                prompt_version=CACHE_PROMPT_VERSION,
+                target=_effective_cache_target(
+                    state,
+                    active_topic,
                     generated_difficulty,
+                    git_challenge_safe_mode=git_opening_challenge,
+                ),
+                mode=session_mode,
+                git_workflow_scope=git_opening_challenge,
+            )
+        )
+        return question
+
+    try:
+        question = await _try_cached_topic(topic, difficulty)
+        live_topic = topic
+        live_difficulty = difficulty
+        if question is None and git_opening_challenge:
+            repick_topic = _git_challenge_alternate_topic(opening_candidates, current_topic=topic)
+            if repick_topic:
+                repick_difficulty = _git_challenge_safe_generation_difficulty(repick_topic, requested_opening_difficulty)
+                logger.info(
+                    "[CHALLENGE] Git bank-first repick session=%s from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
+                    session_id,
+                    topic,
+                    repick_topic,
+                    difficulty,
+                    repick_difficulty,
                 )
-                asyncio.create_task(
-                    _replenish_cache(
-                        topic=topic,
-                        difficulty=generated_difficulty,
-                        course_id=course_id,
-                        source_text=source_text,
-                        source_scope_key=source_scope_key,
-                        prompt_version=CACHE_PROMPT_VERSION,
-                        target=cache_target,
-                    )
+                await _update_session_opening_plan(
+                    state=state,
+                    session_id=session_id,
+                    opening_topic=repick_topic,
+                    opening_difficulty=repick_difficulty,
                 )
-            except ValueError as e:
-                return {"success": False, "error": str(e)}
+                repicked_question = await _try_cached_topic(repick_topic, repick_difficulty)
+                if repicked_question is not None:
+                    question = repicked_question
+                    topic = repick_topic
+                    difficulty = repick_difficulty
+                else:
+                    live_topic = repick_topic
+                    live_difficulty = repick_difficulty
+                    topic = repick_topic
+                    difficulty = repick_difficulty
+
+        if question is None:
+            question = await _live_generate_topic(live_topic, live_difficulty)
+            topic = live_topic
+            difficulty = live_difficulty
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
 
     _record_seen_question(
         state=state,
@@ -3040,7 +3605,7 @@ async def _generate_first_question(
         "question":         question,
         "questions_seen":   0,
         "max_questions":    max_questions,
-        "current_difficulty": difficulty,
+        "current_difficulty": int(question.get("difficulty", difficulty)),
         "session_id":       session_id,
     }
     
@@ -3119,191 +3684,266 @@ async def generate(req: GenerateRequest):
             _recent_question_families_from_question_log((session_doc or {}).get("question_log") or [], course_id=req.course_id)
             if git_workflow_scope else []
         )
-        source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
-        prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
-        recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
-        cache_target = _cache_target_for_state(state, req.topic, req.difficulty)
-        preferred_only = _state_is_focused_followup(state)
-
-        # Try cache first
-        cached = await _get_cached_question(
+        session_topics = (session_doc or {}).get("session_topics") or state.get("session_topics") or [req.topic]
+        effective_topic, effective_difficulty = _apply_git_challenge_runtime_guard(
             topic=req.topic,
             difficulty=req.difficulty,
             course_id=req.course_id,
-            source_scope_key=source_scope_key,
-            prompt_version=prompt_version,
-            excluded_hashes=recent_hashes,
+            source_text=req.source_text,
+            mode=session_mode,
             recent_concepts=recent_concepts,
             recent_families=recent_families,
-            target_questions=session_target_questions,
-            mode=session_mode,
-            git_workflow_scope=git_workflow_scope,
-            allow_relaxed_fallback=not preferred_only,
+            session_topics=session_topics,
         )
-        if cached:
-            # Fire background replenishment
-            asyncio.create_task(
-                _replenish_cache(
-                    topic=req.topic,
-                    difficulty=req.difficulty,
-                    course_id=req.course_id,
-                    source_text=req.source_text,
-                    source_scope_key=source_scope_key,
-                    prompt_version=prompt_version,
-                    target=cache_target,
-                )
+        if effective_topic != req.topic or effective_difficulty != req.difficulty:
+            logger.info(
+                "[CHALLENGE] Git runtime guard applied topic=%s->%s difficulty=%s->%s",
+                req.topic,
+                effective_topic,
+                req.difficulty,
+                effective_difficulty,
             )
-            _record_seen_question(
-                state=state,
-                question=cached,
-                course_id=req.course_id,
-                topic=str(cached.get("topic", req.topic)),
-                difficulty=int(cached.get("difficulty", req.difficulty)),
-                source_scope_key=source_scope_key,
-                prompt_version=prompt_version,
-                session_id=session_id,
+        source_scope_key = state.get("current_source_scope_key") or _make_source_scope_key(req.source_text)
+        prompt_version = state.get("current_cache_prompt_version") or CACHE_PROMPT_VERSION
+        recent_hashes = _recent_seen_hashes_from_state(state, req.course_id)
+        preferred_only = _state_is_focused_followup(state)
+        git_challenge_safe_mode = _is_git_challenge_scope(req.course_id, req.source_text, session_mode)
+        question_position = _git_challenge_next_question_position(session_doc)
+        if git_challenge_safe_mode:
+            logger.info(
+                "[CHALLENGE] Git bank-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
+                effective_topic,
+                effective_difficulty,
+                req.difficulty,
+                question_position,
             )
-            await _save_state(state)
-            return cached
 
-        if _state_is_focused_followup(state):
-            waited_for_cache = await _wait_for_replenished_cache(
-                topic=req.topic,
-                difficulty=req.difficulty,
+        async def _try_cached_topic(active_topic: str, active_difficulty: int) -> dict | None:
+            cached = await _get_cached_question(
+                topic=active_topic,
+                difficulty=active_difficulty,
                 course_id=req.course_id,
                 source_scope_key=source_scope_key,
                 prompt_version=prompt_version,
+                excluded_hashes=recent_hashes,
+                recent_concepts=recent_concepts,
+                recent_families=recent_families,
+                target_questions=session_target_questions,
+                mode=session_mode,
+                git_workflow_scope=git_workflow_scope,
+                allow_relaxed_fallback=not preferred_only,
             )
-            recovered = None
-            if waited_for_cache:
-                logger.info(
-                    "[FOLLOWUP] Retrying preferred cache after wait topic=%s difficulty=%s",
-                    req.topic,
-                    req.difficulty,
+            if cached:
+                cached_difficulty = int(cached.get("difficulty", active_difficulty) or active_difficulty)
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=active_topic,
+                        difficulty=cached_difficulty,
+                        course_id=req.course_id,
+                        source_text=req.source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=prompt_version,
+                        target=_effective_cache_target(
+                            state,
+                            active_topic,
+                            cached_difficulty,
+                            git_challenge_safe_mode=git_challenge_safe_mode,
+                        ),
+                        mode=session_mode,
+                        git_workflow_scope=git_workflow_scope,
+                    )
                 )
-                recovered = await _get_cached_question(
-                    topic=req.topic,
-                    difficulty=req.difficulty,
+                return cached
+
+            recovered = None
+            if _state_is_focused_followup(state):
+                waited_for_cache = await _wait_for_replenished_cache(
+                    topic=active_topic,
+                    difficulty=active_difficulty,
                     course_id=req.course_id,
                     source_scope_key=source_scope_key,
                     prompt_version=prompt_version,
-                    excluded_hashes=recent_hashes,
-                    recent_concepts=recent_concepts,
-                    recent_families=recent_families,
-                    target_questions=session_target_questions,
-                    mode=session_mode,
-                    git_workflow_scope=git_workflow_scope,
-                    allow_relaxed_fallback=False,
                 )
-                if recovered:
+                if waited_for_cache:
                     logger.info(
-                        "[FOLLOWUP] Cache recovered after wait topic=%s difficulty=%s",
-                        req.topic,
-                        req.difficulty,
-                    )
-                else:
-                    logger.info(
-                        "[FOLLOWUP] Preferred cache unavailable after wait topic=%s difficulty=%s",
-                        req.topic,
-                        req.difficulty,
-                    )
-                    logger.info(
-                        "[FOLLOWUP] Trying relaxed cache after wait topic=%s difficulty=%s",
-                        req.topic,
-                        req.difficulty,
+                        "[FOLLOWUP] Retrying preferred cache after wait topic=%s difficulty=%s",
+                        active_topic,
+                        active_difficulty,
                     )
                     recovered = await _get_cached_question(
-                        topic=req.topic,
-                        difficulty=req.difficulty,
+                        topic=active_topic,
+                        difficulty=active_difficulty,
                         course_id=req.course_id,
                         source_scope_key=source_scope_key,
                         prompt_version=prompt_version,
-                        excluded_hashes=None,
+                        excluded_hashes=recent_hashes,
                         recent_concepts=recent_concepts,
                         recent_families=recent_families,
                         target_questions=session_target_questions,
                         mode=session_mode,
                         git_workflow_scope=git_workflow_scope,
+                        allow_relaxed_fallback=False,
                     )
                     if recovered:
                         logger.info(
-                            "[FOLLOWUP] Relaxed cache recovered after wait topic=%s difficulty=%s",
-                            req.topic,
-                            req.difficulty,
+                            "[FOLLOWUP] Cache recovered after wait topic=%s difficulty=%s",
+                            active_topic,
+                            active_difficulty,
                         )
+                    else:
+                        logger.info(
+                            "[FOLLOWUP] Preferred cache unavailable after wait topic=%s difficulty=%s",
+                            active_topic,
+                            active_difficulty,
+                        )
+                        logger.info(
+                            "[FOLLOWUP] Trying relaxed cache after wait topic=%s difficulty=%s",
+                            active_topic,
+                            active_difficulty,
+                        )
+                        recovered = await _get_cached_question(
+                            topic=active_topic,
+                            difficulty=active_difficulty,
+                            course_id=req.course_id,
+                            source_scope_key=source_scope_key,
+                            prompt_version=prompt_version,
+                            excluded_hashes=None,
+                            recent_concepts=recent_concepts,
+                            recent_families=recent_families,
+                            target_questions=session_target_questions,
+                            mode=session_mode,
+                            git_workflow_scope=git_workflow_scope,
+                        )
+                        if recovered:
+                            logger.info(
+                                "[FOLLOWUP] Relaxed cache recovered after wait topic=%s difficulty=%s",
+                                active_topic,
+                                active_difficulty,
+                            )
 
             if recovered:
+                recovered_difficulty = int(recovered.get("difficulty", active_difficulty) or active_difficulty)
                 asyncio.create_task(
                     _replenish_cache(
-                        topic=req.topic,
-                        difficulty=req.difficulty,
+                        topic=active_topic,
+                        difficulty=recovered_difficulty,
                         course_id=req.course_id,
                         source_text=req.source_text,
                         source_scope_key=source_scope_key,
                         prompt_version=prompt_version,
-                        target=cache_target,
+                        target=_effective_cache_target(
+                            state,
+                            active_topic,
+                            recovered_difficulty,
+                            git_challenge_safe_mode=git_challenge_safe_mode,
+                        ),
+                        mode=session_mode,
+                        git_workflow_scope=git_workflow_scope,
                     )
                 )
-                _record_seen_question(
-                    state=state,
-                    question=recovered,
-                    course_id=req.course_id,
-                    topic=str(recovered.get("topic", req.topic)),
-                    difficulty=int(recovered.get("difficulty", req.difficulty)),
-                    source_scope_key=source_scope_key,
-                    prompt_version=prompt_version,
-                    session_id=session_id,
-                )
-                await _save_state(state)
                 return recovered
 
-        # Cache miss — live generation
-        if _state_is_focused_followup(state):
+            return None
+
+        async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
             logger.info(
-                "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
-                req.topic,
-                req.difficulty,
+                "[CHALLENGE] Git bank-first entering live generation topic=%s difficulty=%s question_position=%s",
+                active_topic,
+                active_difficulty,
+                question_position,
             )
-        logger.info(
-            "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
-            req.topic, req.difficulty, prompt_version
-        )
-        question = await _generate_question_with_soft_dedupe(
-            topic=req.topic,
-            difficulty=req.difficulty,
-            source_text=req.source_text,
-            course_id=req.course_id,
-            recent_hashes=recent_hashes,
-            recent_concepts=recent_concepts,
-            recent_families=recent_families,
-            target_questions=session_target_questions,
-            mode=session_mode,
-            git_workflow_scope=git_workflow_scope,
-        )
-        generated_difficulty = int(question.get("difficulty", req.difficulty))
-        logger.info(
-            "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
-            req.topic,
-            req.difficulty,
-            generated_difficulty,
-        )
-        asyncio.create_task(
-            _replenish_cache(
-                topic=req.topic,
-                difficulty=generated_difficulty,
-                course_id=req.course_id,
+            if _state_is_focused_followup(state):
+                logger.info(
+                    "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
+                    active_topic,
+                    active_difficulty,
+                )
+            logger.info(
+                "[CACHE] Miss topic=%s requested_difficulty=%s prompt_version=%s",
+                active_topic,
+                active_difficulty,
+                prompt_version,
+            )
+            question = await _generate_question_with_soft_dedupe(
+                topic=active_topic,
+                difficulty=active_difficulty,
                 source_text=req.source_text,
-                source_scope_key=source_scope_key,
-                prompt_version=prompt_version,
-                target=cache_target,
+                course_id=req.course_id,
+                recent_hashes=recent_hashes,
+                recent_concepts=recent_concepts,
+                recent_families=recent_families,
+                target_questions=session_target_questions,
+                mode=session_mode,
+                git_workflow_scope=git_workflow_scope,
+                max_live_attempts=GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS if git_challenge_safe_mode else None,
+                max_provider_model_attempts=_git_challenge_live_model_attempt_budget(active_topic) if git_challenge_safe_mode else None,
+                allow_last_resort=not (git_challenge_safe_mode and _git_challenge_blocks_early_last_resort(question_position)),
             )
-        )
+            generated_difficulty = int(question.get("difficulty", active_difficulty))
+            logger.info(
+                "[CACHE] Warm on miss topic=%s requested_difficulty=%s generated_difficulty=%s",
+                active_topic,
+                active_difficulty,
+                generated_difficulty,
+            )
+            asyncio.create_task(
+                _replenish_cache(
+                    topic=active_topic,
+                    difficulty=generated_difficulty,
+                    course_id=req.course_id,
+                    source_text=req.source_text,
+                    source_scope_key=source_scope_key,
+                    prompt_version=prompt_version,
+                    target=_effective_cache_target(
+                        state,
+                        active_topic,
+                        generated_difficulty,
+                        git_challenge_safe_mode=git_challenge_safe_mode,
+                    ),
+                    mode=session_mode,
+                    git_workflow_scope=git_workflow_scope,
+                )
+            )
+            return question
+
+        try:
+            question = await _try_cached_topic(effective_topic, effective_difficulty)
+            live_topic = effective_topic
+            live_difficulty = effective_difficulty
+
+            if question is None and git_challenge_safe_mode:
+                repick_topic = _git_challenge_alternate_topic(session_topics, current_topic=effective_topic)
+                if repick_topic:
+                    repick_difficulty = _git_challenge_safe_generation_difficulty(repick_topic, req.difficulty)
+                    logger.info(
+                        "[CHALLENGE] Git bank-first repick from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
+                        effective_topic,
+                        repick_topic,
+                        effective_difficulty,
+                        repick_difficulty,
+                    )
+                    repicked_question = await _try_cached_topic(repick_topic, repick_difficulty)
+                    if repicked_question is not None:
+                        question = repicked_question
+                        effective_topic = repick_topic
+                        effective_difficulty = repick_difficulty
+                    else:
+                        live_topic = repick_topic
+                        live_difficulty = repick_difficulty
+
+            if question is None:
+                question = await _live_generate_topic(live_topic, live_difficulty)
+                effective_topic = live_topic
+                effective_difficulty = live_difficulty
+        except ValueError:
+            raise
+
         _record_seen_question(
             state=state,
             question=question,
             course_id=req.course_id,
-            topic=str(question.get("topic", req.topic)),
-            difficulty=generated_difficulty,
+            topic=str(question.get("topic", effective_topic)),
+            difficulty=int(question.get("difficulty", effective_difficulty)),
             source_scope_key=source_scope_key,
             prompt_version=prompt_version,
             session_id=session_id,
@@ -3758,6 +4398,14 @@ async def session_start(req: GenerateRequest):
         resolved_topics,
         mode=requested_mode,
     )
+    resolved_topics, state["current_difficulty"] = _apply_git_challenge_opening_guard(
+        resolved_topics,
+        difficulty=state["current_difficulty"],
+        course_id=req.course_id,
+        source_text=resolved_source_text,
+        mode=requested_mode,
+    )
+    state["session_topics"] = resolved_topics
 
     await _save_state(state)
 
@@ -3797,10 +4445,11 @@ async def session_start(req: GenerateRequest):
     await _save_state(state)
 
     if is_focused_followup:
-        cache_target = _cache_target_for_state(
+        cache_target = _effective_cache_target(
             state,
             resolved_topics[0],
             state["current_difficulty"],
+            git_challenge_safe_mode=_is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode),
         )
         logger.info(
             "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
@@ -3816,6 +4465,8 @@ async def session_start(req: GenerateRequest):
                 source_scope_key=source_scope_key,
                 prompt_version=CACHE_PROMPT_VERSION,
                 target=cache_target,
+                mode=requested_mode,
+                git_workflow_scope=is_csen603_git_workflow_scope(req.course_id, resolved_topics[0], resolved_source_text),
             )
         )
 
@@ -4150,6 +4801,14 @@ async def session_finalize(req: SessionFinalizeRequest):
         resolved_topics,
         mode=requested_mode,
     )
+    resolved_topics, state["current_difficulty"] = _apply_git_challenge_opening_guard(
+        resolved_topics,
+        difficulty=state["current_difficulty"],
+        course_id=req.course_id,
+        source_text=resolved_source_text,
+        mode=requested_mode,
+    )
+    state["session_topics"] = resolved_topics
 
     mastery_before = {
         t: state["topic_mastery"].get(t, 0.5)
@@ -4173,10 +4832,11 @@ async def session_finalize(req: SessionFinalizeRequest):
     await _save_state(state)
 
     if is_focused_followup:
-        cache_target = _cache_target_for_state(
+        cache_target = _effective_cache_target(
             state,
             resolved_topics[0],
             state["current_difficulty"],
+            git_challenge_safe_mode=_is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode),
         )
         logger.info(
             "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
@@ -4192,6 +4852,8 @@ async def session_finalize(req: SessionFinalizeRequest):
                 source_scope_key=source_scope_key,
                 prompt_version=CACHE_PROMPT_VERSION,
                 target=cache_target,
+                mode=requested_mode,
+                git_workflow_scope=is_csen603_git_workflow_scope(req.course_id, resolved_topics[0], resolved_source_text),
             )
         )
 
@@ -4207,6 +4869,10 @@ async def session_finalize(req: SessionFinalizeRequest):
         session_id=session_id,
         max_questions=req.question_count,
     )
+    if gen_resp.get("success") and isinstance(gen_resp.get("question"), dict):
+        actual_first_topic = str(gen_resp["question"].get("topic") or first_topic).strip()
+        if actual_first_topic and actual_first_topic in resolved_topics and actual_first_topic != resolved_topics[0]:
+            resolved_topics = [actual_first_topic] + [t for t in resolved_topics if t != actual_first_topic]
 
     return {
         "success": True,
