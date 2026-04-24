@@ -554,6 +554,40 @@
         </button>
       </div>
 
+      <div class="aq-dashboard-top-summary" id="aq-dashboard-top-summary">
+        <div class="aq-dashboard-hero aq-dashboard-perspective-growth" id="aq-dashboard-hero">
+          <div class="aq-dashboard-hero-top">
+            <span class="aq-dashboard-hero-badge" id="aq-dashboard-hero-badge">Growth Mode</span>
+          </div>
+          <div class="aq-dashboard-hero-body">
+            <div class="aq-dashboard-hero-copy">
+              <h3 class="aq-dashboard-hero-title" id="aq-dashboard-hero-title">Your progress is moving in the right direction</h3>
+              <p class="aq-dashboard-hero-text" id="aq-dashboard-hero-text">
+                Recent course activity will appear here with a focused recommendation for what to do next.
+              </p>
+            </div>
+            <div class="aq-dashboard-hero-actions">
+              <button class="aq-btn aq-btn-primary" id="aq-dashboard-hero-primary" type="button">New Session</button>
+              <button class="aq-btn aq-btn-ghost aq-hidden" id="aq-dashboard-hero-secondary" type="button">View Topic Mastery</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="aq-dashboard-focus aq-dashboard-perspective-growth" id="aq-dashboard-focus">
+          <div class="aq-dashboard-focus-head">
+            <span class="aq-dashboard-focus-label" id="aq-dashboard-focus-label">Recent progress</span>
+            <div class="aq-dashboard-focus-meta" id="aq-dashboard-focus-meta">Build the next step from this course’s recent signals.</div>
+          </div>
+          <div class="aq-dashboard-focus-body">
+            <h3 class="aq-dashboard-focus-title" id="aq-dashboard-focus-title">Course-level progress overview</h3>
+            <p class="aq-dashboard-focus-text" id="aq-dashboard-focus-text">
+              This view adapts to the currently selected course and updates as recent session and mistake data become available.
+            </p>
+
+          </div>
+        </div>
+      </div>
+
       <div class="aq-stats-grid aq-stats-grid-4">
         <div class="aq-stat">
           <span class="aq-stat-label">Sessions</span>
@@ -573,7 +607,7 @@
 </div>
       </div>
 
-      <div class="aq-mastery-section">
+      <div class="aq-mastery-section" id="aq-dashboard-section-topic-mastery">
         <h3 class="aq-section-title">Topic Mastery</h3>
         <p class="aq-empty-state aq-hidden" id="aq-dashboard-empty">
           No progress yet — start your first quiz session to see mastery data here.
@@ -581,7 +615,7 @@
         <div id="aq-dashboard-topics"></div>
       </div>
 
-      <div class="aq-mistake-journal-section">
+      <div class="aq-mistake-journal-section" id="aq-dashboard-section-mistake-journal">
         <h3 class="aq-section-title">Mistake Journal</h3>
         <p class="aq-empty-state aq-hidden" id="aq-mistake-journal-empty">
           No mistakes logged yet — complete quiz sessions to build your journal.
@@ -589,8 +623,8 @@
         <div id="aq-mistake-journal-groups"></div>
       </div>
 
-      <div class="aq-session-history-section">
-        <h3 class="aq-section-title">Latest Sessions</h3>
+      <div class="aq-session-history-section" id="aq-dashboard-section-session-history">
+        <h3 class="aq-section-title">Latest Session</h3>
         <p class="aq-empty-state aq-hidden" id="aq-session-history-empty">
           Finish a quiz session to see recent results, topic insights, and recommendations here.
         </p>

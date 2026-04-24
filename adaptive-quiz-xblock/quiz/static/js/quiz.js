@@ -40,6 +40,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     lastDifficulty: 3,
     maxQuestionsCurrent: initArgs.max_questions || 10,
     dashboardOrigin: 'start',
+    dashboardModel: null,
+    dashboardLoadToken: 0,
     historyOrigin: 'dashboard',
     historySessions: [],
     sessionReviewCache: {},
@@ -235,15 +237,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function renderCoursePicker(courses) {
     var list = $('#aq-course-list');
+    var hasSelectedCourse = courses.some(function (course) {
+      return String(course.course_id) === String(selectedCourseId);
+    });
     if (!list) { showScreen('start'); return; }
     configureCoursePickerForMode();
     list.innerHTML = '';
     courses.forEach(function (course, index) {
       var cid = course.course_id;
       var cname = course.course_name || cid;
+      var shouldCheck = hasSelectedCourse
+        ? String(selectedCourseId) === String(cid)
+        : index === 0;
       var label = document.createElement('label');
       label.innerHTML =
-        '<input type="radio" name="aq-course-choice" value="' + cid + '" data-course-name="' + cname + '"' + (index === 0 ? ' checked' : '') + '>' +
+        '<input type="radio" name="aq-course-choice" value="' + cid + '" data-course-name="' + cname + '"' + (shouldCheck ? ' checked' : '') + '>' +
         '<span><strong>' + cid + '</strong>' +
         (cname !== cid ? '<span style="color:#6B7280;font-size:.82rem;margin-left:8px;">' + cname + '</span>' : '') +
         '</span>';
@@ -1515,6 +1523,623 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  function getSortedMasteryTopics(progressData, descending) {
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    return Object.keys(mastery).sort(function (a, b) {
+      var left = Number(mastery[a]);
+      var right = Number(mastery[b]);
+      if (!isFinite(left)) left = 0;
+      if (!isFinite(right)) right = 0;
+      return descending ? (right - left) : (left - right);
+    });
+  }
+
+  function sortTopicsByMastery(topics, progressData, descending) {
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    return normalizeTopicList(topics).slice().sort(function (a, b) {
+      var left = Number(mastery[a]);
+      var right = Number(mastery[b]);
+      if (!isFinite(left)) left = descending ? 0 : 1;
+      if (!isFinite(right)) right = descending ? 0 : 1;
+      return descending ? (right - left) : (left - right);
+    });
+  }
+
+  function deriveStrongTopics(progressData) {
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    var topicLabels = (progressData && progressData.topic_labels) || {};
+    var strongTopics = [];
+
+    Object.keys(mastery).forEach(function (topic) {
+      var score = Number(mastery[topic]);
+      var label = String(topicLabels[topic] || '').toLowerCase();
+      if (
+        label === 'mastered' ||
+        label === 'proficient' ||
+        (isFinite(score) && score >= 0.70)
+      ) {
+        strongTopics.push(topic);
+      }
+    });
+
+    return sortTopicsByMastery(strongTopics, progressData, true);
+  }
+
+  function deriveWeakTopics(progressData) {
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    var topicLabels = (progressData && progressData.topic_labels) || {};
+    var weakTopics = [];
+
+    Object.keys(mastery).forEach(function (topic) {
+      var score = Number(mastery[topic]);
+      var label = String(topicLabels[topic] || '').toLowerCase();
+      if (
+        label === 'struggling' ||
+        (isFinite(score) && score < 0.50)
+      ) {
+        weakTopics.push(topic);
+      }
+    });
+
+    return sortTopicsByMastery(weakTopics, progressData, false);
+  }
+
+  function getDashboardTopicSignals(progressData) {
+    var weakTopics = normalizeTopicList(progressData && progressData.weak_topics);
+    var strongTopics = normalizeTopicList(progressData && progressData.strong_topics);
+
+    return {
+      weakTopics: weakTopics.length
+        ? sortTopicsByMastery(weakTopics, progressData, false)
+        : deriveWeakTopics(progressData),
+      strongTopics: strongTopics.length
+        ? sortTopicsByMastery(strongTopics, progressData, true)
+        : deriveStrongTopics(progressData)
+    };
+  }
+
+  function getStrongestCourseTopic(progressData, strongTopics) {
+    var candidates = normalizeTopicList(strongTopics);
+    if (candidates.length) return candidates[0];
+    return getSortedMasteryTopics(progressData, true)[0] || '';
+  }
+
+  function getWeakestCourseTopic(progressData, weakTopics) {
+    var candidates = normalizeTopicList(weakTopics);
+    if (candidates.length) return candidates[0];
+    return getSortedMasteryTopics(progressData, false)[0] || '';
+  }
+
+  function formatAccuracyPct(value) {
+    return typeof value === 'number' ? (Math.round(value * 100) + '%') : '';
+  }
+
+  function formatCountLabel(count, singular, plural) {
+    var total = parseInt(count, 10) || 0;
+    return total + ' ' + (total === 1 ? singular : plural);
+  }
+
+  function joinDashboardMeta(parts, fallback) {
+    var filtered = (parts || []).filter(function (part) {
+      return !!String(part || '').trim();
+    });
+    return filtered.length ? filtered.join(' · ') : (fallback || '');
+  }
+
+  function hasMasteryTransition(summary) {
+    if (!summary) return false;
+    return isFinite(Number(summary.mastery_before)) && isFinite(Number(summary.mastery_after));
+  }
+
+  function formatMasteryTransition(summary) {
+    if (!hasMasteryTransition(summary)) return '';
+    var beforePct = masteryPct(summary.mastery_before);
+    var afterPct = masteryPct(summary.mastery_after);
+    return beforePct + '% → ' + afterPct + '%';
+  }
+
+  function buildFollowUpChangeSentence(summary) {
+    if (!hasMasteryTransition(summary)) return '';
+    var topic = String((summary && summary.topic) || 'The followed-up topic').trim();
+    var beforePct = masteryPct(summary.mastery_before);
+    var afterPct = masteryPct(summary.mastery_after);
+    return topic + ' moved from ' + beforePct + '% to ' + afterPct + '% in the latest targeted review.';
+  }
+
+  function isFollowUpLikeSession(sessionLike) {
+    return !!sessionLike && (
+      isFollowUpSession(sessionLike) ||
+      !!sessionLike.focused_topic_mastery_summary ||
+      getFollowUpTopicMasterySummaries(sessionLike).length > 0
+    );
+  }
+
+  function getLatestCourseSession(recentSessions) {
+    if (!Array.isArray(recentSessions) || recentSessions.length === 0) return null;
+
+    var sorted = recentSessions.slice().sort(function (a, b) {
+      var left = new Date((a && (a.ended_at || a.started_at)) || 0).getTime();
+      var right = new Date((b && (b.ended_at || b.started_at)) || 0).getTime();
+      if (!isFinite(left)) left = 0;
+      if (!isFinite(right)) right = 0;
+      return right - left;
+    });
+
+    return sorted[0] || null;
+  }
+
+  function getRecentPerformanceSignals(recentSessions) {
+    if (!Array.isArray(recentSessions) || recentSessions.length === 0) {
+      return {
+        recentAnswerCount: 0,
+        recentCorrectCount: 0,
+        recentIncorrectCount: 0,
+        recentIncorrectRate: null
+      };
+    }
+
+    var latestTwo = recentSessions.slice().sort(function (a, b) {
+      var left = new Date((a && (a.ended_at || a.started_at)) || 0).getTime();
+      var right = new Date((b && (b.ended_at || b.started_at)) || 0).getTime();
+      if (!isFinite(left)) left = 0;
+      if (!isFinite(right)) right = 0;
+      return right - left;
+    }).slice(0, 2);
+
+    var totals = latestTwo.reduce(function (acc, session) {
+      var answerCount = parseInt((session && session.target_questions), 10);
+      var correctCount = parseInt((session && session.correct_answers), 10);
+
+      if (!answerCount && session && Array.isArray(session.question_log) && session.question_log.length) {
+        answerCount = session.question_log.length;
+      }
+      if (!isFinite(answerCount) || answerCount <= 0) return acc;
+
+      if (!isFinite(correctCount) || correctCount < 0) correctCount = 0;
+      if (correctCount > answerCount) correctCount = answerCount;
+
+      acc.recentAnswerCount += answerCount;
+      acc.recentCorrectCount += correctCount;
+      acc.recentIncorrectCount += Math.max(answerCount - correctCount, 0);
+      return acc;
+    }, {
+      recentAnswerCount: 0,
+      recentCorrectCount: 0,
+      recentIncorrectCount: 0,
+      recentIncorrectRate: null
+    });
+
+    if (totals.recentAnswerCount > 0) {
+      totals.recentIncorrectRate = totals.recentIncorrectCount / totals.recentAnswerCount;
+    }
+
+    return totals;
+  }
+
+  function formatRatePct(value) {
+    return typeof value === 'number' ? (Math.round(value * 100) + '%') : '';
+  }
+
+  function buildFollowUpOutcome(model) {
+    var latestSession = model && model.latestSession;
+    if (!isFollowUpLikeSession(latestSession)) return null;
+
+    var summary = model.primaryFollowUpSummary;
+    var topicText = model.followUpTopicText || model.focusedTopicName || 'Targeted review';
+    var recommendationText = model.recommendationData.text || '';
+    var title = 'Latest follow-up outcome';
+    var text = '';
+    var meta = '';
+
+    if (summary && String(summary.topic || '').trim()) {
+      title = String(summary.topic).trim();
+    } else if (topicText) {
+      title = topicText;
+    }
+
+    if (summary && hasMasteryTransition(summary)) {
+      text = formatMasteryTransition(summary);
+      meta = recommendationText;
+    } else if (recommendationText) {
+      text = recommendationText;
+    } else if (topicText) {
+      text = topicText + ' shows the latest focused review signal for this course.';
+    } else {
+      text = 'The latest session included a focused follow-up signal.';
+    }
+
+    if (!meta && model.perspective === 'repair') {
+      meta = 'Still needs reinforcement before returning to harder practice.';
+    } else if (!meta && model.perspective === 'stretch') {
+      meta = 'This improvement may support a return to harder practice.';
+    } else if (!meta) {
+      meta = 'Use this result alongside topic mastery and the latest session recommendation.';
+    }
+
+    return {
+      label: 'Latest follow-up outcome',
+      title: title,
+      text: text,
+      meta: meta
+    };
+  }
+
+  function chooseDashboardPerspective(model) {
+    var hasRepairSignal =
+      model.latestRecommendationCode === 'focused_follow_up' ||
+      (typeof model.overallAccuracy === 'number' && model.overallAccuracy < 0.55) ||
+      (typeof model.recentIncorrectRate === 'number' && model.recentIncorrectRate >= 0.40) ||
+      model.weakTopics.length >= 3 ||
+      model.weakTopics.length > (model.strongTopics.length + 1);
+
+    if (hasRepairSignal) return 'repair';
+
+    var strongStretchFallback =
+      typeof model.recentIncorrectRate !== 'number' &&
+      typeof model.overallAccuracy === 'number' &&
+      model.overallAccuracy >= 0.72 &&
+      model.strongTopics.length >= 3 &&
+      model.weakTopics.length <= 1;
+
+    var stretchReady =
+      typeof model.overallAccuracy === 'number' &&
+      model.overallAccuracy >= 0.72 &&
+      (typeof model.recentIncorrectRate === 'number'
+        ? model.recentIncorrectRate <= 0.25
+        : strongStretchFallback) &&
+      model.strongTopics.length >= 2 &&
+      model.weakTopics.length < model.strongTopics.length;
+
+    if (stretchReady) return 'stretch';
+
+    return 'growth';
+  }
+
+  function buildDashboardHero(model) {
+    var hasTopicMastery = !!(model.progress && model.progress.topic_mastery && Object.keys(model.progress.topic_mastery).length);
+    var hasSessionHistory = model.recentSessionsAvailable && model.recentSessions.length > 0;
+    var primary = null;
+    var secondary = null;
+    var strongTopic = model.strongestTopic;
+    var weakTopic = model.weakestTopic;
+
+    if (model.perspective === 'repair') {
+      primary = { label: 'Review mistake journal', action: { type: 'scroll', sectionId: 'aq-dashboard-section-mistake-journal' } };
+      secondary = hasTopicMastery
+        ? { label: 'Check topic mastery', action: { type: 'scroll', sectionId: 'aq-dashboard-section-topic-mastery' } }
+        : (hasSessionHistory
+          ? { label: 'Review latest sessions', action: { type: 'scroll', sectionId: 'aq-dashboard-section-session-history' } }
+          : null);
+
+      return {
+        badge: 'Repair Focus',
+        title: 'Here is the best next repair step',
+        text: weakTopic
+          ? 'Recent activity in this course shows recurring difficulty around ' + weakTopic + '. Review the mistake patterns first, then confirm the same area in topic mastery.'
+          : 'Recent activity in this course shows recurring difficulty. Review the mistake patterns first, then confirm the same areas in topic mastery.',
+        primary: primary,
+        secondary: secondary
+      };
+    }
+
+    if (model.perspective === 'stretch') {
+      primary = { label: 'Start a new session', action: { type: 'new_session' } };
+      secondary = hasTopicMastery
+        ? { label: 'Review topic mastery', action: { type: 'scroll', sectionId: 'aq-dashboard-section-topic-mastery' } }
+        : (hasSessionHistory
+          ? { label: 'Review latest sessions', action: { type: 'scroll', sectionId: 'aq-dashboard-section-session-history' } }
+          : null);
+
+      return {
+        badge: 'Stretch Potential',
+        title: 'This course is showing strong enough progress for harder practice',
+        text: 'Your recent course performance suggests that stronger practice is becoming appropriate. Challenge mode is still checked per selected lecture scope.',
+        primary: primary,
+        secondary: secondary
+      };
+    }
+
+    primary = { label: 'Start a new session', action: { type: 'new_session' } };
+    secondary = hasTopicMastery
+      ? { label: 'View topic mastery', action: { type: 'scroll', sectionId: 'aq-dashboard-section-topic-mastery' } }
+      : (hasSessionHistory
+        ? { label: 'Review latest sessions', action: { type: 'scroll', sectionId: 'aq-dashboard-section-session-history' } }
+        : null);
+
+    return {
+      badge: 'Growth Mode',
+      title: 'Your progress is moving in the right direction',
+      text: 'Recent sessions in this course show steady development. Keep building momentum and check which topics are improving.',
+      primary: primary,
+      secondary: secondary
+    };
+  }
+
+  function buildDashboardFocusCard(model) {
+    var accuracyText = formatAccuracyPct(model.overallAccuracy);
+    var reviewTarget = model.recommendedReviewTopics[0] || model.weakestTopic;
+    var recentIncorrectRateText = formatRatePct(model.recentIncorrectRate);
+    var repairMeta = joinDashboardMeta([
+      recentIncorrectRateText ? (recentIncorrectRateText + ' recent incorrect rate') : '',
+      model.weakTopics.length
+        ? formatCountLabel(model.weakTopics.length, 'weak topic', 'weak topics')
+        : '',
+      typeof model.recentAnswerCount === 'number' && model.recentAnswerCount > 0
+        ? formatCountLabel(model.recentAnswerCount, 'recent answer', 'recent answers')
+        : ''
+    ], 'Review the weakest areas first.');
+
+    if (model.perspective === 'repair') {
+      return {
+        label: 'Most urgent review area',
+        title: reviewTarget || 'Course review priority',
+        text: reviewTarget
+          ? 'Recent course signals point back to ' + reviewTarget + ' as the clearest repair target. Recent performance suggests this area still needs reinforcement.'
+          : 'Recent course signals show concentrated weakness. Recent performance suggests this course still needs focused repair.',
+        meta: repairMeta
+      };
+    }
+
+    if (model.perspective === 'stretch') {
+      return {
+        label: 'Strongest current area',
+        title: model.strongestTopic || 'Course-level stretch readiness',
+        text: model.strongestTopic
+          ? model.strongestTopic + ' is one of the clearest strength signals in this course. Some other topics may still need development before a specific lecture scope unlocks challenge.'
+          : 'Current course-level signals suggest some areas in this course are ready for more demanding practice.',
+        meta: joinDashboardMeta([
+          model.strongTopics.length
+            ? formatCountLabel(model.strongTopics.length, 'strong topic', 'strong topics')
+            : '',
+          accuracyText ? (accuracyText + ' accuracy') : ''
+        ], 'Review topic mastery for scope-specific readiness. Challenge mode is still checked per selected lecture scope.')
+      };
+    }
+
+    return {
+      label: 'Recent progress',
+      title: model.strongestTopic ? ('Momentum in ' + model.strongestTopic) : 'Course momentum is building',
+      text: model.strongestTopic
+        ? 'Recent sessions suggest ' + model.strongestTopic + ' is becoming more reliable while the course continues to develop.'
+        : 'This course shows healthy progress, but not yet enough evidence for repair or stretch.',
+      meta: joinDashboardMeta([
+        accuracyText ? (accuracyText + ' accuracy') : '',
+        model.strongTopics.length
+          ? formatCountLabel(model.strongTopics.length, 'strong topic', 'strong topics')
+          : ''
+      ], 'Keep building a broader base in this course.')
+    };
+  }
+
+  function buildDashboardModel(progressData, recentSessions, mistakeGroups, sourceStatus) {
+    sourceStatus = sourceStatus || {};
+
+    var progress = progressData || {};
+    var sessions = Array.isArray(recentSessions) ? recentSessions.slice() : [];
+    var groups = Array.isArray(mistakeGroups)
+      ? mistakeGroups.filter(function (group) {
+        return !isPlaceholderLectureTitle(group && group.lecture_title);
+      })
+      : [];
+    var recentSignals = getRecentPerformanceSignals(sessions);
+    var topicSignals = getDashboardTopicSignals(progress);
+    var latestSession = getLatestCourseSession(sessions);
+    var followUpSummaries = latestSession ? getFollowUpTopicMasterySummaries(latestSession) : [];
+    var focusedTopicSummary = latestSession && latestSession.focused_topic_mastery_summary
+      ? latestSession.focused_topic_mastery_summary
+      : null;
+    var recommendationData = latestSession ? getRecommendationData(latestSession) : { code: '', title: '', text: '' };
+    var recommendedReviewTopics = latestSession ? getRecommendedReviewTopics(latestSession) : [];
+    var strongestTopic = getStrongestCourseTopic(progress, topicSignals.strongTopics) ||
+      String((latestSession && latestSession.strongest_topic_this_session) || '').trim();
+    var weakestTopic = getWeakestCourseTopic(progress, topicSignals.weakTopics) ||
+      String((latestSession && latestSession.weakest_topic_this_session) || '').trim();
+    var model = {
+      courseId: String(progress.course_id || selectedCourseId || '').trim(),
+      courseName: selectedCourseName || progress.course_id || '—',
+      progress: progress,
+      hasProgress: !!progress.has_progress,
+      recentSessions: sessions,
+      recentSessionsAvailable: !!sourceStatus.recentSessionsAvailable,
+      mistakeGroups: groups,
+      mistakeJournalAvailable: !!sourceStatus.mistakeJournalAvailable,
+      latestSession: latestSession,
+      overallAccuracy: typeof progress.overall_accuracy === 'number' ? progress.overall_accuracy : null,
+      recentAnswerCount: recentSignals.recentAnswerCount,
+      recentCorrectCount: recentSignals.recentCorrectCount,
+      recentIncorrectCount: recentSignals.recentIncorrectCount,
+      recentIncorrectRate: recentSignals.recentIncorrectRate,
+      weakTopics: topicSignals.weakTopics,
+      strongTopics: topicSignals.strongTopics,
+      mistakeGroupCount: sourceStatus.mistakeJournalAvailable ? groups.length : null,
+      recommendationData: recommendationData,
+      latestRecommendationCode: recommendationData.code || '',
+      recommendedReviewTopics: recommendedReviewTopics,
+      followUpSummaries: followUpSummaries,
+      primaryFollowUpSummary: focusedTopicSummary || followUpSummaries[0] || null,
+      focusedTopicName: latestSession ? getFocusedTopicName(latestSession) : '',
+      followUpTopicText: latestSession ? formatTopicList(getFollowUpPracticedTopics(latestSession)) : '',
+      followUpContext: latestSession ? getFollowUpContext(latestSession) : null,
+      hasFollowUpContext: isFollowUpLikeSession(latestSession),
+      strongestTopic: strongestTopic,
+      weakestTopic: weakestTopic
+    };
+
+    model.perspective = chooseDashboardPerspective(model);
+    model.hero = buildDashboardHero(model);
+    model.focusCard = buildDashboardFocusCard(model);
+    model.followUpOutcome = buildFollowUpOutcome(model);
+
+    return model;
+  }
+
+  function setDashboardPerspectiveClass(node, perspective) {
+    if (!node) return;
+    ['repair', 'stretch', 'growth'].forEach(function (name) {
+      node.classList.remove('aq-dashboard-perspective-' + name);
+    });
+    node.classList.add('aq-dashboard-perspective-' + (perspective || 'growth'));
+  }
+
+  function startDashboardNewSession() {
+    pickerMode = 'quiz';
+    loadCoursePicker();
+  }
+
+  function scrollDashboardToSection(sectionId) {
+    if (!sectionId) return;
+    var selector = sectionId.charAt(0) === '#' ? sectionId : ('#' + sectionId);
+    var target = $(selector);
+    if (target && typeof target.scrollIntoView === 'function') {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  function runDashboardCta(action) {
+    if (!action || !action.type) return;
+
+    if (action.type === 'followup' && action.context) {
+      startFocusedFollowUp(action.context);
+      return;
+    }
+    if (action.type === 'scroll') {
+      scrollDashboardToSection(action.sectionId);
+      return;
+    }
+    if (action.type === 'new_session') {
+      startDashboardNewSession();
+    }
+  }
+
+  function renderDashboardAdaptiveHeader(model) {
+    var heroWrap = $('#aq-dashboard-hero');
+    var badgeEl = $('#aq-dashboard-hero-badge');
+    var titleEl = $('#aq-dashboard-hero-title');
+    var textEl = $('#aq-dashboard-hero-text');
+    var primaryBtn = $('#aq-dashboard-hero-primary');
+    var secondaryBtn = $('#aq-dashboard-hero-secondary');
+    var focusWrap = $('#aq-dashboard-focus');
+    var focusLabelEl = $('#aq-dashboard-focus-label');
+    var focusTitleEl = $('#aq-dashboard-focus-title');
+    var focusTextEl = $('#aq-dashboard-focus-text');
+    var focusMetaEl = $('#aq-dashboard-focus-meta');
+    var followUpWrap = $('#aq-dashboard-followup');
+    var followUpLabelEl = $('#aq-dashboard-followup-label');
+    var followUpTitleEl = $('#aq-dashboard-followup-title');
+    var followUpTextEl = $('#aq-dashboard-followup-text');
+    var followUpMetaEl = $('#aq-dashboard-followup-meta');
+    var hero = model && model.hero ? model.hero : {};
+    var focusCard = model && model.focusCard ? model.focusCard : {};
+    var followUpOutcome = model && model.followUpOutcome ? model.followUpOutcome : null;
+    var perspective = model && model.perspective ? model.perspective : 'growth';
+
+    setDashboardPerspectiveClass(heroWrap, perspective);
+    setDashboardPerspectiveClass(focusWrap, perspective);
+
+    if (badgeEl) badgeEl.textContent = hero.badge || 'Growth Mode';
+    if (titleEl) titleEl.textContent = hero.title || 'Your progress is moving in the right direction';
+    if (textEl) {
+      textEl.textContent = hero.text || 'Recent course activity will appear here with a focused recommendation for what to do next.';
+    }
+
+    if (primaryBtn) {
+      primaryBtn.textContent = (hero.primary && hero.primary.label) || 'Start a new session';
+      primaryBtn.onclick = function () {
+        runDashboardCta(hero.primary && hero.primary.action);
+      };
+    }
+
+    if (secondaryBtn) {
+      if (hero.secondary && hero.secondary.label) {
+        secondaryBtn.textContent = hero.secondary.label;
+        secondaryBtn.onclick = function () {
+          runDashboardCta(hero.secondary && hero.secondary.action);
+        };
+        secondaryBtn.classList.remove('aq-hidden');
+      } else {
+        secondaryBtn.onclick = null;
+        secondaryBtn.classList.add('aq-hidden');
+      }
+    }
+
+    if (focusLabelEl) focusLabelEl.textContent = focusCard.label || 'Recent progress';
+    if (focusTitleEl) focusTitleEl.textContent = focusCard.title || 'Course-level progress overview';
+    if (focusTextEl) {
+      focusTextEl.textContent = focusCard.text || 'This view adapts to the currently selected course and updates as recent session and mistake data become available.';
+    }
+    if (focusMetaEl) {
+      var focusMeta = focusCard.meta || '';
+      focusMetaEl.textContent = focusMeta;
+      focusMetaEl.classList.toggle('aq-hidden', !focusMeta);
+    }
+
+    if (followUpWrap) {
+      if (followUpOutcome) {
+        if (followUpLabelEl) followUpLabelEl.textContent = followUpOutcome.label || 'Latest follow-up outcome';
+        if (followUpTitleEl) followUpTitleEl.textContent = followUpOutcome.title || 'Targeted review';
+        if (followUpTextEl) followUpTextEl.textContent = followUpOutcome.text || 'The latest session included a follow-up signal.';
+        if (followUpMetaEl) {
+          var followUpMeta = followUpOutcome.meta || '';
+          followUpMetaEl.textContent = followUpMeta;
+          followUpMetaEl.classList.toggle('aq-hidden', !followUpMeta);
+        }
+        followUpWrap.classList.remove('aq-hidden');
+      } else {
+        followUpWrap.classList.add('aq-hidden');
+      }
+    }
+  }
+
+  function applyDashboardSectionOrder(perspective) {
+    var panel = $('#aq-screen-dashboard .aq-panel');
+    var actions = $('#aq-screen-dashboard .aq-panel-actions');
+    var orderMap = {
+      repair: [
+        'aq-dashboard-section-mistake-journal',
+        'aq-dashboard-section-topic-mastery',
+        'aq-dashboard-section-session-history'
+      ],
+      growth: [
+        'aq-dashboard-section-topic-mastery',
+        'aq-dashboard-section-mistake-journal',
+        'aq-dashboard-section-session-history'
+      ],
+      stretch: [
+        'aq-dashboard-section-topic-mastery',
+        'aq-dashboard-section-mistake-journal',
+        'aq-dashboard-section-session-history'
+      ]
+    };
+    var order = orderMap[perspective] || orderMap.growth;
+
+    if (!panel || !actions) return;
+
+    order.forEach(function (id) {
+      var section = $('#' + id);
+      if (section) panel.insertBefore(section, actions);
+    });
+  }
+
+  function loadAdaptiveDashboardData(courseId) {
+    return {
+      progress: jQuery.ajax({
+        type: 'POST',
+        url: urlProgress,
+        data: JSON.stringify({ selected_course_id: courseId }),
+        contentType: 'application/json'
+      }),
+      recentSessions: loadSessionHistory(courseId, {
+        skipRender: true,
+        limit: 2,
+        timeout: 8000
+      }),
+      mistakeGroups: loadMistakeJournal(courseId, {
+        skipRender: true,
+        timeout: 8000
+      })
+    };
+  }
+
   function masteryStageClass(label) {
     switch (label) {
       case 'Struggling': return 'struggling';
@@ -2104,13 +2729,6 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var emptyEl = $('#aq-dashboard-empty');
     if (topicsWrap) topicsWrap.innerHTML = '';
 
-    if (!data.has_progress || !data.topic_mastery || Object.keys(data.topic_mastery).length === 0) {
-      if (emptyEl) emptyEl.classList.remove('aq-hidden');
-      showScreen('dashboard');
-      return;
-    }
-    if (emptyEl) emptyEl.classList.add('aq-hidden');
-
     var overallAccuracy = '—';
     if (typeof data.overall_accuracy === 'number') {
       overallAccuracy = Math.round(data.overall_accuracy * 100) + '%';
@@ -2126,6 +2744,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       var el = element.querySelector(sel);
       if (el) el.textContent = fields[sel];
     });
+
+    if (!data.has_progress || !data.topic_mastery || Object.keys(data.topic_mastery).length === 0) {
+      if (emptyEl) emptyEl.classList.remove('aq-hidden');
+      showScreen('dashboard');
+      return;
+    }
+    if (emptyEl) emptyEl.classList.add('aq-hidden');
 
     if (topicsWrap) {
       var mastery = data.topic_mastery || {};
@@ -2722,33 +3347,33 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function loadSessionHistory(courseId) {
-    jQuery.ajax({
+    var options = arguments[1] || {};
+    return jQuery.ajax({
       type: 'POST',
       url: urlSessionHistory,
       data: JSON.stringify({
         selected_course_id: courseId,
-        limit: 1,
+        limit: options.limit || 1,
         include_questions: false
       }),
       contentType: 'application/json',
-      success: function (data) {
-        if (data && data.success) {
-          renderSessionHistory(data.sessions || [], {
-            wrap: $('#aq-session-history-list'),
-            empty: $('#aq-session-history-empty'),
-            showReviewButton: false,
-            allowFollowUp: false
-          });
-        } else {
-          renderSessionHistory([], {
-            wrap: $('#aq-session-history-list'),
-            empty: $('#aq-session-history-empty'),
-            showReviewButton: false,
-            allowFollowUp: false
-          });
-        }
-      },
-      error: function () {
+      timeout: options.timeout || 0
+    }).then(function (data) {
+      var sessions = (data && data.success) ? (data.sessions || []) : [];
+      if (!options.skipRender) {
+        renderSessionHistory(sessions, {
+          wrap: $('#aq-session-history-list'),
+          empty: $('#aq-session-history-empty'),
+          showReviewButton: false,
+          allowFollowUp: false
+        });
+      }
+      return {
+        available: !!(data && data.success),
+        sessions: sessions
+      };
+    }, function () {
+      if (!options.skipRender) {
         renderSessionHistory([], {
           wrap: $('#aq-session-history-list'),
           empty: $('#aq-session-history-empty'),
@@ -2756,23 +3381,40 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           allowFollowUp: false
         });
       }
+      return {
+        available: false,
+        sessions: []
+      };
     });
   }
 
   function loadMistakeJournal(courseId) {
-    jQuery.ajax({
+    var options = arguments[1] || {};
+    return jQuery.ajax({
       type: 'POST',
       url: urlMistakeJournal,
       data: JSON.stringify({
         selected_course_id: courseId
       }),
       contentType: 'application/json',
-      success: function (data) {
-        renderMistakeJournal((data && data.success) ? (data.groups || []) : []);
-      },
-      error: function () {
+      timeout: options.timeout || 0
+    }).then(function (data) {
+      var groups = (data && data.success) ? (data.groups || []) : [];
+      if (!options.skipRender) {
+        renderMistakeJournal(groups);
+      }
+      return {
+        available: !!(data && data.success),
+        groups: groups
+      };
+    }, function () {
+      if (!options.skipRender) {
         renderMistakeJournal([]);
       }
+      return {
+        available: false,
+        groups: []
+      };
     });
   }
 
@@ -2859,25 +3501,90 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.dashboardOrigin = origin || 'start';
     if (courseId) selectedCourseId = courseId;
     if (courseName) selectedCourseName = courseName;
-    setLoading('Loading your progress…');
-    jQuery.ajax({
-      type: 'POST', url: urlProgress,
-      data: JSON.stringify({ selected_course_id: selectedCourseId }),
-      contentType: 'application/json',
-      success: function (data) {
-        if (!data || !data.success) {
-          alert('Dashboard error: ' + ((data && data.error) ? data.error : 'Unknown'));
-          showScreen(state.dashboardOrigin === 'results' ? 'results' : 'start');
-          return;
+    state.dashboardLoadToken += 1;
+    state.dashboardModel = null;
+
+    var loadToken = state.dashboardLoadToken;
+    var adaptiveData = {
+      progress: null,
+      recentSessions: [],
+      recentSessionsAvailable: false,
+      mistakeGroups: [],
+      mistakeJournalAvailable: false
+    };
+
+    function isStaleDashboardLoad() {
+      return loadToken !== state.dashboardLoadToken;
+    }
+
+    function renderAdaptiveDashboard() {
+      if (isStaleDashboardLoad() || !adaptiveData.progress) return;
+
+      var model = buildDashboardModel(
+        adaptiveData.progress,
+        adaptiveData.recentSessions,
+        adaptiveData.mistakeGroups,
+        {
+          recentSessionsAvailable: adaptiveData.recentSessionsAvailable,
+          mistakeJournalAvailable: adaptiveData.mistakeJournalAvailable
         }
-        renderDashboard(data);
-        loadMistakeJournal(selectedCourseId);
-        loadSessionHistory(selectedCourseId);
-      },
-      error: function (xhr) {
-        alert('Could not load progress. HTTP ' + xhr.status);
+      );
+
+      state.dashboardModel = model;
+      renderDashboardAdaptiveHeader(model);
+      applyDashboardSectionOrder(model.perspective);
+    }
+
+    renderSessionHistory([], {
+      wrap: $('#aq-session-history-list'),
+      empty: $('#aq-session-history-empty'),
+      showReviewButton: false,
+      allowFollowUp: false
+    });
+    renderMistakeJournal([]);
+
+    setLoading('Loading your progress…');
+    var requests = loadAdaptiveDashboardData(selectedCourseId);
+
+    requests.progress.done(function (data) {
+      if (isStaleDashboardLoad()) return;
+
+      if (!data || !data.success) {
+        state.dashboardLoadToken += 1;
+        alert('Dashboard error: ' + ((data && data.error) ? data.error : 'Unknown'));
         showScreen(state.dashboardOrigin === 'results' ? 'results' : 'start');
+        return;
       }
+
+      adaptiveData.progress = data;
+      renderDashboard(data);
+      renderAdaptiveDashboard();
+    }).fail(function (xhr) {
+      if (isStaleDashboardLoad()) return;
+      state.dashboardLoadToken += 1;
+      alert('Could not load progress. HTTP ' + xhr.status);
+      showScreen(state.dashboardOrigin === 'results' ? 'results' : 'start');
+    });
+
+    requests.recentSessions.done(function (result) {
+      if (isStaleDashboardLoad()) return;
+      adaptiveData.recentSessions = result.sessions || [];
+      adaptiveData.recentSessionsAvailable = !!result.available;
+      renderSessionHistory(adaptiveData.recentSessions.slice(0, 1), {
+        wrap: $('#aq-session-history-list'),
+        empty: $('#aq-session-history-empty'),
+        showReviewButton: false,
+        allowFollowUp: false
+      });
+      renderAdaptiveDashboard();
+    });
+
+    requests.mistakeGroups.done(function (result) {
+      if (isStaleDashboardLoad()) return;
+      adaptiveData.mistakeGroups = result.groups || [];
+      adaptiveData.mistakeJournalAvailable = !!result.available;
+      renderMistakeJournal(adaptiveData.mistakeGroups);
+      renderAdaptiveDashboard();
     });
   }
 
