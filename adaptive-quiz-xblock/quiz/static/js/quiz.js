@@ -50,6 +50,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     explainSimplerPending: false,
     recoveryStartPending: false,
     lastFeedbackContext: null,
+    lastAnswerMeta: null,
     pendingAnswerKey: null,
     pendingTimeSpentMs: null,
     selectedConfidence: null,
@@ -688,29 +689,34 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function hideRecoveryCard() {
     var card = $('#aq-recovery-card');
+    var actions = $('#aq-recovery-card-actions');
     var nextBtn = $('#aq-btn-next');
     if (card) {
       card.classList.add('aq-hidden');
       card.classList.remove('aq-recovery-card-loading');
+      card.classList.remove('is-passive');
     }
+    if (actions) actions.classList.remove('aq-hidden');
     if (nextBtn) nextBtn.classList.remove('aq-hidden');
     state.recoveryStartPending = false;
   }
 
   function showRecoveryCard(data) {
     var card = $('#aq-recovery-card');
+    var actions = $('#aq-recovery-card-actions');
     var title = $('#aq-recovery-card-title');
     var text = $('#aq-recovery-card-text');
-    var supportRow = $('#aq-support-row');
     var nextBtn = $('#aq-btn-next');
     var startBtn = $('#aq-btn-recovery-start');
     var skipBtn = $('#aq-btn-recovery-skip');
     if (!card || !text) return;
 
-    if (title) title.textContent = 'Need a guided step?';
+    if (title) title.textContent = 'Guided support is available';
     text.textContent = data.recovery_message || 'You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.';
     card.classList.remove('aq-hidden');
     card.classList.remove('aq-recovery-card-loading');
+    card.classList.add('is-passive');
+    if (actions) actions.classList.add('aq-hidden');
     if (startBtn) {
       startBtn.disabled = false;
       startBtn.textContent = 'Try guided step';
@@ -719,24 +725,29 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       skipBtn.disabled = false;
       skipBtn.textContent = 'Continue normally';
     }
-    if (supportRow) supportRow.classList.remove('aq-hidden');
     if (nextBtn) nextBtn.classList.add('aq-hidden');
     state.recoveryStartPending = false;
   }
 
-  function setRecoveryCardLoading(isLoading) {
+  function setRecoveryCardLoading(isLoading, activeAction) {
     var card = $('#aq-recovery-card');
     var startBtn = $('#aq-btn-recovery-start');
     var skipBtn = $('#aq-btn-recovery-skip');
     if (card) card.classList.toggle('aq-recovery-card-loading', !!isLoading);
     if (startBtn) {
       startBtn.disabled = !!isLoading;
-      startBtn.textContent = isLoading ? 'Preparing worked example…' : 'Try guided step';
+      startBtn.textContent = isLoading && activeAction === 'start'
+        ? 'Preparing worked example…'
+        : 'Try guided step';
     }
     if (skipBtn) {
       skipBtn.disabled = !!isLoading;
-      if (!isLoading) skipBtn.textContent = 'Continue normally';
+      skipBtn.textContent = isLoading && activeAction === 'continue'
+        ? 'Continuing normally…'
+        : 'Continue normally';
     }
+    setAdaptiveActionButtonState('start_recovery', !!isLoading, activeAction === 'start' ? 'Preparing worked example…' : null);
+    setAdaptiveActionButtonState('continue_normally', !!isLoading, activeAction === 'continue' ? 'Continuing normally…' : null);
     state.recoveryStartPending = !!isLoading;
   }
 
@@ -885,6 +896,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.answered = false;
     state.questionStart = Date.now();
     state.lastFeedbackContext = null;
+    state.lastAnswerMeta = null;
     state.workedExamplePrimer = null;
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
@@ -906,6 +918,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var fb = $('#aq-feedback');
     if (fb) fb.classList.add('aq-hidden');
+    hideNextStepPanel();
     hideRecoveryCard();
     hideTimeContextPrompt();
     renderConfidenceUi();
@@ -938,6 +951,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function submitAnswer(selectedKey, timeSpentMs, timeContext) {
     hideTimeContextPrompt();
+    state.lastAnswerMeta = {
+      selectedKey: selectedKey || null,
+      timeSpentMs: typeof timeSpentMs === 'number' ? timeSpentMs : null,
+      timeContext: timeContext || null,
+      confidence: state.selectedConfidence || null
+    };
     var submitUrl = (state.currentQuestion && state.currentQuestion.is_recovery_step)
       ? urlSubmitRecovery
       : urlSubmit;
@@ -977,6 +996,381 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     submitAnswer(selectedKey, timeSpentMs, timeContext);
   }
 
+  function setAdaptiveActionButtonState(actionId, isDisabled, loadingLabel) {
+    var buttons = element.querySelectorAll('[data-aq-action="' + actionId + '"]');
+    Array.prototype.forEach.call(buttons, function (btn) {
+      var defaultLabel = btn.getAttribute('data-default-label') || btn.textContent || '';
+      btn.setAttribute('data-default-label', defaultLabel);
+      btn.disabled = !!isDisabled;
+      btn.textContent = isDisabled && loadingLabel ? loadingLabel : defaultLabel;
+    });
+  }
+
+  function hideNextStepPanel() {
+    var panel = $('#aq-next-step-panel');
+    var primaryWrap = $('#aq-next-step-primary');
+    var secondaryWrap = $('#aq-next-step-secondary');
+    if (!panel || !primaryWrap || !secondaryWrap) return;
+    primaryWrap.innerHTML = '';
+    secondaryWrap.innerHTML = '';
+    panel.removeAttribute('data-tone');
+    panel.classList.add('aq-hidden');
+  }
+
+  function createNextStepActionButton(action, variant) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = variant === 'primary'
+      ? 'aq-btn-next-step-primary'
+      : 'aq-btn-next-step-secondary';
+    btn.textContent = action.label;
+    btn.setAttribute('data-default-label', action.label);
+    btn.setAttribute('data-aq-action', action.id);
+    btn.onclick = function () {
+      action.handler(btn);
+    };
+    return btn;
+  }
+
+  function buildNextStepContext(data, selectedKey, recoveryOfferVisible) {
+    var supportFeatures = Array.isArray(data.support_features) ? data.support_features : [];
+    var answerMeta = state.lastAnswerMeta || {};
+    var rawConfidence = answerMeta.confidence;
+    var confidenceProvided = rawConfidence != null && String(rawConfidence).trim() !== '';
+    var confidence = confidenceProvided ? String(rawConfidence).trim().toLowerCase() : '';
+    var timeContext = String(answerMeta.timeContext || '').trim().toLowerCase();
+    var timeSpentMs = typeof answerMeta.timeSpentMs === 'number' ? answerMeta.timeSpentMs : null;
+    var longResponseTime = typeof timeSpentMs === 'number' && timeSpentMs >= LONG_TIME_CONTEXT_THRESHOLD_MS;
+    var thoughtfulStruggleSignal = timeContext === 'thinking' || (longResponseTime && timeContext !== 'distracted');
+    var explanationAlreadyUsed = !!(state.lastFeedbackContext && state.lastFeedbackContext.explanationAlreadyUsed);
+
+    return {
+      isCorrect: !!data.is_correct,
+      sessionComplete: !!data.session_complete,
+      recoveryStepAvailable: !!recoveryOfferVisible,
+      recoveryStepResult: !!data.recovery_step_result,
+      hasExplain: supportFeatures.indexOf('explain_simpler') !== -1 && !explanationAlreadyUsed,
+      hasSimilar: !recoveryOfferVisible &&
+        !data.recovery_step_result &&
+        !data.session_complete &&
+        supportFeatures.indexOf('one_more_like_this') !== -1,
+      confidenceProvided: confidenceProvided,
+      confidence: confidence,
+      isLowConfidence: confidenceProvided && confidence === 'low',
+      isMediumOrHighConfidence: confidenceProvided && (confidence === 'medium' || confidence === 'high'),
+      timeContext: timeContext || 'unknown',
+      timeSpentMs: timeSpentMs,
+      longResponseTime: longResponseTime,
+      thoughtfulStruggleSignal: thoughtfulStruggleSignal,
+      explanationAlreadyUsed: explanationAlreadyUsed,
+      topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || 'General',
+      difficulty: state.currentQuestion && state.currentQuestion.difficulty,
+      isRecoveryQuestion: !!(state.currentQuestion && state.currentQuestion.is_recovery_step),
+      selectedAnswer: selectedKey || answerMeta.selectedKey || null,
+      recoveryMessage: data.recovery_message || '',
+      recoveryReason: data.recovery_reason || '',
+      recoveryTopic: data.recovery_topic || '',
+      narrativeBridge: data.narrative_bridge || ''
+    };
+  }
+
+  function getAvailableNextStepActions(data, context) {
+    var actions = {};
+
+    if (context.sessionComplete) {
+      actions.see_results = {
+        id: 'see_results',
+        label: 'See results',
+        handler: function () { showResults(data); }
+      };
+      return actions;
+    }
+
+    actions.advance = {
+      id: 'advance',
+      label: context.recoveryStepResult ? 'Continue quiz' : 'Next question',
+      handler: function () { loadNextQuestion(); }
+    };
+
+    if (context.hasExplain) {
+      actions.explain_simpler = {
+        id: 'explain_simpler',
+        label: 'Explain with an analogy',
+        handler: function (btn) { handleExplainSimpler(btn); }
+      };
+    }
+
+    if (context.hasSimilar) {
+      actions.one_more_like_this = {
+        id: 'one_more_like_this',
+        label: 'One more question like this',
+        handler: function () { handleSimilarQuestion(); }
+      };
+    }
+
+    if (context.recoveryStepAvailable) {
+      actions.start_recovery = {
+        id: 'start_recovery',
+        label: 'Try guided step',
+        handler: function () { handleStartRecoveryStep(); }
+      };
+      actions.continue_normally = {
+        id: 'continue_normally',
+        label: 'Continue normally',
+        handler: function () { handleDeclineRecoveryStep(); }
+      };
+    }
+
+    return actions;
+  }
+
+  function getNextStepState(context) {
+    if (context.sessionComplete) return 'session_wrap';
+    if (!context.isCorrect && context.recoveryStepAvailable) return 'repeated_weakness';
+    if (!context.isCorrect && context.thoughtfulStruggleSignal) return 'thoughtful_struggle';
+    if (!context.isCorrect && context.isMediumOrHighConfidence) return 'confident_mistake';
+    if (!context.isCorrect) return context.hasExplain ? 'confident_mistake' : 'thoughtful_struggle';
+    if (context.isLowConfidence) return 'uncertain_success';
+    return 'strong_momentum';
+  }
+
+  function getRecoveryReasonLabel(context) {
+    var reason = String(context.recoveryReason || '').trim().toLowerCase();
+    if (reason.indexOf('repeat') !== -1 || reason.indexOf('repeated') !== -1) return 'repeated difficulty';
+    if (reason.indexOf('struggle') !== -1) return 'meaningful struggle';
+    if (reason.indexOf('confidence') !== -1) return 'a confidence mismatch';
+    return 'meaningful struggle';
+  }
+
+  function firstAvailableAction(actions, preferredIds) {
+    for (var i = 0; i < preferredIds.length; i++) {
+      if (actions[preferredIds[i]]) return actions[preferredIds[i]];
+    }
+    return null;
+  }
+
+  function getNextStepCopy(stateKey, primaryActionId, context) {
+    if (stateKey === 'session_wrap') {
+      return {
+        tone: 'reflection',
+        badge: 'Reflect and review',
+        title: 'See your session results',
+        text: 'You’ve finished this session, so reviewing the outcome will help guide the next step.'
+      };
+    }
+
+    if (stateKey === 'repeated_weakness') {
+      return {
+        tone: 'precision',
+        badge: 'Targeted support',
+        title: 'Try a guided step',
+        text: context.recoveryReason
+          ? 'The system detected ' + getRecoveryReasonLabel(context) + ' on this concept, so a worked example is the most helpful next move.'
+          : 'You’ve hit repeated difficulty on this concept, so a guided step is the best way to reset before continuing.'
+      };
+    }
+
+    if (stateKey === 'thoughtful_struggle') {
+      if (context.explanationAlreadyUsed) {
+        return {
+          tone: 'reflective',
+          badge: 'Keep it moving',
+          title: primaryActionId === 'start_recovery'
+            ? 'Try a guided step'
+            : primaryActionId === 'one_more_like_this'
+            ? 'Reinforce it once more'
+            : 'Ready to move on',
+          text: primaryActionId === 'start_recovery'
+            ? 'You were actively thinking through this and still missed it, so a guided example is the best next step.'
+            : primaryActionId === 'one_more_like_this'
+            ? 'Now that you’ve seen a clearer explanation, one quick follow-up question can help reinforce it.'
+            : 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
+        };
+      }
+
+      return {
+        tone: 'reflective',
+        badge: 'Reflect and reframe',
+        title: primaryActionId === 'start_recovery'
+          ? 'Reframe the concept first'
+          : primaryActionId === 'one_more_like_this'
+          ? 'Stay with the concept once more'
+          : primaryActionId === 'advance'
+          ? 'Keep moving carefully'
+          : 'See a clearer explanation',
+        text: primaryActionId === 'start_recovery'
+          ? 'You spent time thinking about this and still missed the concept, so a worked example is the best next step.'
+          : primaryActionId === 'one_more_like_this'
+          ? 'You engaged with the question carefully, so one nearby practice question is a better next move than rushing ahead.'
+          : primaryActionId === 'advance'
+          ? 'You were actively thinking through it, and continuing is the cleanest option still available from here.'
+          : 'Because you were actively thinking through it, a clearer explanation should help reframe the idea before you continue.'
+      };
+    }
+
+    if (stateKey === 'confident_mistake') {
+      if (context.explanationAlreadyUsed) {
+        return {
+          tone: 'precision',
+          badge: 'Next move',
+          title: primaryActionId === 'one_more_like_this'
+            ? 'Reinforce it once more'
+            : primaryActionId === 'start_recovery'
+            ? 'Try a guided step'
+            : 'Continue with the next step',
+          text: primaryActionId === 'start_recovery'
+            ? 'Now that the idea has been clarified, a guided example is still the strongest next move here.'
+            : primaryActionId === 'one_more_like_this'
+            ? 'The explanation has clarified the concept, so one quick follow-up question can help reinforce it.'
+            : 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
+        };
+      }
+
+      return {
+        tone: 'precision',
+        badge: 'Correct the idea',
+        title: primaryActionId === 'one_more_like_this'
+          ? 'Test the idea once more'
+          : primaryActionId === 'advance'
+          ? 'Keep going, then check the pattern'
+          : context.confidenceProvided ? 'Correct the idea first' : 'Clarify the idea first',
+        text: primaryActionId === 'one_more_like_this'
+          ? context.confidenceProvided
+            ? 'Because you seemed fairly sure, one nearby practice question can help surface the mismatch before you move on.'
+            : 'A nearby practice question can help clarify the concept before you move on.'
+          : primaryActionId === 'advance'
+          ? 'There is no extra support action available here, so the best next move is to continue and watch for this pattern.'
+          : context.confidenceProvided
+          ? 'You answered with confidence, so a clearer explanation should help resolve the misconception before moving on.'
+          : 'A clearer explanation should help before you move on.'
+      };
+    }
+
+    if (stateKey === 'uncertain_success') {
+      return {
+        tone: 'reassurance',
+        badge: 'Build confidence',
+        title: primaryActionId === 'one_more_like_this' ? 'Reinforce it once' : 'Keep it steady',
+        text: primaryActionId === 'one_more_like_this'
+          ? 'You got it right, but your confidence suggests one quick reinforcement step could help make it stick.'
+          : 'You answered correctly, and the next question is the cleanest way to keep that fragile understanding moving forward.'
+      };
+    }
+
+    return {
+      tone: context.recoveryStepResult ? 'reflective' : 'momentum',
+      badge: context.recoveryStepResult ? 'Back to the quiz' : 'Keep going',
+      title: context.recoveryStepResult
+        ? 'Continue with the quiz'
+        : context.explanationAlreadyUsed
+        ? 'Ready to move on'
+        : 'Keep the momentum going',
+      text: context.recoveryStepResult
+        ? 'Use this guided step as a reset, then return to the main quiz and keep building from there.'
+        : context.explanationAlreadyUsed
+        ? 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
+        : 'You’re ready to continue, so the best next step is the next question.'
+    };
+  }
+
+  function chooseNextLearningAction(context, actions) {
+    var stateKey = getNextStepState(context);
+    var primaryPreferenceMap = {
+      session_wrap: ['see_results'],
+      repeated_weakness: ['start_recovery', 'explain_simpler', 'advance'],
+      thoughtful_struggle: ['start_recovery', 'explain_simpler', 'one_more_like_this', 'advance'],
+      confident_mistake: ['explain_simpler', 'one_more_like_this', 'advance', 'start_recovery'],
+      uncertain_success: ['one_more_like_this', 'advance'],
+      strong_momentum: ['advance', 'one_more_like_this']
+    };
+    var fallbackOrder = ['see_results', 'start_recovery', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+    var primary = firstAvailableAction(actions, primaryPreferenceMap[stateKey] || []) || firstAvailableAction(actions, fallbackOrder);
+
+    if (!primary) return null;
+
+    var secondaryPriority = primary.id === 'start_recovery'
+      ? ['explain_simpler', 'continue_normally', 'one_more_like_this', 'advance']
+      : ['explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+    var secondary = secondaryPriority
+      .filter(function (id) { return id !== primary.id && !!actions[id]; })
+      .slice(0, 2)
+      .map(function (id) { return actions[id]; });
+    var copy = getNextStepCopy(stateKey, primary.id, context);
+
+    return {
+      stateKey: stateKey,
+      tone: copy.tone,
+      badge: copy.badge,
+      title: copy.title,
+      text: copy.text,
+      primary: primary,
+      secondary: secondary
+    };
+  }
+
+  function renderNextStepPanel(nextStep) {
+    var panel = $('#aq-next-step-panel');
+    var labelEl = $('#aq-next-step-label');
+    var titleEl = $('#aq-next-step-title');
+    var textEl = $('#aq-next-step-text');
+    var primaryWrap = $('#aq-next-step-primary');
+    var secondaryWrap = $('#aq-next-step-secondary');
+    var supportRow = $('#aq-support-row');
+    if (!panel || !labelEl || !titleEl || !textEl || !primaryWrap || !secondaryWrap) return;
+
+    if (!nextStep || !nextStep.primary) {
+      hideNextStepPanel();
+      if (supportRow) {
+        supportRow.innerHTML = '';
+        supportRow.classList.add('aq-hidden');
+      }
+      return;
+    }
+
+    labelEl.textContent = nextStep.badge;
+    titleEl.textContent = nextStep.title;
+    textEl.textContent = nextStep.text;
+    panel.setAttribute('data-tone', nextStep.tone || 'momentum');
+    panel.classList.remove('aq-hidden');
+
+    primaryWrap.innerHTML = '';
+    primaryWrap.appendChild(createNextStepActionButton(nextStep.primary, 'primary'));
+
+    secondaryWrap.innerHTML = '';
+    nextStep.secondary.forEach(function (action) {
+      secondaryWrap.appendChild(createNextStepActionButton(action, 'secondary'));
+    });
+
+    if (supportRow) {
+      supportRow.innerHTML = '';
+      supportRow.classList.add('aq-hidden');
+    }
+  }
+
+  function refreshNextStepPanelFromCurrentFeedback() {
+    if (!state.lastFeedbackContext || !state.lastFeedbackContext.data) return;
+
+    var feedbackData = state.lastFeedbackContext.data;
+    var recoveryOfferVisible = !!(
+      feedbackData.recovery_step_available &&
+      !feedbackData.session_complete &&
+      !feedbackData.recovery_step_result
+    );
+    var nextStepContext = buildNextStepContext(
+      feedbackData,
+      state.lastFeedbackContext.selectedKey,
+      recoveryOfferVisible
+    );
+    var availableActions = getAvailableNextStepActions(feedbackData, nextStepContext);
+    var nextStep = chooseNextLearningAction(nextStepContext, availableActions);
+    renderNextStepPanel(nextStep);
+
+    var nextBtn = $('#aq-btn-next');
+    if (nextBtn) {
+      nextBtn.classList.toggle('aq-hidden', !!(nextStep && nextStep.primary) || recoveryOfferVisible);
+    }
+  }
+
   function renderFeedback(data, selectedKey, options) {
     options = options || {};
 
@@ -1005,7 +1399,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     } else if (!options.isRestoredFeedback) {
       state.lastFeedbackContext = {
         data: cloneFeedbackContextData(data),
-        selectedKey: selectedKey || null
+        selectedKey: selectedKey || null,
+        explanationAlreadyUsed: false
       };
     }
 
@@ -1080,24 +1475,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var supportRow = $('#aq-support-row');
     if (supportRow) {
-      supportRow.classList.remove('aq-hidden');
       supportRow.innerHTML = '';
-      var features = data.support_features || [];
-
-      if (features.indexOf('explain_simpler') !== -1) {
-        supportRow.appendChild(
-          makeSupportBtn('💬 Explain with an analogy', handleExplainSimpler)
-        );
-      }
-
-      // IMPORTANT:
-      // Do not allow "one more like this" after the session is already complete,
-      // otherwise the frontend score can diverge from finalized backend session history.
-      if (!recoveryOfferVisible && !data.recovery_step_result && !data.session_complete && features.indexOf('one_more_like_this') !== -1) {
-        supportRow.appendChild(
-          makeSupportBtn('🔄 One more question like this', handleSimilarQuestion)
-        );
-      }
+      supportRow.classList.add('aq-hidden');
     }
 
     var nextBtn = $('#aq-btn-next');
@@ -1112,24 +1491,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         : function () { loadNextQuestion(); };
     }
 
+    var nextStepContext = buildNextStepContext(data, selectedKey, recoveryOfferVisible);
+    var availableActions = getAvailableNextStepActions(data, nextStepContext);
+    var nextStep = chooseNextLearningAction(nextStepContext, availableActions);
+    renderNextStepPanel(nextStep);
+
+    if (nextBtn) {
+      nextBtn.classList.toggle('aq-hidden', !!(nextStep && nextStep.primary));
+    }
+
     if (recoveryOfferVisible) {
       showRecoveryCard(data);
     } else {
       hideRecoveryCard();
     }
 
+    if (nextBtn) {
+      nextBtn.classList.toggle('aq-hidden', !!(nextStep && nextStep.primary) || recoveryOfferVisible);
+    }
+
     var fb = $('#aq-feedback');
     if (fb) fb.classList.remove('aq-hidden');
-  }
-
-  function makeSupportBtn(label, handler) {
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'aq-btn-support';
-    btn.textContent = label;
-    btn.setAttribute('data-default-label', label);
-    btn.onclick = function () { handler(btn); };
-    return btn;
   }
 
   function setExplanationText(text) {
@@ -1179,7 +1561,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function handleStartRecoveryStep() {
     if (state.recoveryStartPending) return;
 
-    setRecoveryCardLoading(true);
+    setRecoveryCardLoading(true, 'start');
     hideExplainStatus();
 
     jQuery.ajax({
@@ -1243,7 +1625,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function handleDeclineRecoveryStep() {
     if (state.recoveryStartPending) return;
 
-    setRecoveryCardLoading(true);
+    setRecoveryCardLoading(true, 'continue');
     jQuery.ajax({
       type: 'POST',
       url: urlDeclineRecovery,
@@ -2363,6 +2745,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         if (data && data.success) {
           setExplanationText(data.simpler_explanation);
           hideExplainStatus();
+          if (state.lastFeedbackContext) {
+            state.lastFeedbackContext.explanationAlreadyUsed = true;
+          }
+          refreshNextStepPanelFromCurrentFeedback();
           return;
         }
         setExplanationText(originalExplanation);

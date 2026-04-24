@@ -383,6 +383,20 @@
           <span class="aq-mastery-val" id="aq-mastery-pct">50%</span>
         </div>
 
+        <div class="aq-next-step aq-hidden" id="aq-next-step-panel">
+          <span class="aq-next-step-label" id="aq-next-step-label">Next best step</span>
+          <div class="aq-next-step-body">
+            <div class="aq-next-step-copy">
+              <h3 class="aq-next-step-title" id="aq-next-step-title">Keep the momentum going</h3>
+              <p class="aq-next-step-text" id="aq-next-step-text">You are ready to continue, so the best next step is the next question.</p>
+            </div>
+            <div class="aq-next-step-actions">
+              <div class="aq-next-step-primary" id="aq-next-step-primary"></div>
+              <div class="aq-next-step-secondary" id="aq-next-step-secondary"></div>
+            </div>
+          </div>
+        </div>
+
         <div class="aq-support-row" id="aq-support-row"></div>
 
         <div class="aq-narrative-bridge aq-hidden" id="aq-narrative-bridge">
@@ -395,9 +409,9 @@
           <p class="aq-recovery-card-text" id="aq-recovery-card-text">
             You seem to be struggling with this concept. I can simplify it and give you one focused recovery question before we continue.
           </p>
-          <div class="aq-recovery-card-actions">
-            <button class="aq-btn aq-btn-primary" id="aq-btn-recovery-start" type="button">Try guided step</button>
-            <button class="aq-btn aq-btn-ghost" id="aq-btn-recovery-skip" type="button">Continue normally</button>
+          <div class="aq-recovery-card-actions" id="aq-recovery-card-actions">
+            <button class="aq-btn aq-btn-primary" id="aq-btn-recovery-start" data-aq-action="start_recovery" type="button">Try guided step</button>
+            <button class="aq-btn aq-btn-ghost" id="aq-btn-recovery-skip" data-aq-action="continue_normally" type="button">Continue normally</button>
           </div>
         </div>
 
