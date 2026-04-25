@@ -6,6 +6,9 @@
   <!-- ── START SCREEN ───────────────────────────────────────────────── -->
   <div class="aq-screen" id="aq-screen-start">
     <div class="aq-hero">
+      <button class="aq-help-trigger" id="aq-btn-help" type="button" aria-label="How this works">
+        <span aria-hidden="true">i</span>
+      </button>
       <div class="aq-hero-badge">AI-Powered Learning</div>
       <h1 class="aq-hero-title">$display_name</h1>
       <p class="aq-hero-sub">Personalised questions that adapt to your level in real time.</p>
@@ -43,6 +46,70 @@
               stroke-linejoin="round" />
           </svg>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── HELP / INSTRUCTIONS ─────────────────────────────────────────── -->
+  <div class="aq-screen aq-hidden" id="aq-screen-help">
+    <div class="aq-panel aq-help-panel">
+      <div class="aq-panel-header aq-panel-header-with-action">
+        <div class="aq-panel-header-main">
+          <div class="aq-step-badge">Instructions</div>
+          <h2 class="aq-panel-title">How StudyPath works</h2>
+          <p class="aq-panel-sub">A quick guide to the adaptive quiz flow and the support you may see along the way.</p>
+        </div>
+        <button class="aq-icon-btn" id="aq-btn-help-back" type="button" aria-label="Back to home">
+          <span class="aq-home-glyph" aria-hidden="true">⌂</span>
+        </button>
+      </div>
+
+      <div class="aq-help-grid">
+        <section class="aq-help-card">
+          <h3 class="aq-help-card-title">1. Your quiz adapts as you answer</h3>
+          <p class="aq-help-card-text">StudyPath adjusts topic choice, difficulty, and support based on your answers,
+            confidence, timing, and recent progress.</p>
+        </section>
+        <section class="aq-help-card">
+          <h3 class="aq-help-card-title">2. Choose the right practice mode</h3>
+          <p class="aq-help-card-text">Normal Practice balances growth across selected topics. Weakness Review focuses
+            on shaky areas. Challenge stretches stronger areas when the selected lecture scope is ready.</p>
+        </section>
+        <section class="aq-help-card">
+          <h3 class="aq-help-card-title">3. Feedback is structured around learning</h3>
+          <p class="aq-help-card-text">After each answer, you receive a short explanation, a mastery update, and a
+            recommended next step such as continuing, reviewing, or trying a guided step.</p>
+        </section>
+        <section class="aq-help-card">
+          <h3 class="aq-help-card-title">4. Guided recovery appears when support is useful</h3>
+          <p class="aq-help-card-text">If the system detects meaningful struggle, it may offer a worked example before
+            giving you one focused recovery question.</p>
+        </section>
+        <section class="aq-help-card">
+          <h3 class="aq-help-card-title">5. Your dashboard changes perspective</h3>
+          <p class="aq-help-card-text">The dashboard adapts to the selected course. It may emphasize repair, growth, or
+            stretch potential depending on your recent progress.</p>
+        </section>
+        <section class="aq-help-card aq-help-card-note">
+          <h3 class="aq-help-card-title">Confidence prompts are optional</h3>
+          <p class="aq-help-card-text">You can ignore optional confidence prompts, but using them helps the system choose
+            better support.</p>
+        </section>
+      </div>
+
+      <div class="aq-help-path">
+        <h3 class="aq-help-card-title">Typical session path</h3>
+        <div class="aq-help-path-steps" aria-label="Typical session path">
+          <span class="aq-help-path-step">Choose content</span>
+          <span class="aq-help-path-step">Pick a mode</span>
+          <span class="aq-help-path-step">Answer adaptive questions</span>
+          <span class="aq-help-path-step">Use support when needed</span>
+          <span class="aq-help-path-step">Finish with results</span>
+        </div>
+      </div>
+
+      <div class="aq-panel-actions">
+        <button class="aq-btn aq-btn-ghost" id="aq-btn-help-back-bottom" type="button">Back to Home</button>
       </div>
     </div>
   </div>

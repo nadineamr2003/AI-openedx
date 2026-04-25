@@ -110,7 +110,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function $(sel) { return element.querySelector(sel); }
 
-  var SCREENS = ['start', 'loading', 'question', 'worked-example', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
+  var SCREENS = ['start', 'help', 'loading', 'question', 'worked-example', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
 
   var COURSE_PICKER_COPY = {
     quiz: {
@@ -5039,6 +5039,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   // ── Wire buttons ────────────────────────────────────────────────────
   var startBtn = $('#aq-btn-start');
   if (startBtn) startBtn.onclick = function () { pickerMode = 'quiz'; loadCoursePicker(); };
+
+  var helpBtn = $('#aq-btn-help');
+  if (helpBtn) helpBtn.onclick = function () { showScreen('help'); };
+
+  ['#aq-btn-help-back', '#aq-btn-help-back-bottom'].forEach(function (sel) {
+    var btn = $(sel);
+    if (btn) btn.onclick = function () { showScreen('start'); };
+  });
 
   var retryBtn = $('#aq-btn-retry');
   if (retryBtn) retryBtn.onclick = function () { pickerMode = 'quiz'; loadCoursePicker(); };
