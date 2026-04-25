@@ -2,6 +2,7 @@
 
 function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var LONG_TIME_CONTEXT_THRESHOLD_MS = 90 * 1000;
+  var SHORT_READING_SLIP_THRESHOLD_MS = 6 * 1000;
 
   var MAX_Q = initArgs.max_questions || 10;
   var DISPLAY_NAME = initArgs.display_name || 'GUC StudyPath';
@@ -1032,6 +1033,36 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return btn;
   }
 
+  function classifyErrorType(context) {
+    if (!context) return 'none';
+
+    if (context.recoveryStepResult) {
+      return context.isLowConfidence ? 'fragile_understanding' : 'none';
+    }
+
+    if (!context.isCorrect) {
+      if (context.recoveryStepAvailable || context.recoveryReasonIndicatesRepeatedDifficulty) {
+        return 'repeated_difficulty';
+      }
+      if (context.thoughtfulStruggleSignal) {
+        return 'thoughtful_struggle';
+      }
+      if (context.isMediumOrHighConfidence) {
+        return 'concept_confusion';
+      }
+      if (context.timeContext === 'distracted' || context.veryShortResponseTime) {
+        return 'careless_reading';
+      }
+      return 'none';
+    }
+
+    if (context.isLowConfidence) {
+      return 'fragile_understanding';
+    }
+
+    return 'none';
+  }
+
   function buildNextStepContext(data, selectedKey, recoveryOfferVisible) {
     var supportFeatures = Array.isArray(data.support_features) ? data.support_features : [];
     var answerMeta = state.lastAnswerMeta || {};
@@ -1041,10 +1072,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var timeContext = String(answerMeta.timeContext || '').trim().toLowerCase();
     var timeSpentMs = typeof answerMeta.timeSpentMs === 'number' ? answerMeta.timeSpentMs : null;
     var longResponseTime = typeof timeSpentMs === 'number' && timeSpentMs >= LONG_TIME_CONTEXT_THRESHOLD_MS;
+    var veryShortResponseTime = typeof timeSpentMs === 'number' && timeSpentMs <= SHORT_READING_SLIP_THRESHOLD_MS;
     var thoughtfulStruggleSignal = timeContext === 'thinking' || (longResponseTime && timeContext !== 'distracted');
     var explanationAlreadyUsed = !!(state.lastFeedbackContext && state.lastFeedbackContext.explanationAlreadyUsed);
+    var recoveryReason = data.recovery_reason || '';
+    var normalizedRecoveryReason = String(recoveryReason).trim().toLowerCase();
+    var recoveryReasonIndicatesRepeatedDifficulty = normalizedRecoveryReason.indexOf('repeat') !== -1 ||
+      normalizedRecoveryReason.indexOf('repeated') !== -1 ||
+      normalizedRecoveryReason.indexOf('meaningful struggle') !== -1 ||
+      normalizedRecoveryReason.indexOf('struggle') !== -1;
 
-    return {
+    var context = {
       isCorrect: !!data.is_correct,
       sessionComplete: !!data.session_complete,
       recoveryStepAvailable: !!recoveryOfferVisible,
@@ -1061,6 +1099,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       timeContext: timeContext || 'unknown',
       timeSpentMs: timeSpentMs,
       longResponseTime: longResponseTime,
+      veryShortResponseTime: veryShortResponseTime,
       thoughtfulStruggleSignal: thoughtfulStruggleSignal,
       explanationAlreadyUsed: explanationAlreadyUsed,
       topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || 'General',
@@ -1068,10 +1107,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       isRecoveryQuestion: !!(state.currentQuestion && state.currentQuestion.is_recovery_step),
       selectedAnswer: selectedKey || answerMeta.selectedKey || null,
       recoveryMessage: data.recovery_message || '',
-      recoveryReason: data.recovery_reason || '',
+      recoveryReason: recoveryReason,
+      recoveryReasonIndicatesRepeatedDifficulty: recoveryReasonIndicatesRepeatedDifficulty,
       recoveryTopic: data.recovery_topic || '',
       narrativeBridge: data.narrative_bridge || ''
     };
+
+    context.errorType = classifyErrorType(context);
+    return context;
   }
 
   function getAvailableNextStepActions(data, context) {
@@ -1134,12 +1177,63 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return 'strong_momentum';
   }
 
-  function getRecoveryReasonLabel(context) {
-    var reason = String(context.recoveryReason || '').trim().toLowerCase();
-    if (reason.indexOf('repeat') !== -1 || reason.indexOf('repeated') !== -1) return 'repeated difficulty';
-    if (reason.indexOf('struggle') !== -1) return 'meaningful struggle';
-    if (reason.indexOf('confidence') !== -1) return 'a confidence mismatch';
-    return 'meaningful struggle';
+  function buildNextStepRationale(stateKey, primaryActionId, context) {
+    if (stateKey === 'session_wrap') {
+      return 'The best next step is to review your results and see what to practise next.';
+    }
+
+    if (context.explanationAlreadyUsed) {
+      if (primaryActionId === 'one_more_like_this') {
+        return 'The explanation has clarified the idea, so one quick follow-up question should help it stick.';
+      }
+      if (primaryActionId === 'start_recovery') {
+        return 'Now that you’ve seen a clearer explanation, a guided example is still the best next step here.';
+      }
+      return 'Now that you’ve seen a clearer explanation, the best next step is to continue.';
+    }
+
+    if (stateKey === 'repeated_weakness') {
+      if (context.thoughtfulStruggleSignal) {
+        return 'You spent time thinking this through and this concept is still causing difficulty, so a worked example is the best next step before continuing.';
+      }
+      return context.errorType === 'careless_reading'
+        ? 'This may have been a rushed or distracted moment, but guided support is still the best next move because the concept is causing difficulty.'
+        : 'This concept is still causing difficulty, so guided support is the best next move before you continue.';
+    }
+
+    if (stateKey === 'thoughtful_struggle') {
+      if (context.errorType === 'careless_reading') {
+        return primaryActionId === 'one_more_like_this'
+          ? 'This may be more about a rushed or distracted moment, so one quick follow-up question should help.'
+          : primaryActionId === 'advance'
+          ? 'This may be more about a rushed or distracted moment, so a careful second look is the cleanest next step.'
+          : 'This may be more about a distracted or rushed moment, so a quick clarification should help before you continue.';
+      }
+      if (primaryActionId === 'start_recovery') {
+        return 'Because you were actively reasoning through it and still hit difficulty, a guided example should help reframe the idea more clearly.';
+      }
+      return 'You spent time thinking through this, so a clearer explanation should help before you continue.';
+    }
+
+    if (stateKey === 'confident_mistake') {
+      if (context.errorType === 'careless_reading') {
+        return primaryActionId === 'one_more_like_this'
+          ? 'This may be more about a rushed or distracted moment, so a quick retry should help before you continue.'
+          : 'A lighter clarification is likely more useful here than a full guided recovery step.';
+      }
+      if (context.confidenceProvided) {
+        return 'You seemed fairly sure, so the best next step is to clarify the idea before moving on.';
+      }
+      return 'Your answer suggests the concept itself needs clearer explanation before you continue.';
+    }
+
+    if (stateKey === 'uncertain_success') {
+      return primaryActionId === 'one_more_like_this'
+        ? 'You got this right, but one quick reinforcement step can help make the concept feel more solid.'
+        : 'The answer was correct, and one more quick check should help it stick.';
+    }
+
+    return 'You’re ready to continue, so the best next step is the next question.';
   }
 
   function firstAvailableAction(actions, preferredIds) {
@@ -1155,7 +1249,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         tone: 'reflection',
         badge: 'Reflect and review',
         title: 'See your session results',
-        text: 'You’ve finished this session, so reviewing the outcome will help guide the next step.'
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
 
@@ -1164,9 +1258,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         tone: 'precision',
         badge: 'Targeted support',
         title: 'Try a guided step',
-        text: context.recoveryReason
-          ? 'The system detected ' + getRecoveryReasonLabel(context) + ' on this concept, so a worked example is the most helpful next move.'
-          : 'You’ve hit repeated difficulty on this concept, so a guided step is the best way to reset before continuing.'
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
 
@@ -1180,11 +1272,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             : primaryActionId === 'one_more_like_this'
             ? 'Reinforce it once more'
             : 'Ready to move on',
-          text: primaryActionId === 'start_recovery'
-            ? 'You were actively thinking through this and still missed it, so a guided example is the best next step.'
-            : primaryActionId === 'one_more_like_this'
-            ? 'Now that you’ve seen a clearer explanation, one quick follow-up question can help reinforce it.'
-            : 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
+          text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
 
@@ -1198,13 +1286,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           : primaryActionId === 'advance'
           ? 'Keep moving carefully'
           : 'See a clearer explanation',
-        text: primaryActionId === 'start_recovery'
-          ? 'You spent time thinking about this and still missed the concept, so a worked example is the best next step.'
-          : primaryActionId === 'one_more_like_this'
-          ? 'You engaged with the question carefully, so one nearby practice question is a better next move than rushing ahead.'
-          : primaryActionId === 'advance'
-          ? 'You were actively thinking through it, and continuing is the cleanest option still available from here.'
-          : 'Because you were actively thinking through it, a clearer explanation should help reframe the idea before you continue.'
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
 
@@ -1218,11 +1300,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             : primaryActionId === 'start_recovery'
             ? 'Try a guided step'
             : 'Continue with the next step',
-          text: primaryActionId === 'start_recovery'
-            ? 'Now that the idea has been clarified, a guided example is still the strongest next move here.'
-            : primaryActionId === 'one_more_like_this'
-            ? 'The explanation has clarified the concept, so one quick follow-up question can help reinforce it.'
-            : 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
+          text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
 
@@ -1234,15 +1312,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           : primaryActionId === 'advance'
           ? 'Keep going, then check the pattern'
           : context.confidenceProvided ? 'Correct the idea first' : 'Clarify the idea first',
-        text: primaryActionId === 'one_more_like_this'
-          ? context.confidenceProvided
-            ? 'Because you seemed fairly sure, one nearby practice question can help surface the mismatch before you move on.'
-            : 'A nearby practice question can help clarify the concept before you move on.'
-          : primaryActionId === 'advance'
-          ? 'There is no extra support action available here, so the best next move is to continue and watch for this pattern.'
-          : context.confidenceProvided
-          ? 'You answered with confidence, so a clearer explanation should help resolve the misconception before moving on.'
-          : 'A clearer explanation should help before you move on.'
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
 
@@ -1251,9 +1321,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         tone: 'reassurance',
         badge: 'Build confidence',
         title: primaryActionId === 'one_more_like_this' ? 'Reinforce it once' : 'Keep it steady',
-        text: primaryActionId === 'one_more_like_this'
-          ? 'You got it right, but your confidence suggests one quick reinforcement step could help make it stick.'
-          : 'You answered correctly, and the next question is the cleanest way to keep that fragile understanding moving forward.'
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
 
@@ -1267,9 +1335,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         : 'Keep the momentum going',
       text: context.recoveryStepResult
         ? 'Use this guided step as a reset, then return to the main quiz and keep building from there.'
-        : context.explanationAlreadyUsed
-        ? 'Now that you’ve seen a clearer explanation, the best next step is to continue.'
-        : 'You’re ready to continue, so the best next step is the next question.'
+        : buildNextStepRationale(stateKey, primaryActionId, context)
     };
   }
 
