@@ -1059,8 +1059,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     secondaryWrap.innerHTML = '';
     panel.removeAttribute('data-tone');
     removeNextStepToneClasses(panel);
+    panel.classList.remove('aq-next-step-animate-in');
     panel.classList.add('aq-hidden');
     if (masteryRow) masteryRow.classList.remove('aq-mastery-row-reinforcement');
+  }
+
+  function triggerNextStepMicroInteractions(panel, primaryButton) {
+    panel.classList.remove('aq-next-step-animate-in');
+    if (primaryButton) primaryButton.classList.remove('aq-next-step-primary-emphasis');
+
+    // Restart one-shot CSS animations for panel updates without adding timers.
+    void panel.offsetWidth;
+
+    panel.classList.add('aq-next-step-animate-in');
+    if (primaryButton) primaryButton.classList.add('aq-next-step-primary-emphasis');
   }
 
   function createNextStepActionButton(action, variant) {
@@ -1678,12 +1690,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     primaryWrap.innerHTML = '';
-    primaryWrap.appendChild(createNextStepActionButton(nextStep.primary, 'primary'));
+    var primaryButton = createNextStepActionButton(nextStep.primary, 'primary');
+    primaryWrap.appendChild(primaryButton);
 
     secondaryWrap.innerHTML = '';
     (nextStep.secondary || []).slice(0, 2).forEach(function (action) {
       secondaryWrap.appendChild(createNextStepActionButton(action, 'secondary'));
     });
+
+    triggerNextStepMicroInteractions(panel, primaryButton);
 
     if (supportRow) {
       supportRow.innerHTML = '';
@@ -2820,6 +2835,107 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
   }
 
+  function shouldReduceMotion() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }
+
+  function triggerDashboardTopCardEntrance() {
+    var cards = [$('#aq-dashboard-hero'), $('#aq-dashboard-focus')].filter(function (card) {
+      return !!card;
+    });
+    if (!cards.length) return;
+
+    cards.forEach(function (card) {
+      card.classList.remove('aq-dashboard-card-enter');
+      card.style.animationDelay = '0ms';
+    });
+
+    if (shouldReduceMotion()) return;
+
+    void cards[0].offsetWidth;
+    cards.forEach(function (card, index) {
+      card.style.animationDelay = (index * 50) + 'ms';
+      card.classList.add('aq-dashboard-card-enter');
+    });
+  }
+
+  function triggerDashboardMasteryBars() {
+    var topicsWrap = $('#aq-dashboard-topics');
+    if (!topicsWrap) return;
+
+    var fills = Array.prototype.slice.call(topicsWrap.querySelectorAll('.aq-dash-fill'));
+    if (!fills.length) return;
+
+    fills.forEach(function (fill) {
+      var targetWidth = fill.style.width || fill.getAttribute('data-target-width') || '0%';
+      fill.setAttribute('data-target-width', targetWidth);
+      fill.classList.remove('aq-dash-fill-animate');
+      fill.classList.remove('aq-dash-fill-prep');
+      fill.style.transitionDelay = '0ms';
+      fill.style.width = targetWidth;
+    });
+
+    if (shouldReduceMotion()) return;
+
+    fills.forEach(function (fill) {
+      fill.classList.add('aq-dash-fill-prep');
+      fill.style.width = '0%';
+    });
+
+    var scheduleFrame = window.requestAnimationFrame || function (callback) {
+      return window.setTimeout(callback, 16);
+    };
+    scheduleFrame(function () {
+      scheduleFrame(function () {
+        fills.forEach(function (fill, index) {
+          fill.classList.remove('aq-dash-fill-prep');
+          fill.classList.add('aq-dash-fill-animate');
+          fill.style.transitionDelay = Math.min(index * 35, 315) + 'ms';
+          fill.style.width = fill.getAttribute('data-target-width') || '0%';
+        });
+      });
+    });
+  }
+
+  function scheduleDashboardMicroInteractions(options, attempt) {
+  options = options || {};
+  attempt = attempt || 0;
+
+  if (shouldReduceMotion()) return;
+
+  var dashboardScreen = $('#aq-screen-dashboard');
+
+  if (!dashboardScreen || dashboardScreen.classList.contains('aq-hidden')) {
+    if (attempt < 1) {
+      window.setTimeout(function () {
+        scheduleDashboardMicroInteractions(options, attempt + 1);
+      }, 90);
+    }
+    return;
+  }
+
+  var scheduleFrame = window.requestAnimationFrame || function (callback) {
+    return window.setTimeout(callback, 16);
+  };
+
+  scheduleFrame(function () {
+    scheduleFrame(function () {
+      window.setTimeout(function () {
+        var visibleDashboard = $('#aq-screen-dashboard');
+        if (!visibleDashboard || visibleDashboard.classList.contains('aq-hidden')) return;
+
+        if (options.cards) {
+          triggerDashboardTopCardEntrance();
+        }
+
+        if (options.mastery) {
+          triggerDashboardMasteryBars();
+        }
+      }, 90);
+    });
+  });
+}
+
   function applyDashboardSectionOrder(perspective) {
     var panel = $('#aq-screen-dashboard .aq-panel');
     var actions = $('#aq-screen-dashboard .aq-panel-actions');
@@ -3495,6 +3611,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     showScreen('dashboard');
+scheduleDashboardMicroInteractions({
+  mastery: true,
+  cards: false
+});
   }
 
   function renderMistakeJournal(groups) {
@@ -4246,6 +4366,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       mistakeGroups: [],
       mistakeJournalAvailable: false
     };
+    var dashboardTopCardsAnimated = false;
 
     function isStaleDashboardLoad() {
       return loadToken !== state.dashboardLoadToken;
@@ -4267,6 +4388,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       state.dashboardModel = model;
       renderDashboardAdaptiveHeader(model);
       applyDashboardSectionOrder(model.perspective);
+      if (!dashboardTopCardsAnimated) {
+  scheduleDashboardMicroInteractions({
+    cards: true,
+    mastery: false
+  });
+  dashboardTopCardsAnimated = true;
+}
     }
 
     renderSessionHistory([], {
