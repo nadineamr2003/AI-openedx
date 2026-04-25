@@ -757,6 +757,27 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return JSON.parse(JSON.stringify(data));
   }
 
+  function normalizeSubmittedConfidence(confidence) {
+    var normalized = confidence == null ? '' : String(confidence).trim().toLowerCase();
+    if (normalized !== 'low' && normalized !== 'medium' && normalized !== 'high') normalized = '';
+    return {
+      confidence: normalized,
+      confidenceProvided: normalized !== ''
+    };
+  }
+
+  function cloneAnswerMetaForFeedback(answerMeta, selectedKey) {
+    answerMeta = answerMeta || {};
+    var normalizedConfidence = normalizeSubmittedConfidence(answerMeta.confidence);
+    return {
+      selectedKey: selectedKey || answerMeta.selectedKey || null,
+      timeSpentMs: typeof answerMeta.timeSpentMs === 'number' ? answerMeta.timeSpentMs : null,
+      timeContext: answerMeta.timeContext || null,
+      confidence: normalizedConfidence.confidence || null,
+      confidenceProvided: normalizedConfidence.confidenceProvided
+    };
+  }
+
   function restoreFeedbackAfterRecoveryDecline() {
     if (!state.lastFeedbackContext || !state.lastFeedbackContext.data) {
       hideRecoveryCard();
@@ -772,6 +793,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       recovery_reason: null,
       recovery_topic: null
     });
+    state.lastFeedbackContext.data = cloneFeedbackContextData(restoredData);
+    if (state.lastFeedbackContext.answerMeta) {
+      state.lastAnswerMeta = cloneAnswerMetaForFeedback(
+        state.lastFeedbackContext.answerMeta,
+        state.lastFeedbackContext.selectedKey
+      );
+    }
 
     renderFeedback(restoredData, state.lastFeedbackContext.selectedKey, {
       isRestoredFeedback: true,
@@ -1007,15 +1035,32 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  var NEXT_STEP_TONE_CLASSES = [
+    'aq-next-step-support',
+    'aq-next-step-correction',
+    'aq-next-step-reinforcement',
+    'aq-next-step-momentum',
+    'aq-next-step-reflection'
+  ];
+
+  function removeNextStepToneClasses(panel) {
+    NEXT_STEP_TONE_CLASSES.forEach(function (className) {
+      panel.classList.remove(className);
+    });
+  }
+
   function hideNextStepPanel() {
     var panel = $('#aq-next-step-panel');
     var primaryWrap = $('#aq-next-step-primary');
     var secondaryWrap = $('#aq-next-step-secondary');
+    var masteryRow = element.querySelector('.aq-mastery-row');
     if (!panel || !primaryWrap || !secondaryWrap) return;
     primaryWrap.innerHTML = '';
     secondaryWrap.innerHTML = '';
     panel.removeAttribute('data-tone');
+    removeNextStepToneClasses(panel);
     panel.classList.add('aq-hidden');
+    if (masteryRow) masteryRow.classList.remove('aq-mastery-row-reinforcement');
   }
 
   function createNextStepActionButton(action, variant) {
@@ -1065,10 +1110,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function buildNextStepContext(data, selectedKey, recoveryOfferVisible) {
     var supportFeatures = Array.isArray(data.support_features) ? data.support_features : [];
-    var answerMeta = state.lastAnswerMeta || {};
-    var rawConfidence = answerMeta.confidence;
-    var confidenceProvided = rawConfidence != null && String(rawConfidence).trim() !== '';
-    var confidence = confidenceProvided ? String(rawConfidence).trim().toLowerCase() : '';
+    var storedFeedbackMeta = state.lastFeedbackContext && state.lastFeedbackContext.answerMeta;
+    var answerMeta = storedFeedbackMeta || state.lastAnswerMeta || {};
+    var normalizedConfidence = normalizeSubmittedConfidence(answerMeta.confidence);
+    var confidenceProvided = Object.prototype.hasOwnProperty.call(answerMeta, 'confidenceProvided')
+      ? !!answerMeta.confidenceProvided
+      : normalizedConfidence.confidenceProvided;
+    var confidence = confidenceProvided ? normalizedConfidence.confidence : '';
     var timeContext = String(answerMeta.timeContext || '').trim().toLowerCase();
     var timeSpentMs = typeof answerMeta.timeSpentMs === 'number' ? answerMeta.timeSpentMs : null;
     var longResponseTime = typeof timeSpentMs === 'number' && timeSpentMs >= LONG_TIME_CONTEXT_THRESHOLD_MS;
@@ -1104,6 +1152,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       explanationAlreadyUsed: explanationAlreadyUsed,
       topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || 'General',
       difficulty: state.currentQuestion && state.currentQuestion.difficulty,
+      questionTextLength: state.currentQuestion && state.currentQuestion.question
+        ? String(state.currentQuestion.question).length
+        : 0,
+      questionsSeenSoFar: state.questionsSeenSoFar || 0,
       isRecoveryQuestion: !!(state.currentQuestion && state.currentQuestion.is_recovery_step),
       selectedAnswer: selectedKey || answerMeta.selectedKey || null,
       recoveryMessage: data.recovery_message || '',
@@ -1171,69 +1223,217 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (context.sessionComplete) return 'session_wrap';
     if (!context.isCorrect && context.recoveryStepAvailable) return 'repeated_weakness';
     if (!context.isCorrect && context.thoughtfulStruggleSignal) return 'thoughtful_struggle';
+    if (!context.isCorrect && context.isLowConfidence) return 'thoughtful_struggle';
     if (!context.isCorrect && context.isMediumOrHighConfidence) return 'confident_mistake';
     if (!context.isCorrect) return context.hasExplain ? 'confident_mistake' : 'thoughtful_struggle';
     if (context.isLowConfidence) return 'uncertain_success';
     return 'strong_momentum';
   }
 
+  function getNextStepVisualTone(stateKey, primaryAction, context) {
+    context = context || {};
+    var primaryActionId = primaryAction && primaryAction.id;
+
+    if (stateKey === 'session_wrap' || primaryActionId === 'see_results') return 'reflection';
+    if (context.explanationAlreadyUsed && primaryActionId === 'one_more_like_this') return 'reinforcement';
+    if (
+      stateKey === 'repeated_weakness' ||
+      stateKey === 'thoughtful_struggle' ||
+      primaryActionId === 'start_recovery' ||
+      context.recoveryStepAvailable
+    ) {
+      return 'support';
+    }
+    if (
+      stateKey === 'confident_mistake' ||
+      (!context.isCorrect && primaryActionId === 'explain_simpler') ||
+      context.errorType === 'concept_confusion'
+    ) {
+      return 'correction';
+    }
+    if (
+      stateKey === 'uncertain_success' ||
+      (context.isCorrect && context.isLowConfidence) ||
+      primaryActionId === 'one_more_like_this'
+    ) {
+      return 'reinforcement';
+    }
+
+    return 'momentum';
+  }
+
+  function stableCopyHash(value) {
+    var hash = 0;
+    var text = String(value || '');
+    for (var i = 0; i < text.length; i++) {
+      hash = ((hash << 5) - hash) + text.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash);
+  }
+
+  function pickCopyVariant(key, variants, context) {
+    if (!variants || !variants.length) return '';
+    context = context || {};
+    var seed = [
+      key,
+      context.topic || '',
+      context.questionTextLength || 0,
+      context.questionsSeenSoFar || 0,
+      context.difficulty || '',
+      context.selectedAnswer || '',
+      context.isRecoveryQuestion ? 'recovery' : 'standard'
+    ].join('|');
+    return variants[stableCopyHash(seed) % variants.length];
+  }
+
   function buildNextStepRationale(stateKey, primaryActionId, context) {
     if (stateKey === 'session_wrap') {
-      return 'The best next step is to review your results and see what to practise next.';
+      return pickCopyVariant('session_wrap_rationale', [
+        'The best next step is to review your results and see what to practise next.',
+        'You’ve finished this session, so reviewing the outcome will help guide the next step.',
+        'Reviewing the session now will make the next practice choice clearer.'
+      ], context);
     }
 
     if (context.explanationAlreadyUsed) {
       if (primaryActionId === 'one_more_like_this') {
-        return 'The explanation has clarified the idea, so one quick follow-up question should help it stick.';
+        return pickCopyVariant('explanation_used_reinforce_rationale', [
+          'The explanation has clarified the idea, so one quick follow-up question should help it stick.',
+          'With the concept reframed, a quick follow-up can help confirm it.',
+          'Now that the idea is clearer, one more related question can help make it steadier.'
+        ], context);
       }
       if (primaryActionId === 'start_recovery') {
-        return 'Now that you’ve seen a clearer explanation, a guided example is still the best next step here.';
+        return pickCopyVariant('explanation_used_support_rationale', [
+          'Now that you’ve seen a clearer explanation, a guided example is still the best next step here.',
+          'The explanation helped reframe the idea, and a guided step can make the next attempt clearer.'
+        ], context);
       }
-      return 'Now that you’ve seen a clearer explanation, the best next step is to continue.';
+      return pickCopyVariant('explanation_used_continue_rationale', [
+        'Now that you’ve seen a clearer explanation, the best next step is to continue.',
+        'The explanation has clarified the idea, so you can move on or reinforce it once more.',
+        'With the concept reframed, continuing is a reasonable next step.'
+      ], context);
     }
 
     if (stateKey === 'repeated_weakness') {
       if (context.thoughtfulStruggleSignal) {
-        return 'You spent time thinking this through and this concept is still causing difficulty, so a worked example is the best next step before continuing.';
+        return pickCopyVariant('repeated_weakness_thoughtful_rationale', [
+          'You spent time thinking this through and this concept is still causing difficulty, so a worked example is the best next step before continuing.',
+          'Because you were actively reasoning through it and still hit difficulty, a guided example should help reframe the idea.',
+          'A worked example can help reset this idea after a careful attempt.'
+        ], context);
+      }
+      if (context.isLowConfidence) {
+        return pickCopyVariant('repeated_weakness_low_confidence_rationale', [
+          'You were not fully sure and this concept is still causing difficulty, so guided support is the best next move before you continue.',
+          'Because this did not feel certain yet, a guided step can help make the next attempt clearer.',
+          'This looks like uncertainty around a concept that is still causing trouble, so guided support should help first.'
+        ], context);
       }
       return context.errorType === 'careless_reading'
-        ? 'This may have been a rushed or distracted moment, but guided support is still the best next move because the concept is causing difficulty.'
-        : 'This concept is still causing difficulty, so guided support is the best next move before you continue.';
+        ? pickCopyVariant('repeated_weakness_careless_rationale', [
+          'This may have been a rushed or distracted moment, but guided support is still the best next move because the concept is causing difficulty.',
+          'Even if this was a rushed moment, a guided step can help steady the concept before continuing.'
+        ], context)
+        : pickCopyVariant('repeated_weakness_rationale', [
+          'This concept is still causing difficulty, so guided support is the best next move before you continue.',
+          'A worked example can help reset this idea before the quiz moves on.',
+          'Because this point is still causing trouble, a guided step should make the next attempt clearer.'
+        ], context);
     }
 
     if (stateKey === 'thoughtful_struggle') {
       if (context.errorType === 'careless_reading') {
         return primaryActionId === 'one_more_like_this'
-          ? 'This may be more about a rushed or distracted moment, so one quick follow-up question should help.'
+          ? pickCopyVariant('thoughtful_careless_reinforce_rationale', [
+            'This may be more about a rushed or distracted moment, so one quick follow-up question should help.',
+            'A quick related question can help check the idea after a possibly rushed attempt.'
+          ], context)
           : primaryActionId === 'advance'
-          ? 'This may be more about a rushed or distracted moment, so a careful second look is the cleanest next step.'
-          : 'This may be more about a distracted or rushed moment, so a quick clarification should help before you continue.';
+          ? pickCopyVariant('thoughtful_careless_advance_rationale', [
+            'This may be more about a rushed or distracted moment, so a careful second look is the cleanest next step.',
+            'This may have been a reading slip, so continuing carefully is the cleanest next step.'
+          ], context)
+          : pickCopyVariant('thoughtful_careless_explain_rationale', [
+            'This may be more about a distracted or rushed moment, so a quick clarification should help before you continue.',
+            'A brief clarification can help separate the concept from a possible rushed read.'
+          ], context);
+      }
+      if (!context.isCorrect && context.isLowConfidence) {
+        return pickCopyVariant('low_confidence_wrong_rationale', [
+          'You were not fully sure, so a clearer explanation can help stabilize the concept before moving on.',
+          'Because this did not feel certain yet, a quick clarification should help before you continue.',
+          'This looks like uncertainty around the concept, so clarifying it first is the best next step.'
+        ], context);
       }
       if (primaryActionId === 'start_recovery') {
-        return 'Because you were actively reasoning through it and still hit difficulty, a guided example should help reframe the idea more clearly.';
+        return pickCopyVariant('thoughtful_support_rationale', [
+          'Because you were actively reasoning through it and still hit difficulty, a guided example should help reframe the idea more clearly.',
+          'You spent time with this, so a guided step can make the next attempt clearer.',
+          'A guided example should help connect the reasoning path more cleanly before you move on.'
+        ], context);
       }
-      return 'You spent time thinking through this, so a clearer explanation should help before you continue.';
+      return pickCopyVariant('thoughtful_struggle_rationale', [
+        'You spent time thinking through this, so a clearer explanation should help before you continue.',
+        'Because you stayed with the problem, a quick clarification should make the idea easier to carry forward.',
+        'A clearer explanation can help turn that effort into a more stable concept.'
+      ], context);
     }
 
     if (stateKey === 'confident_mistake') {
       if (context.errorType === 'careless_reading') {
         return primaryActionId === 'one_more_like_this'
-          ? 'This may be more about a rushed or distracted moment, so a quick retry should help before you continue.'
-          : 'A lighter clarification is likely more useful here than a full guided recovery step.';
+          ? pickCopyVariant('confident_careless_reinforce_rationale', [
+            'This may be more about a rushed or distracted moment, so a quick retry should help before you continue.',
+            'A quick retry can confirm whether this was a reading slip before you move on.'
+          ], context)
+          : pickCopyVariant('confident_careless_explain_rationale', [
+            'A lighter clarification is likely more useful here than a full guided recovery step.',
+            'A brief clarification should be enough to separate the idea from a possible rushed read.'
+          ], context);
       }
-      if (context.confidenceProvided) {
-        return 'You seemed fairly sure, so the best next step is to clarify the idea before moving on.';
+      if (context.isLowConfidence) {
+        return pickCopyVariant('low_confidence_wrong_rationale', [
+          'You were not fully sure, so a clearer explanation can help stabilize the concept before moving on.',
+          'Because this did not feel certain yet, a quick clarification should help before you continue.',
+          'This looks like uncertainty around the concept, so clarifying it first is the best next step.'
+        ], context);
       }
-      return 'Your answer suggests the concept itself needs clearer explanation before you continue.';
+      if (context.isMediumOrHighConfidence) {
+        return pickCopyVariant('confident_mistake_rationale', [
+          'You seemed fairly sure, so the best next step is to clarify the idea before moving on.',
+          'Because you answered with confidence, a clearer explanation can help correct the concept before continuing.',
+          'This looks like a confident misconception, so clarifying the idea first is the best next step.'
+        ], context);
+      }
+      return pickCopyVariant('neutral_wrong_rationale', [
+        'Your answer suggests the concept itself needs clearer explanation before you continue.',
+        'A quick clarification should help before you move to the next question.',
+        'Clarifying the idea first is the cleanest next step.'
+      ], context);
     }
 
     if (stateKey === 'uncertain_success') {
       return primaryActionId === 'one_more_like_this'
-        ? 'You got this right, but one quick reinforcement step can help make the concept feel more solid.'
-        : 'The answer was correct, and one more quick check should help it stick.';
+        ? pickCopyVariant('uncertain_success_reinforce_rationale', [
+          'You got this right, but one quick reinforcement step can help make the concept feel more solid.',
+          'The answer was correct; one more quick check can help turn it into confidence.',
+          'A short follow-up can help make this correct answer feel more secure.'
+        ], context)
+        : pickCopyVariant('uncertain_success_continue_rationale', [
+          'The answer was correct, and one more quick check should help it stick.',
+          'This was correct, so continuing steadily is a good next step.',
+          'You got it right; keep moving while the idea is fresh.'
+        ], context);
     }
 
-    return 'You’re ready to continue, so the best next step is the next question.';
+    return pickCopyVariant('strong_momentum_rationale', [
+      'You’re ready to continue, so the best next step is the next question.',
+      'This looks stable enough to keep your momentum going.',
+      'You handled this well, so continuing is the right move.'
+    ], context);
   }
 
   function firstAvailableAction(actions, preferredIds) {
@@ -1248,7 +1448,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return {
         tone: 'reflection',
         badge: 'Reflect and review',
-        title: 'See your session results',
+        title: pickCopyVariant('session_wrap_title', [
+          'See your session results',
+          'Review your session',
+          'Open your results'
+        ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1257,7 +1461,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return {
         tone: 'precision',
         badge: 'Targeted support',
-        title: 'Try a guided step',
+        title: pickCopyVariant('repeated_weakness_title', [
+          'Try a guided step',
+          'Reset with support',
+          'Work through an example'
+        ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1268,10 +1476,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           tone: 'reflective',
           badge: 'Keep it moving',
           title: primaryActionId === 'start_recovery'
-            ? 'Try a guided step'
+            ? pickCopyVariant('explanation_used_support_title', [
+              'Try a guided step',
+              'Use a guided example'
+            ], context)
             : primaryActionId === 'one_more_like_this'
-            ? 'Reinforce it once more'
-            : 'Ready to move on',
+            ? pickCopyVariant('explanation_used_reinforce_title', [
+              'Reinforce it once more',
+              'Confirm it once more'
+            ], context)
+            : pickCopyVariant('explanation_used_continue_title', [
+              'Ready to move on',
+              'Continue from here'
+            ], context),
           text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
@@ -1280,12 +1497,24 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         tone: 'reflective',
         badge: 'Reflect and reframe',
         title: primaryActionId === 'start_recovery'
-          ? 'Reframe the concept first'
+          ? pickCopyVariant('thoughtful_support_title', [
+            'Reframe the concept first',
+            'Try a guided reset'
+          ], context)
           : primaryActionId === 'one_more_like_this'
-          ? 'Stay with the concept once more'
+          ? pickCopyVariant('thoughtful_reinforce_title', [
+            'Stay with the concept once more',
+            'Check the idea once more'
+          ], context)
           : primaryActionId === 'advance'
-          ? 'Keep moving carefully'
-          : 'See a clearer explanation',
+          ? pickCopyVariant('thoughtful_advance_title', [
+            'Keep moving carefully',
+            'Continue with care'
+          ], context)
+          : pickCopyVariant(context.isLowConfidence ? 'low_confidence_wrong_title' : 'thoughtful_explain_title', [
+            context.isLowConfidence ? 'Clarify the concept first' : 'See a clearer explanation',
+            context.isLowConfidence ? 'Stabilize the idea first' : 'Reframe the idea first'
+          ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1296,10 +1525,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           tone: 'precision',
           badge: 'Next move',
           title: primaryActionId === 'one_more_like_this'
-            ? 'Reinforce it once more'
+            ? pickCopyVariant('explanation_used_reinforce_title', [
+              'Reinforce it once more',
+              'Confirm it once more'
+            ], context)
             : primaryActionId === 'start_recovery'
-            ? 'Try a guided step'
-            : 'Continue with the next step',
+            ? pickCopyVariant('explanation_used_support_title', [
+              'Try a guided step',
+              'Use a guided example'
+            ], context)
+            : pickCopyVariant('explanation_used_continue_title', [
+              'Continue with the next step',
+              'Move on from here'
+            ], context),
           text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
@@ -1308,10 +1546,24 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         tone: 'precision',
         badge: 'Correct the idea',
         title: primaryActionId === 'one_more_like_this'
-          ? 'Test the idea once more'
+          ? pickCopyVariant('correction_reinforce_title', [
+            'Test the idea once more',
+            'Check the concept again'
+          ], context)
           : primaryActionId === 'advance'
-          ? 'Keep going, then check the pattern'
-          : context.confidenceProvided ? 'Correct the idea first' : 'Clarify the idea first',
+          ? pickCopyVariant('correction_advance_title', [
+            'Keep going, then check the pattern',
+            'Continue and watch the pattern'
+          ], context)
+          : context.isMediumOrHighConfidence
+          ? pickCopyVariant('confident_mistake_title', [
+            'Correct the idea first',
+            'Clarify the misconception'
+          ], context)
+          : pickCopyVariant('neutral_wrong_title', [
+            'Clarify the idea first',
+            'Review the concept first'
+          ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1320,7 +1572,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return {
         tone: 'reassurance',
         badge: 'Build confidence',
-        title: primaryActionId === 'one_more_like_this' ? 'Reinforce it once' : 'Keep it steady',
+        title: primaryActionId === 'one_more_like_this'
+          ? pickCopyVariant('uncertain_success_reinforce_title', [
+            'Reinforce it once',
+            'Make it stick',
+            'Confirm the concept'
+          ], context)
+          : pickCopyVariant('uncertain_success_continue_title', [
+            'Keep it steady',
+            'Continue with confidence'
+          ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1329,10 +1590,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       tone: context.recoveryStepResult ? 'reflective' : 'momentum',
       badge: context.recoveryStepResult ? 'Back to the quiz' : 'Keep going',
       title: context.recoveryStepResult
-        ? 'Continue with the quiz'
+        ? pickCopyVariant('recovery_result_title', [
+          'Continue with the quiz',
+          'Return to the quiz'
+        ], context)
         : context.explanationAlreadyUsed
-        ? 'Ready to move on'
-        : 'Keep the momentum going',
+        ? pickCopyVariant('explanation_used_continue_title', [
+          'Ready to move on',
+          'Continue from here'
+        ], context)
+        : pickCopyVariant('strong_momentum_title', [
+          'Keep the momentum going',
+          'Move to the next question',
+          'Continue the run'
+        ], context),
       text: context.recoveryStepResult
         ? 'Use this guided step as a reset, then return to the main quiz and keep building from there.'
         : buildNextStepRationale(stateKey, primaryActionId, context)
@@ -1362,10 +1633,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       .slice(0, 2)
       .map(function (id) { return actions[id]; });
     var copy = getNextStepCopy(stateKey, primary.id, context);
+    var visualTone = getNextStepVisualTone(stateKey, primary, context);
 
     return {
       stateKey: stateKey,
-      tone: copy.tone,
+      tone: visualTone,
       badge: copy.badge,
       title: copy.title,
       text: copy.text,
@@ -1382,6 +1654,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var primaryWrap = $('#aq-next-step-primary');
     var secondaryWrap = $('#aq-next-step-secondary');
     var supportRow = $('#aq-support-row');
+    var masteryRow = element.querySelector('.aq-mastery-row');
     if (!panel || !labelEl || !titleEl || !textEl || !primaryWrap || !secondaryWrap) return;
 
     if (!nextStep || !nextStep.primary) {
@@ -1396,14 +1669,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     labelEl.textContent = nextStep.badge;
     titleEl.textContent = nextStep.title;
     textEl.textContent = nextStep.text;
+    removeNextStepToneClasses(panel);
     panel.setAttribute('data-tone', nextStep.tone || 'momentum');
+    panel.classList.add('aq-next-step-' + (nextStep.tone || 'momentum'));
     panel.classList.remove('aq-hidden');
+    if (masteryRow) {
+      masteryRow.classList.toggle('aq-mastery-row-reinforcement', nextStep.tone === 'reinforcement');
+    }
 
     primaryWrap.innerHTML = '';
     primaryWrap.appendChild(createNextStepActionButton(nextStep.primary, 'primary'));
 
     secondaryWrap.innerHTML = '';
-    nextStep.secondary.forEach(function (action) {
+    (nextStep.secondary || []).slice(0, 2).forEach(function (action) {
       secondaryWrap.appendChild(createNextStepActionButton(action, 'secondary'));
     });
 
@@ -1460,12 +1738,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       state.lastDifficulty = data.next_difficulty;
     }
 
+    var submittedAnswerMeta = cloneAnswerMetaForFeedback(state.lastAnswerMeta, selectedKey);
     if (data.recovery_step_result) {
       state.lastFeedbackContext = null;
     } else if (!options.isRestoredFeedback) {
       state.lastFeedbackContext = {
         data: cloneFeedbackContextData(data),
         selectedKey: selectedKey || null,
+        answerMeta: submittedAnswerMeta,
+        submittedConfidence: submittedAnswerMeta.confidence,
+        confidenceProvided: submittedAnswerMeta.confidenceProvided,
         explanationAlreadyUsed: false
       };
     }
