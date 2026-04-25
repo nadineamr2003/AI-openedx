@@ -785,8 +785,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return;
     }
 
-    var explanationEl = $('#aq-explanation');
-    var preservedExplanation = explanationEl ? explanationEl.textContent : '';
+    var preservedExplanation = getExplanationTextFromEl();
     var restoredData = Object.assign({}, cloneFeedbackContextData(state.lastFeedbackContext.data), {
       recovery_step_available: false,
       recovery_message: null,
@@ -1299,6 +1298,197 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return variants[stableCopyHash(seed) % variants.length];
   }
 
+  function getExplanationTextFromEl() {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return '';
+    return expEl.getAttribute('data-explanation-body') || expEl.textContent || '';
+  }
+
+  function normalizeExplanationText(text) {
+    var value = String(text || '').trim();
+    return value || 'Review the correct answer and compare it with the option you selected.';
+  }
+
+  function buildStructuredExplanationViewModel(data, selectedKey, context, options) {
+    options = options || {};
+    context = context || {};
+
+    var body = normalizeExplanationText(
+      options.textOverride != null ? options.textOverride : (data && data.explanation)
+    );
+
+    var isCorrect = !!(data && data.is_correct);
+    var mode = 'correct_momentum';
+    var label = 'Explanation';
+    var title = 'Why this works';
+    var takeaway = '';
+    var toneClass = 'aq-explanation-correct';
+    var timeContext = String(
+      context.timeContext ||
+      context.answerMetaTimeContext ||
+      (data && data.time_context) ||
+      ''
+    ).trim().toLowerCase();
+    var thoughtfulExplanationSignal = timeContext === 'thinking' ||
+      !!context.thoughtfulStruggleSignal ||
+      !!context.isThoughtfulStruggle ||
+      context.errorType === 'thoughtful_struggle';
+
+    if (options.modeOverride === 'simple' || context.explanationAlreadyUsed) {
+      mode = 'explanation_already_used';
+      label = 'Clearer explanation';
+      title = pickCopyVariant('structured_simple_title', [
+        'A simpler way to see it',
+        'Reframed explanation',
+        'Clearer version'
+      ], context);
+      takeaway = pickCopyVariant('structured_simple_takeaway', [
+        'Key idea: the analogy highlights the core difference explained above.',
+        'Concept anchor: the simpler version keeps the same concept but lowers the wording complexity.',
+        'Remember: the analogy is only a shortcut for the concept, not a new rule.'
+      ], context);
+      toneClass = 'aq-explanation-simple';
+    } else if ((data && data.recovery_step_result) || context.isRecoveryQuestion) {
+      mode = 'recovery_result';
+      label = 'Recovery explanation';
+      title = pickCopyVariant('structured_recovery_title', [
+        'What this recovery step rebuilt',
+        'Recovery check',
+        'Back to the main idea'
+      ], context);
+      takeaway = isCorrect
+        ? 'Key idea: this recovery step rebuilt the link between the concept and the question cue.'
+        : 'Key idea: this concept is still unstable, especially around the distinction explained above.';
+      toneClass = 'aq-explanation-recovery';
+    } else if (!isCorrect && context.errorType === 'careless_reading') {
+      mode = 'distracted_or_fast_wrong';
+      label = 'Careful review';
+      title = pickCopyVariant('structured_careful_title', [
+        'Check the detail',
+        'Review the question cue',
+        'Slow down the key distinction'
+      ], context);
+      takeaway = pickCopyVariant('structured_careful_takeaway', [
+        'Key idea: the deciding detail is the question cue that separates the options.',
+        'Concept anchor: a small wording detail can change which option fits best.'
+      ], context);
+      toneClass = 'aq-explanation-careful';
+    } else if (!isCorrect && thoughtfulExplanationSignal) {
+      mode = 'thoughtful_struggle';
+      label = 'Reasoning support';
+      title = pickCopyVariant('structured_thoughtful_title', [
+        'Reframe the reasoning',
+        'Work through the idea',
+        'Clarify the difficult step'
+      ], context);
+      takeaway = pickCopyVariant('structured_thoughtful_takeaway', [
+        'Key idea: the difficult step is the point where the explanation changes which option fits.',
+        'Concept anchor: the explanation identifies the reasoning step that changes the answer.'
+      ], context);
+      toneClass = 'aq-explanation-clarify';
+    } else if (!isCorrect && context.isMediumOrHighConfidence) {
+      mode = 'wrong_confident';
+      label = 'Concept correction';
+      title = pickCopyVariant('structured_wrong_confident_title', [
+        'Clarify the misconception',
+        'Correct the key idea',
+        'What to fix'
+      ], context);
+      takeaway = pickCopyVariant('structured_wrong_confident_takeaway', [
+        'Key idea: the useful correction is the concept distinction, not just the option label.',
+        'Concept anchor: identify what makes the correct option fit the scenario better than the selected one.',
+        'Key idea: the important distinction is between the selected concept and the condition described in the question.'
+      ], context);
+      toneClass = 'aq-explanation-correction';
+    } else if (!isCorrect && context.isLowConfidence) {
+      mode = 'wrong_low_confidence';
+      label = 'Clarification';
+      title = pickCopyVariant('structured_wrong_low_title', [
+        'Clarify the idea',
+        'Make the concept more stable',
+        'Rebuild the foundation'
+      ], context);
+      takeaway = pickCopyVariant('structured_wrong_low_takeaway', [
+        'Key idea: uncertainty here points to the concept distinction that the explanation clarifies.',
+        'Concept anchor: the correct option fits because of the scenario detail explained above.'
+      ], context);
+      toneClass = 'aq-explanation-clarify';
+    } else if (!isCorrect) {
+      mode = 'wrong_no_confidence';
+      label = 'Explanation';
+      title = pickCopyVariant('structured_wrong_neutral_title', [
+        'Clarify the idea',
+        'Review the key point',
+        'What this answer shows'
+      ], context);
+      takeaway = pickCopyVariant('structured_wrong_neutral_takeaway', [
+        'Key idea: the correct option fits the specific cue in the question scenario.',
+        'Concept anchor: the deciding cue is the part of the scenario explained above.'
+      ], context);
+      toneClass = 'aq-explanation-correction';
+    } else if (isCorrect && context.isLowConfidence) {
+      mode = 'correct_low_confidence';
+      label = 'Confidence builder';
+      title = pickCopyVariant('structured_correct_low_title', [
+        'You were right — now make it feel solid',
+        'Correct, even if it felt uncertain',
+        'Build confidence in this idea'
+      ], context);
+      takeaway = pickCopyVariant('structured_correct_low_takeaway', [
+        'Key idea: your reasoning matched the concept, even if it did not feel certain yet.',
+        'Key idea: the selected answer fits the concept even if your confidence was low.'
+      ], context);
+      toneClass = 'aq-explanation-confidence';
+    } else {
+      mode = 'correct_momentum';
+      label = 'Explanation';
+      title = pickCopyVariant('structured_correct_title', [
+        'Why this works',
+        'Correct reasoning',
+        'The key idea'
+      ], context);
+      takeaway = '';
+      toneClass = 'aq-explanation-correct';
+    }
+
+    return {
+      mode: mode,
+      label: label,
+      title: title,
+      body: body,
+      takeaway: takeaway,
+      toneClass: toneClass
+    };
+  }
+
+  function renderStructuredExplanation(viewModel) {
+    var expEl = $('#aq-explanation');
+    if (!expEl || !viewModel) return;
+
+    expEl.classList.remove('aq-explanation-loading');
+    expEl.setAttribute('data-explanation-body', viewModel.body || '');
+
+    expEl.innerHTML =
+      '<div class="aq-explanation-card ' + escapeHtml(viewModel.toneClass || 'aq-explanation-correct') + '">' +
+      '<span class="aq-explanation-label">' + escapeHtml(viewModel.label || 'Explanation') + '</span>' +
+      '<h4 class="aq-explanation-title">' + escapeHtml(viewModel.title || 'Explanation') + '</h4>' +
+      '<p class="aq-explanation-body">' + escapeHtml(viewModel.body || '') + '</p>' +
+      (viewModel.takeaway
+        ? '<p class="aq-explanation-takeaway">' + escapeHtml(viewModel.takeaway) + '</p>'
+        : '') +
+      '</div>';
+  }
+
+  function renderStructuredExplanationForFeedback(data, selectedKey, recoveryOfferVisible, options) {
+    options = options || {};
+    var context = buildNextStepContext(data, selectedKey, !!recoveryOfferVisible);
+    if (options.forceExplanationAlreadyUsed) {
+      context.explanationAlreadyUsed = true;
+    }
+    var viewModel = buildStructuredExplanationViewModel(data, selectedKey, context, options);
+    renderStructuredExplanation(viewModel);
+  }
+
   function buildNextStepRationale(stateKey, primaryActionId, context) {
     if (stateKey === 'session_wrap') {
       return pickCopyVariant('session_wrap_rationale', [
@@ -1364,14 +1554,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'A quick related question can help check the idea after a possibly rushed attempt.'
           ], context)
           : primaryActionId === 'advance'
-          ? pickCopyVariant('thoughtful_careless_advance_rationale', [
-            'This may be more about a rushed or distracted moment, so a careful second look is the cleanest next step.',
-            'This may have been a reading slip, so continuing carefully is the cleanest next step.'
-          ], context)
-          : pickCopyVariant('thoughtful_careless_explain_rationale', [
-            'This may be more about a distracted or rushed moment, so a quick clarification should help before you continue.',
-            'A brief clarification can help separate the concept from a possible rushed read.'
-          ], context);
+            ? pickCopyVariant('thoughtful_careless_advance_rationale', [
+              'This may be more about a rushed or distracted moment, so a careful second look is the cleanest next step.',
+              'This may have been a reading slip, so continuing carefully is the cleanest next step.'
+            ], context)
+            : pickCopyVariant('thoughtful_careless_explain_rationale', [
+              'This may be more about a distracted or rushed moment, so a quick clarification should help before you continue.',
+              'A brief clarification can help separate the concept from a possible rushed read.'
+            ], context);
       }
       if (!context.isCorrect && context.isLowConfidence) {
         return pickCopyVariant('low_confidence_wrong_rationale', [
@@ -1493,14 +1683,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
               'Use a guided example'
             ], context)
             : primaryActionId === 'one_more_like_this'
-            ? pickCopyVariant('explanation_used_reinforce_title', [
-              'Reinforce it once more',
-              'Confirm it once more'
-            ], context)
-            : pickCopyVariant('explanation_used_continue_title', [
-              'Ready to move on',
-              'Continue from here'
-            ], context),
+              ? pickCopyVariant('explanation_used_reinforce_title', [
+                'Reinforce it once more',
+                'Confirm it once more'
+              ], context)
+              : pickCopyVariant('explanation_used_continue_title', [
+                'Ready to move on',
+                'Continue from here'
+              ], context),
           text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
@@ -1514,19 +1704,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'Try a guided reset'
           ], context)
           : primaryActionId === 'one_more_like_this'
-          ? pickCopyVariant('thoughtful_reinforce_title', [
-            'Stay with the concept once more',
-            'Check the idea once more'
-          ], context)
-          : primaryActionId === 'advance'
-          ? pickCopyVariant('thoughtful_advance_title', [
-            'Keep moving carefully',
-            'Continue with care'
-          ], context)
-          : pickCopyVariant(context.isLowConfidence ? 'low_confidence_wrong_title' : 'thoughtful_explain_title', [
-            context.isLowConfidence ? 'Clarify the concept first' : 'See a clearer explanation',
-            context.isLowConfidence ? 'Stabilize the idea first' : 'Reframe the idea first'
-          ], context),
+            ? pickCopyVariant('thoughtful_reinforce_title', [
+              'Stay with the concept once more',
+              'Check the idea once more'
+            ], context)
+            : primaryActionId === 'advance'
+              ? pickCopyVariant('thoughtful_advance_title', [
+                'Keep moving carefully',
+                'Continue with care'
+              ], context)
+              : pickCopyVariant(context.isLowConfidence ? 'low_confidence_wrong_title' : 'thoughtful_explain_title', [
+                context.isLowConfidence ? 'Clarify the concept first' : 'See a clearer explanation',
+                context.isLowConfidence ? 'Stabilize the idea first' : 'Reframe the idea first'
+              ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1542,14 +1732,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
               'Confirm it once more'
             ], context)
             : primaryActionId === 'start_recovery'
-            ? pickCopyVariant('explanation_used_support_title', [
-              'Try a guided step',
-              'Use a guided example'
-            ], context)
-            : pickCopyVariant('explanation_used_continue_title', [
-              'Continue with the next step',
-              'Move on from here'
-            ], context),
+              ? pickCopyVariant('explanation_used_support_title', [
+                'Try a guided step',
+                'Use a guided example'
+              ], context)
+              : pickCopyVariant('explanation_used_continue_title', [
+                'Continue with the next step',
+                'Move on from here'
+              ], context),
           text: buildNextStepRationale(stateKey, primaryActionId, context)
         };
       }
@@ -1563,19 +1753,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'Check the concept again'
           ], context)
           : primaryActionId === 'advance'
-          ? pickCopyVariant('correction_advance_title', [
-            'Keep going, then check the pattern',
-            'Continue and watch the pattern'
-          ], context)
-          : context.isMediumOrHighConfidence
-          ? pickCopyVariant('confident_mistake_title', [
-            'Correct the idea first',
-            'Clarify the misconception'
-          ], context)
-          : pickCopyVariant('neutral_wrong_title', [
-            'Clarify the idea first',
-            'Review the concept first'
-          ], context),
+            ? pickCopyVariant('correction_advance_title', [
+              'Keep going, then check the pattern',
+              'Continue and watch the pattern'
+            ], context)
+            : context.isMediumOrHighConfidence
+              ? pickCopyVariant('confident_mistake_title', [
+                'Correct the idea first',
+                'Clarify the misconception'
+              ], context)
+              : pickCopyVariant('neutral_wrong_title', [
+                'Clarify the idea first',
+                'Review the concept first'
+              ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
     }
@@ -1607,15 +1797,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           'Return to the quiz'
         ], context)
         : context.explanationAlreadyUsed
-        ? pickCopyVariant('explanation_used_continue_title', [
-          'Ready to move on',
-          'Continue from here'
-        ], context)
-        : pickCopyVariant('strong_momentum_title', [
-          'Keep the momentum going',
-          'Move to the next question',
-          'Continue the run'
-        ], context),
+          ? pickCopyVariant('explanation_used_continue_title', [
+            'Ready to move on',
+            'Continue from here'
+          ], context)
+          : pickCopyVariant('strong_momentum_title', [
+            'Keep the momentum going',
+            'Move to the next question',
+            'Continue the run'
+          ], context),
       text: context.recoveryStepResult
         ? 'Use this guided step as a reset, then return to the main quiz and keep building from there.'
         : buildNextStepRationale(stateKey, primaryActionId, context)
@@ -1789,19 +1979,18 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         : (data.is_correct ? 'Correct!' : 'Incorrect');
     }
 
-    var expEl = $('#aq-explanation');
-    if (expEl) {
-      expEl.textContent = options.preserveExplanationText != null
-        ? options.preserveExplanationText
-        : (data.explanation || '');
-    }
-    hideExplainStatus();
-
     var recoveryOfferVisible = !!(
       data.recovery_step_available &&
       !data.session_complete &&
       !data.recovery_step_result
     );
+
+    renderStructuredExplanationForFeedback(data, selectedKey, recoveryOfferVisible, {
+      textOverride: options.preserveExplanationText != null
+        ? options.preserveExplanationText
+        : null
+    });
+    hideExplainStatus();
 
     var bridgeWrap = $('#aq-narrative-bridge');
     var bridgeText = $('#aq-narrative-text');
@@ -1850,8 +2039,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       nextBtn.onclick = data.recovery_step_result
         ? function () { loadNextQuestion(); }
         : data.session_complete
-        ? function () { showResults(data); }
-        : function () { loadNextQuestion(); };
+          ? function () { showResults(data); }
+          : function () { loadNextQuestion(); };
     }
 
     var nextStepContext = buildNextStepContext(data, selectedKey, recoveryOfferVisible);
@@ -1877,12 +2066,40 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (fb) fb.classList.remove('aq-hidden');
   }
 
-  function setExplanationText(text) {
+  function setExplanationText(text, options) {
+    options = options || {};
     var expEl = $('#aq-explanation');
     if (!expEl) return;
+
+    var feedbackData = state.lastFeedbackContext && state.lastFeedbackContext.data;
+    var selectedKey = state.lastFeedbackContext && state.lastFeedbackContext.selectedKey;
+    var recoveryOfferVisible = !!(
+      feedbackData &&
+      feedbackData.recovery_step_available &&
+      !feedbackData.session_complete &&
+      !feedbackData.recovery_step_result
+    );
+
+    if (feedbackData) {
+      renderStructuredExplanationForFeedback(feedbackData, selectedKey, recoveryOfferVisible, {
+        textOverride: text,
+        modeOverride: options.modeOverride || null,
+        forceExplanationAlreadyUsed: options.modeOverride === 'simple'
+      });
+      return;
+    }
+
     expEl.classList.remove('aq-explanation-loading');
-    expEl.textContent = text || '';
+    expEl.setAttribute('data-explanation-body', text || '');
+    expEl.innerHTML =
+      '<div class="aq-explanation-card aq-explanation-correct">' +
+      '<span class="aq-explanation-label">Explanation</span>' +
+      '<h4 class="aq-explanation-title">Explanation</h4>' +
+      '<p class="aq-explanation-body">' + escapeHtml(normalizeExplanationText(text)) + '</p>' +
+      '</div>';
   }
+
+
 
   function setExplanationLoading(message) {
     var expEl = $('#aq-explanation');
@@ -2898,43 +3115,43 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function scheduleDashboardMicroInteractions(options, attempt) {
-  options = options || {};
-  attempt = attempt || 0;
+    options = options || {};
+    attempt = attempt || 0;
 
-  if (shouldReduceMotion()) return;
+    if (shouldReduceMotion()) return;
 
-  var dashboardScreen = $('#aq-screen-dashboard');
+    var dashboardScreen = $('#aq-screen-dashboard');
 
-  if (!dashboardScreen || dashboardScreen.classList.contains('aq-hidden')) {
-    if (attempt < 1) {
-      window.setTimeout(function () {
-        scheduleDashboardMicroInteractions(options, attempt + 1);
-      }, 90);
+    if (!dashboardScreen || dashboardScreen.classList.contains('aq-hidden')) {
+      if (attempt < 1) {
+        window.setTimeout(function () {
+          scheduleDashboardMicroInteractions(options, attempt + 1);
+        }, 90);
+      }
+      return;
     }
-    return;
-  }
 
-  var scheduleFrame = window.requestAnimationFrame || function (callback) {
-    return window.setTimeout(callback, 16);
-  };
+    var scheduleFrame = window.requestAnimationFrame || function (callback) {
+      return window.setTimeout(callback, 16);
+    };
 
-  scheduleFrame(function () {
     scheduleFrame(function () {
-      window.setTimeout(function () {
-        var visibleDashboard = $('#aq-screen-dashboard');
-        if (!visibleDashboard || visibleDashboard.classList.contains('aq-hidden')) return;
+      scheduleFrame(function () {
+        window.setTimeout(function () {
+          var visibleDashboard = $('#aq-screen-dashboard');
+          if (!visibleDashboard || visibleDashboard.classList.contains('aq-hidden')) return;
 
-        if (options.cards) {
-          triggerDashboardTopCardEntrance();
-        }
+          if (options.cards) {
+            triggerDashboardTopCardEntrance();
+          }
 
-        if (options.mastery) {
-          triggerDashboardMasteryBars();
-        }
-      }, 90);
+          if (options.mastery) {
+            triggerDashboardMasteryBars();
+          }
+        }, 90);
+      });
     });
-  });
-}
+  }
 
   function applyDashboardSectionOrder(perspective) {
     var panel = $('#aq-screen-dashboard .aq-panel');
@@ -3192,7 +3409,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (state.explainSimplerPending) return;
 
     var expEl = $('#aq-explanation');
-    var originalExplanation = expEl ? expEl.textContent : '';
+    var originalExplanation = getExplanationTextFromEl();
 
     state.explainSimplerPending = true;
     hideExplainStatus();
@@ -3207,11 +3424,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         setExplainSimplerButtonState(btn, false);
 
         if (data && data.success) {
-          setExplanationText(data.simpler_explanation);
-          hideExplainStatus();
           if (state.lastFeedbackContext) {
             state.lastFeedbackContext.explanationAlreadyUsed = true;
           }
+          setExplanationText(data.simpler_explanation, { modeOverride: 'simple' });
+          hideExplainStatus();
           refreshNextStepPanelFromCurrentFeedback();
           return;
         }
@@ -3611,10 +3828,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     showScreen('dashboard');
-scheduleDashboardMicroInteractions({
-  mastery: true,
-  cards: false
-});
+    scheduleDashboardMicroInteractions({
+      mastery: true,
+      cards: false
+    });
   }
 
   function renderMistakeJournal(groups) {
@@ -4389,12 +4606,12 @@ scheduleDashboardMicroInteractions({
       renderDashboardAdaptiveHeader(model);
       applyDashboardSectionOrder(model.perspective);
       if (!dashboardTopCardsAnimated) {
-  scheduleDashboardMicroInteractions({
-    cards: true,
-    mastery: false
-  });
-  dashboardTopCardsAnimated = true;
-}
+        scheduleDashboardMicroInteractions({
+          cards: true,
+          mastery: false
+        });
+        dashboardTopCardsAnimated = true;
+      }
     }
 
     renderSessionHistory([], {

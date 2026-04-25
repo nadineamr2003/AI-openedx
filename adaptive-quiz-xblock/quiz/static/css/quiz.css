@@ -1019,10 +1019,114 @@
 }
 
 .aq-explanation {
-  font-size: .88rem;
-  color: #374151;
-  line-height: 1.65;
   margin: 0 0 16px;
+}
+
+.aq-explanation-card {
+  padding: 13px 15px;
+  border: 1px solid rgba(15, 23, 42, .08);
+  border-left: 3px solid var(--aq-primary);
+  border-radius: 13px;
+  background: linear-gradient(135deg, rgba(248, 250, 252, .94), rgba(255, 255, 255, .98));
+}
+
+.aq-explanation-label {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-bottom: 7px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(43, 78, 222, .09);
+  color: var(--aq-primary);
+  font-size: .68rem;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.aq-explanation-title {
+  margin: 0 0 6px;
+  font-size: .94rem;
+  line-height: 1.35;
+  font-weight: 800;
+  color: var(--aq-text);
+}
+
+.aq-explanation-body {
+  margin: 0;
+  font-size: .86rem;
+  line-height: 1.65;
+  color: #374151;
+}
+
+.aq-explanation-takeaway {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .72);
+  border: 1px solid rgba(15, 23, 42, .06);
+  font-size: .78rem;
+  line-height: 1.5;
+  color: var(--aq-text-muted);
+  font-weight: 600;
+}
+
+.aq-explanation-correct {
+  border-left-color: var(--aq-primary);
+}
+
+.aq-explanation-confidence {
+  border-left-color: var(--aq-success);
+  background: linear-gradient(135deg, rgba(236, 253, 245, .74), rgba(255, 255, 255, .98));
+}
+
+.aq-explanation-confidence .aq-explanation-label {
+  background: rgba(5, 150, 105, .11);
+  color: var(--aq-success);
+}
+
+.aq-explanation-correction {
+  border-left-color: #334155;
+}
+
+.aq-explanation-correction .aq-explanation-label {
+  background: rgba(51, 65, 85, .10);
+  color: #334155;
+}
+
+.aq-explanation-clarify {
+  border-left-color: var(--aq-amber);
+  background: linear-gradient(135deg, rgba(255, 251, 235, .78), rgba(255, 255, 255, .98));
+}
+
+.aq-explanation-clarify .aq-explanation-label {
+  background: rgba(245, 158, 11, .13);
+  color: #B45309;
+}
+
+.aq-explanation-careful {
+  border-left-color: #64748B;
+}
+
+.aq-explanation-careful .aq-explanation-label {
+  background: rgba(100, 116, 139, .11);
+  color: #475569;
+}
+
+.aq-explanation-recovery {
+  border-left-color: #0F766E;
+  background: linear-gradient(135deg, rgba(240, 253, 250, .78), rgba(255, 255, 255, .98));
+}
+
+.aq-explanation-recovery .aq-explanation-label {
+  background: rgba(15, 118, 110, .11);
+  color: #0F766E;
+}
+
+.aq-explanation-simple {
+  border-left-color: var(--aq-primary);
+  background: linear-gradient(135deg, rgba(238, 242, 255, .82), rgba(255, 255, 255, .98));
 }
 
 .aq-explanation-loading {
