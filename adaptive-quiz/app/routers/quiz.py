@@ -32,6 +32,7 @@ from app.services.ai_engine import (
     generate_question,
     generate_question_with_metadata,
     generate_simple_explanation,
+    generate_step_by_step_explanation,
     generate_worked_example_support,
     extract_content_metadata,
     derive_concept_focus,
@@ -4031,6 +4032,7 @@ async def submit(req: SubmitRequest):
     )
 
     support_features.append("explain_simpler")
+    support_features.append("explain_step_by_step")
     support_features.append("one_more_like_this")
 
     if not is_correct:
@@ -5132,7 +5134,7 @@ async def support_recovery_submit(req: RecoverySubmitRequest):
         "is_correct": is_correct,
         "correct_answer": req.correct_answer,
         "explanation": req.explanation or "",
-        "support_features": ["explain_simpler"],
+        "support_features": ["explain_simpler", "explain_step_by_step"],
         "session_complete": False,
         "recovery_step_result": True,
         "recovery_result_message": (
@@ -5163,6 +5165,49 @@ async def support_explain(data: dict):
     except Exception:
         return {
             "simpler_explanation": explanation + "\n\n(Tip: Try breaking this concept into smaller steps.)"
+        }
+
+@router.post("/support/explain_step_by_step")
+async def support_explain_step_by_step(data: dict):
+    """Generate a compact structured step-by-step explanation on demand."""
+    topic = data.get("topic", "this topic")
+    question = data.get("question", "")
+    explanation = data.get("explanation", "")
+    options = data.get("options") or {}
+    selected_answer = data.get("selected_answer", "")
+    correct_answer = data.get("correct_answer", "")
+
+    try:
+        step_by_step = await generate_step_by_step_explanation(
+            topic=topic,
+            question=question,
+            explanation=explanation,
+            options=options,
+            selected_answer=selected_answer,
+            correct_answer=correct_answer,
+        )
+        return {"step_by_step_explanation": step_by_step}
+
+    except Exception:
+        return {
+            "step_by_step_explanation": {
+                "intro": "Here is the reasoning path:",
+                "steps": [
+                    {
+                        "title": "Identify the concept",
+                        "text": "Start with the concept named in the question."
+                    },
+                    {
+                        "title": "Use the explanation",
+                        "text": explanation or "Compare the question cue with the answer options."
+                    },
+                    {
+                        "title": "Pick the best fit",
+                        "text": "Choose the option that matches the explanation most directly."
+                    },
+                ],
+                "takeaway": "Focus on the cue that connects the question to the correct concept."
+            }
         }
 
 @router.post("/support/similar")

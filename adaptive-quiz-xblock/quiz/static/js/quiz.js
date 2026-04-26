@@ -11,6 +11,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlSubmit = runtime.handlerUrl(element, 'submit_answer');
   var urlSubmitRecovery = runtime.handlerUrl(element, 'submit_recovery_answer');
   var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
+  var urlStepByStep = runtime.handlerUrl(element, 'explain_step_by_step');
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
   var urlStartRecovery = runtime.handlerUrl(element, 'start_recovery_step');
   var urlPracticeRecovery = runtime.handlerUrl(element, 'practice_recovery_step');
@@ -49,6 +50,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     historyPage: 0,
     historyPageSize: 3,
     explainSimplerPending: false,
+    stepByStepExplanationPending: false,
     recoveryStartPending: false,
     lastFeedbackContext: null,
     lastAnswerMeta: null,
@@ -1160,6 +1162,29 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return JSON.parse(JSON.stringify(data));
   }
 
+  function createExplanationFormatsState() {
+    return {
+      simplerUsed: false,
+      stepByStepUsed: false,
+      simplerText: null,
+      stepByStepData: null
+    };
+  }
+
+  function getExplanationFormatsState() {
+    if (!state.lastFeedbackContext) return createExplanationFormatsState();
+    if (!state.lastFeedbackContext.explanationFormats) {
+      state.lastFeedbackContext.explanationFormats = createExplanationFormatsState();
+    }
+    return state.lastFeedbackContext.explanationFormats;
+  }
+
+  function syncExplanationUsedUmbrella() {
+    if (!state.lastFeedbackContext) return;
+    var formats = getExplanationFormatsState();
+    state.lastFeedbackContext.explanationAlreadyUsed = !!(formats.simplerUsed || formats.stepByStepUsed);
+  }
+
   function normalizeSubmittedConfidence(confidence) {
     var normalized = confidence == null ? '' : String(confidence).trim().toLowerCase();
     if (normalized !== 'low' && normalized !== 'medium' && normalized !== 'high') normalized = '';
@@ -1536,7 +1561,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var longResponseTime = typeof timeSpentMs === 'number' && timeSpentMs >= LONG_TIME_CONTEXT_THRESHOLD_MS;
     var veryShortResponseTime = typeof timeSpentMs === 'number' && timeSpentMs <= SHORT_READING_SLIP_THRESHOLD_MS;
     var thoughtfulStruggleSignal = timeContext === 'thinking' || (longResponseTime && timeContext !== 'distracted');
-    var explanationAlreadyUsed = !!(state.lastFeedbackContext && state.lastFeedbackContext.explanationAlreadyUsed);
+    var explanationFormats = getExplanationFormatsState();
+    var simplerExplanationUsed = !!explanationFormats.simplerUsed;
+    var stepByStepExplanationUsed = !!explanationFormats.stepByStepUsed;
+    var explanationAlreadyUsed = !!(
+      (state.lastFeedbackContext && state.lastFeedbackContext.explanationAlreadyUsed) ||
+      simplerExplanationUsed ||
+      stepByStepExplanationUsed
+    );
     var recoveryReason = data.recovery_reason || '';
     var normalizedRecoveryReason = String(recoveryReason).trim().toLowerCase();
     var recoveryReasonIndicatesRepeatedDifficulty = normalizedRecoveryReason.indexOf('repeat') !== -1 ||
@@ -1549,7 +1581,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       sessionComplete: !!data.session_complete,
       recoveryStepAvailable: !!recoveryOfferVisible,
       recoveryStepResult: !!data.recovery_step_result,
-      hasExplain: supportFeatures.indexOf('explain_simpler') !== -1 && !explanationAlreadyUsed,
+      hasExplain: supportFeatures.indexOf('explain_simpler') !== -1 && !simplerExplanationUsed,
+      hasStepByStep: supportFeatures.indexOf('explain_step_by_step') !== -1 && !stepByStepExplanationUsed,
       hasSimilar: !recoveryOfferVisible &&
         !data.recovery_step_result &&
         !data.session_complete &&
@@ -1564,6 +1597,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       veryShortResponseTime: veryShortResponseTime,
       thoughtfulStruggleSignal: thoughtfulStruggleSignal,
       explanationAlreadyUsed: explanationAlreadyUsed,
+      simplerExplanationUsed: simplerExplanationUsed,
+      stepByStepExplanationUsed: stepByStepExplanationUsed,
       topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || 'General',
       difficulty: state.currentQuestion && state.currentQuestion.difficulty,
       questionTextLength: state.currentQuestion && state.currentQuestion.question
@@ -1604,8 +1639,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (context.hasExplain) {
       actions.explain_simpler = {
         id: 'explain_simpler',
-        label: 'Explain with an analogy',
+        label: 'Simpler explanation',
         handler: function (btn) { handleExplainSimpler(btn); }
+      };
+    }
+
+    if (context.hasStepByStep) {
+      actions.step_by_step_explanation = {
+        id: 'step_by_step_explanation',
+        label: 'Work through step by step',
+        handler: function (btn) { handleStepByStepExplanation(btn); }
       };
     }
 
@@ -1737,7 +1780,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       !!context.isThoughtfulStruggle ||
       context.errorType === 'thoughtful_struggle';
 
-    if (options.modeOverride === 'simple' || context.explanationAlreadyUsed) {
+    if (options.modeOverride === 'simple' || context.simplerExplanationUsed) {
       mode = 'explanation_already_used';
       label = 'Clearer explanation';
       title = pickCopyVariant('structured_simple_title', [
@@ -1870,6 +1913,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     expEl.classList.remove('aq-explanation-loading');
     expEl.setAttribute('data-explanation-body', viewModel.body || '');
+    expEl.setAttribute('data-explanation-mode', viewModel.mode || 'standard');
 
     expEl.innerHTML =
       '<div class="aq-explanation-card ' + escapeHtml(viewModel.toneClass || 'aq-explanation-correct') + '">' +
@@ -1878,6 +1922,87 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       '<p class="aq-explanation-body">' + escapeHtml(viewModel.body || '') + '</p>' +
       (viewModel.takeaway
         ? '<p class="aq-explanation-takeaway">' + escapeHtml(viewModel.takeaway) + '</p>'
+        : '') +
+      '</div>';
+  }
+
+  function normalizeStepByStepExplanation(data) {
+    if (typeof data === 'string') {
+      return {
+        intro: 'Here is the reasoning path:',
+        steps: [
+          { title: 'Work through the idea', text: data }
+        ],
+        takeaway: ''
+      };
+    }
+
+    data = data || {};
+    var rawSteps = Array.isArray(data.steps) ? data.steps : [];
+    var steps = rawSteps.map(function (step, index) {
+      if (typeof step === 'string') {
+        return {
+          title: 'Step ' + (index + 1),
+          text: step
+        };
+      }
+      return {
+        title: String((step && step.title) || ('Step ' + (index + 1))).trim(),
+        text: String((step && step.text) || '').trim()
+      };
+    }).filter(function (step) {
+      return step.title && step.text;
+    }).slice(0, 5);
+
+    if (!steps.length) {
+      steps.push({
+        title: 'Review the reasoning',
+        text: 'Compare the question cue with the standard explanation, then match it to the correct option.'
+      });
+    }
+
+    return {
+      intro: String(data.intro || 'Here is the reasoning path:').trim(),
+      steps: steps,
+      takeaway: String(data.takeaway || '').trim()
+    };
+  }
+
+  function renderStepByStepExplanation(stepData) {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return;
+
+    var normalized = normalizeStepByStepExplanation(stepData);
+    var body = normalized.steps.map(function (step) {
+      return step.title + ': ' + step.text;
+    }).join(' ');
+    expEl.classList.remove('aq-explanation-loading');
+    expEl.setAttribute('data-explanation-body', body || normalized.intro || '');
+    expEl.setAttribute('data-explanation-mode', 'step_by_step_explanation');
+
+    var stepsHtml = normalized.steps.map(function (step) {
+      return '<li class="aq-explanation-step">' +
+        '<span class="aq-explanation-step-title">' + escapeHtml(step.title) + '</span>' +
+        '<p class="aq-explanation-step-text">' + escapeHtml(step.text) + '</p>' +
+        '</li>';
+    }).join('');
+
+    expEl.innerHTML =
+      '<div class="aq-explanation-card aq-explanation-step-by-step">' +
+      '<span class="aq-explanation-label">Step-by-step explanation</span>' +
+      '<h4 class="aq-explanation-title">' + escapeHtml(pickCopyVariant('step_by_step_explanation_title', [
+        'Work through the reasoning',
+        'Step-by-step reasoning',
+        'How to get to the answer'
+      ], buildNextStepContext(
+        (state.lastFeedbackContext && state.lastFeedbackContext.data) || {},
+        state.lastFeedbackContext && state.lastFeedbackContext.selectedKey,
+        false
+      ))) + '</h4>' +
+      (normalized.intro ? '<p class="aq-explanation-body">' + escapeHtml(normalized.intro) + '</p>' : '') +
+      '<ol class="aq-explanation-step-list">' + stepsHtml + '</ol>' +
+      (normalized.takeaway
+        ? '<p class="aq-explanation-takeaway">' + escapeHtml(normalized.takeaway) + '</p>'
         : '') +
       '</div>';
   }
@@ -1898,6 +2023,31 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         'The best next step is to review your results and see what to practise next.',
         'You’ve finished this session, so reviewing the outcome will help guide the next step.',
         'Reviewing the session now will make the next practice choice clearer.'
+      ], context);
+    }
+
+    if (primaryActionId === 'step_by_step_explanation') {
+      if (!context.isCorrect && context.thoughtfulStruggleSignal) {
+        return pickCopyVariant('step_thinking_rationale', [
+          'You spent time reasoning through this, so a step-by-step walkthrough can show where the answer changes.',
+          'Because you stayed with the problem, walking through the reasoning can make the deciding step clearer.'
+        ], context);
+      }
+      if (!context.isCorrect && context.isMediumOrHighConfidence) {
+        return pickCopyVariant('step_confident_wrong_rationale', [
+          'You seemed fairly sure, so breaking down the reasoning can clarify the concept distinction.',
+          'A reasoning walkthrough can show why the correct option fits better than the tempting one.'
+        ], context);
+      }
+      if (context.isCorrect && context.isLowConfidence) {
+        return pickCopyVariant('step_low_confidence_correct_rationale', [
+          'You got it right while unsure; a step-by-step view can make the reasoning more stable.',
+          'The answer was correct, and walking through the path can help it feel more reliable.'
+        ], context);
+      }
+      return pickCopyVariant('step_general_rationale', [
+        'A step-by-step walkthrough can connect the question cue to the correct answer.',
+        'Breaking down the reasoning can make the answer path easier to reuse.'
       ], context);
     }
 
@@ -2085,6 +2235,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
               'Try a guided step',
               'Use a guided example'
             ], context)
+            : primaryActionId === 'step_by_step_explanation'
+              ? pickCopyVariant('thoughtful_step_title', [
+                'See the reasoning path',
+                'Work through step by step'
+              ], context)
             : primaryActionId === 'one_more_like_this'
               ? pickCopyVariant('explanation_used_reinforce_title', [
                 'Reinforce it once more',
@@ -2106,6 +2261,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'Reframe the concept first',
             'Try a guided reset'
           ], context)
+          : primaryActionId === 'step_by_step_explanation'
+            ? pickCopyVariant('thoughtful_step_title', [
+              'See the reasoning path',
+              'Work through step by step',
+              'Break down the answer'
+            ], context)
           : primaryActionId === 'one_more_like_this'
             ? pickCopyVariant('thoughtful_reinforce_title', [
               'Stay with the concept once more',
@@ -2134,6 +2295,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
               'Reinforce it once more',
               'Confirm it once more'
             ], context)
+            : primaryActionId === 'step_by_step_explanation'
+              ? pickCopyVariant('confident_step_title', [
+                'See the reasoning path',
+                'Break down the answer'
+              ], context)
             : primaryActionId === 'start_recovery'
               ? pickCopyVariant('explanation_used_support_title', [
                 'Try a guided step',
@@ -2155,6 +2321,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'Test the idea once more',
             'Check the concept again'
           ], context)
+          : primaryActionId === 'step_by_step_explanation'
+            ? pickCopyVariant('confident_step_title', [
+              'See the reasoning path',
+              'Break down the answer',
+              'Clarify the concept distinction'
+            ], context)
           : primaryActionId === 'advance'
             ? pickCopyVariant('correction_advance_title', [
               'Keep going, then check the pattern',
@@ -2183,6 +2355,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
             'Make it stick',
             'Confirm the concept'
           ], context)
+          : primaryActionId === 'step_by_step_explanation'
+            ? pickCopyVariant('uncertain_success_step_title', [
+              'Review the reasoning path',
+              'Make the answer feel solid',
+              'Work through why it fits'
+            ], context)
           : pickCopyVariant('uncertain_success_continue_title', [
             'Keep it steady',
             'Continue with confidence'
@@ -2219,20 +2397,36 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var stateKey = getNextStepState(context);
     var primaryPreferenceMap = {
       session_wrap: ['see_results'],
-      repeated_weakness: ['start_recovery', 'explain_simpler', 'advance'],
-      thoughtful_struggle: ['start_recovery', 'explain_simpler', 'one_more_like_this', 'advance'],
-      confident_mistake: ['explain_simpler', 'one_more_like_this', 'advance', 'start_recovery'],
-      uncertain_success: ['one_more_like_this', 'advance'],
+      repeated_weakness: ['start_recovery', 'step_by_step_explanation', 'explain_simpler', 'advance'],
+      thoughtful_struggle: context.isLowConfidence
+        ? ['explain_simpler', 'step_by_step_explanation', 'one_more_like_this', 'advance']
+        : ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'advance'],
+      confident_mistake: context.errorType === 'careless_reading'
+        ? ['explain_simpler', 'one_more_like_this', 'step_by_step_explanation', 'advance', 'start_recovery']
+        : context.isMediumOrHighConfidence
+          ? ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'advance', 'start_recovery']
+          : ['explain_simpler', 'step_by_step_explanation', 'one_more_like_this', 'advance', 'start_recovery'],
+      uncertain_success: ['one_more_like_this', 'step_by_step_explanation', 'advance'],
       strong_momentum: ['advance', 'one_more_like_this']
     };
-    var fallbackOrder = ['see_results', 'start_recovery', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+    if (context.explanationAlreadyUsed) {
+      primaryPreferenceMap.repeated_weakness = ['start_recovery', 'one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.thoughtful_struggle = ['one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.confident_mistake = ['one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.uncertain_success = ['one_more_like_this', 'advance', 'step_by_step_explanation'];
+    }
+    var fallbackOrder = ['see_results', 'start_recovery', 'step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
     var primary = firstAvailableAction(actions, primaryPreferenceMap[stateKey] || []) || firstAvailableAction(actions, fallbackOrder);
 
     if (!primary) return null;
 
     var secondaryPriority = primary.id === 'start_recovery'
-      ? ['explain_simpler', 'continue_normally', 'one_more_like_this', 'advance']
-      : ['explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+      ? ['step_by_step_explanation', 'explain_simpler', 'continue_normally', 'one_more_like_this', 'advance']
+      : primary.id === 'explain_simpler'
+        ? ['step_by_step_explanation', 'one_more_like_this', 'continue_normally', 'advance']
+        : primary.id === 'step_by_step_explanation'
+          ? ['explain_simpler', 'one_more_like_this', 'continue_normally', 'advance']
+          : ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
     var secondary = secondaryPriority
       .filter(function (id) { return id !== primary.id && !!actions[id]; })
       .slice(0, 2)
@@ -2356,7 +2550,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         answerMeta: submittedAnswerMeta,
         submittedConfidence: submittedAnswerMeta.confidence,
         confidenceProvided: submittedAnswerMeta.confidenceProvided,
-        explanationAlreadyUsed: false
+        explanationAlreadyUsed: false,
+        explanationFormats: createExplanationFormatsState()
       };
     }
 
@@ -2494,6 +2689,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     expEl.classList.remove('aq-explanation-loading');
     expEl.setAttribute('data-explanation-body', text || '');
+    expEl.setAttribute('data-explanation-mode', 'standard');
     expEl.innerHTML =
       '<div class="aq-explanation-card aq-explanation-correct">' +
       '<span class="aq-explanation-label">Explanation</span>' +
@@ -2658,10 +2854,20 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function setExplainSimplerButtonState(btn, isLoading) {
     if (!btn) return;
-    var defaultLabel = btn.getAttribute('data-default-label') || '💬 Simpler explanation';
+    var defaultLabel = btn.getAttribute('data-default-label') || 'Simpler explanation';
     btn.disabled = !!isLoading;
     btn.classList.toggle('aq-btn-support-disabled', !!isLoading);
-    btn.textContent = isLoading ? '💬 Simplifying…' : defaultLabel;
+    btn.textContent = isLoading ? 'Simplifying…' : defaultLabel;
+    setAdaptiveActionButtonState('explain_simpler', !!isLoading, isLoading ? 'Simplifying…' : null);
+  }
+
+  function setStepByStepButtonState(btn, isLoading) {
+    if (!btn) return;
+    var defaultLabel = btn.getAttribute('data-default-label') || 'Work through step by step';
+    btn.disabled = !!isLoading;
+    btn.classList.toggle('aq-btn-support-disabled', !!isLoading);
+    btn.textContent = isLoading ? 'Building steps…' : defaultLabel;
+    setAdaptiveActionButtonState('step_by_step_explanation', !!isLoading, isLoading ? 'Building steps…' : null);
   }
 
   function formatDateTime(isoString) {
@@ -3811,13 +4017,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function handleExplainSimpler(btn) {
     if (state.explainSimplerPending) return;
 
-    var expEl = $('#aq-explanation');
     var originalExplanation = getExplanationTextFromEl();
+    var formats = getExplanationFormatsState();
+
+    if (formats.simplerText) {
+      formats.simplerUsed = true;
+      syncExplanationUsedUmbrella();
+      setExplanationText(formats.simplerText, { modeOverride: 'simple' });
+      hideExplainStatus();
+      refreshNextStepPanelFromCurrentFeedback();
+      return;
+    }
 
     state.explainSimplerPending = true;
     hideExplainStatus();
     setExplainSimplerButtonState(btn, true);
-    setExplanationLoading('Simplifying explanation...');
+    setExplanationLoading('Simplifying explanation…');
 
     jQuery.ajax({
       type: 'POST', url: urlExplain,
@@ -3828,7 +4043,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
         if (data && data.success) {
           if (state.lastFeedbackContext) {
-            state.lastFeedbackContext.explanationAlreadyUsed = true;
+            var latestFormats = getExplanationFormatsState();
+            latestFormats.simplerUsed = true;
+            latestFormats.simplerText = data.simpler_explanation || '';
+            syncExplanationUsedUmbrella();
           }
           setExplanationText(data.simpler_explanation, { modeOverride: 'simple' });
           hideExplainStatus();
@@ -3843,6 +4061,62 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         setExplainSimplerButtonState(btn, false);
         setExplanationText(originalExplanation);
         showExplainStatus('Could not simplify the explanation just now.');
+      }
+    });
+  }
+
+  function handleStepByStepExplanation(btn) {
+    if (state.stepByStepExplanationPending) return;
+
+    var originalExplanation = getExplanationTextFromEl();
+    var formats = getExplanationFormatsState();
+
+    if (formats.stepByStepData) {
+      formats.stepByStepUsed = true;
+      syncExplanationUsedUmbrella();
+      renderStepByStepExplanation(formats.stepByStepData);
+      hideExplainStatus();
+      refreshNextStepPanelFromCurrentFeedback();
+      return;
+    }
+
+    state.stepByStepExplanationPending = true;
+    hideExplainStatus();
+    setStepByStepButtonState(btn, true);
+    setExplanationLoading('Building step-by-step explanation…');
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlStepByStep,
+      data: JSON.stringify({
+        selected_answer: state.lastFeedbackContext && state.lastFeedbackContext.selectedKey
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        state.stepByStepExplanationPending = false;
+        setStepByStepButtonState(btn, false);
+
+        if (data && data.success && data.step_by_step_explanation) {
+          if (state.lastFeedbackContext) {
+            var latestFormats = getExplanationFormatsState();
+            latestFormats.stepByStepUsed = true;
+            latestFormats.stepByStepData = data.step_by_step_explanation;
+            syncExplanationUsedUmbrella();
+          }
+          renderStepByStepExplanation(data.step_by_step_explanation);
+          hideExplainStatus();
+          refreshNextStepPanelFromCurrentFeedback();
+          return;
+        }
+
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not build the step-by-step explanation just now.');
+      },
+      error: function () {
+        state.stepByStepExplanationPending = false;
+        setStepByStepButtonState(btn, false);
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not build the step-by-step explanation just now.');
       }
     });
   }

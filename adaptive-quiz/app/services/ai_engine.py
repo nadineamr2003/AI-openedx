@@ -5062,6 +5062,188 @@ Respond with ONLY the simpler explanation text, no preamble.
 
     raise ValueError("All providers/models failed to produce a simpler explanation.\n" + "\n".join(all_failures))
 
+def _fallback_step_by_step_from_text(text: str) -> dict:
+    body = str(text or "").strip()
+    if not body:
+        body = "Use the question cue, compare it with the options, and choose the answer that matches the explanation."
+
+    return {
+        "intro": "Here is the reasoning path:",
+        "steps": [
+            {
+                "title": "Identify the concept",
+                "text": "Start by naming the idea the question is testing."
+            },
+            {
+                "title": "Use the key cue",
+                "text": body
+            },
+            {
+                "title": "Choose the best fit",
+                "text": "The correct option is the one that matches that cue most directly."
+            },
+        ],
+        "takeaway": "Focus on the cue that connects the question to the explanation."
+    }
+
+
+def _normalize_step_by_step_result(result: dict, fallback_text: str) -> dict:
+    intro = str(result.get("intro") or "Here is the reasoning path:").strip()
+    takeaway = str(result.get("takeaway") or "").strip()
+    raw_steps = result.get("steps") or []
+    steps = []
+
+    if isinstance(raw_steps, list):
+        for index, step in enumerate(raw_steps):
+            if isinstance(step, dict):
+                title = str(step.get("title") or ("Step " + str(index + 1))).strip()
+                text = str(step.get("text") or "").strip()
+            else:
+                title = "Step " + str(index + 1)
+                text = str(step or "").strip()
+
+            if title and text:
+                steps.append({
+                    "title": title[:90],
+                    "text": text
+                })
+
+    steps = steps[:5]
+    if len(steps) < 3:
+        return _fallback_step_by_step_from_text(fallback_text)
+
+    return {
+        "intro": intro,
+        "steps": steps,
+        "takeaway": takeaway or "The key is matching the question cue to the correct concept."
+    }
+
+
+async def generate_step_by_step_explanation(
+    topic: str,
+    question: str,
+    explanation: str,
+    *,
+    options: dict[str, str] | None = None,
+    selected_answer: str = "",
+    correct_answer: str = "",
+) -> dict:
+    selected_key = str(selected_answer or "").strip()
+    correct_key = str(correct_answer or "").strip()
+    options = options or {}
+    selected_text = str(options.get(selected_key) or "").strip()
+    correct_text = str(options.get(correct_key) or "").strip()
+    serialized_options = json.dumps(options, ensure_ascii=False)
+
+    prompt = f"""
+Create a compact step-by-step explanation for a learner.
+
+Topic: {topic}
+Question: {question}
+Options: {serialized_options}
+Selected answer key: {selected_key}
+Selected answer text: {selected_text}
+Correct answer key: {correct_key}
+Correct answer text: {correct_text}
+Standard explanation: {explanation}
+
+Return ONLY valid JSON with this shape:
+{{
+  "intro": "Here is the reasoning path:",
+  "steps": [
+    {{"title": "Identify the concept", "text": "..."}},
+    {{"title": "Notice the key cue", "text": "..."}},
+    {{"title": "Choose the best option", "text": "..."}}
+  ],
+  "takeaway": "..."
+}}
+
+Rules:
+- Use 3 to 5 short steps.
+- Focus on why the correct answer fits.
+- If the selected answer is wrong, compare it with the correct answer without being harsh.
+- Keep everything grounded in the question, options, and standard explanation.
+- Do not introduce new facts beyond the provided context.
+- Keep the language student-friendly and concise.
+"""
+
+    all_failures = []
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for provider_name in PROVIDER_ORDER:
+            provider_cfg = PROVIDERS.get(provider_name)
+            if not provider_cfg:
+                logger.info(f"[LLM] Skipping provider={provider_name} for step_by_step_explanation")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss for step_by_step_explanation",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
+                continue
+
+            if not provider_cfg["api_key"]:
+                logger.info(f"[LLM] Skipping provider={provider_name} for step_by_step_explanation")
+                continue
+
+            models = PROVIDER_MODELS.get(provider_name, [])
+            for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss for step_by_step_explanation",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
+                try:
+                    raw = await _call_model(client, provider_name, model, prompt)
+                    raw = _strip_markdown_fences(raw).strip()
+
+                    try:
+                        result = json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "[LLM] JSON parse fallback step_by_step_explanation provider=%s model=%s",
+                            provider_name,
+                            model,
+                        )
+                        return _fallback_step_by_step_from_text(raw)
+
+                    normalized = _normalize_step_by_step_result(result, explanation)
+                    logger.info(
+                        "[LLM] SUCCESS step_by_step_explanation provider=%s model=%s",
+                        provider_name,
+                        model,
+                    )
+                    return normalized
+
+                except ProviderHTTPError as e:
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
+                    msg = f"[LLM] HTTP failure step_by_step_explanation provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+
+                    if e.status_code == 400:
+                        raise ValueError(
+                            f"Bad request sent to {e.provider}/{e.model}. Details: {e.message}"
+                        )
+
+                    continue
+
+                except Exception as e:
+                    msg = f"[LLM] Unexpected step_by_step_explanation error provider={provider_name} model={model} error={_safe_exception_text(e)}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+    raise ValueError("All providers/models failed to produce a step-by-step explanation.\n" + "\n".join(all_failures))
+
 
 async def generate_worked_example_support(
     *,

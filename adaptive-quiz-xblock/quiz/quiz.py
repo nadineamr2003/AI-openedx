@@ -1983,6 +1983,26 @@ window.aqsToggleActive = function(contentId, nextActive) {{
         return {"success": False, "error": "Could not reach backend."}
 
     @XBlock.json_handler
+    def explain_step_by_step(self, data, suffix=""):
+        """Proxy to /api/quiz/support/explain_step_by_step for a structured walkthrough."""
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        resp = self._api("/api/quiz/support/explain_step_by_step", payload={
+            "topic": question.get("topic", self.current_topic),
+            "question": question.get("question", ""),
+            "options": question.get("options", {}),
+            "selected_answer": data.get("selected_answer", ""),
+            "correct_answer": question.get("correct_answer", ""),
+            "difficulty": question.get("difficulty", self.current_difficulty),
+            "explanation": question.get("explanation", ""),
+        })
+        if resp:
+            return {
+                "success": True,
+                "step_by_step_explanation": resp.get("step_by_step_explanation", {})
+            }
+        return {"success": False, "error": "Could not reach backend."}
+
+    @XBlock.json_handler
     def similar_question(self, data, suffix=""):
         """Proxy to /api/quiz/support/similar for one-more-like-this."""
         resp = self._api(
@@ -2136,7 +2156,7 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             "is_correct": resp.get("is_correct", False),
             "correct_answer": question.get("correct_answer", ""),
             "explanation": question.get("explanation", ""),
-            "support_features": resp.get("support_features", ["explain_simpler"]),
+            "support_features": resp.get("support_features", ["explain_simpler", "explain_step_by_step"]),
             "questions_seen": self.questions_seen,
             "session_score": self.session_score,
             "max_questions": self.session_target_questions or self.max_questions,

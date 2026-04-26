@@ -1249,6 +1249,66 @@
   background: linear-gradient(135deg, rgba(238, 242, 255, .82), rgba(255, 255, 255, .98));
 }
 
+.aq-explanation-step-by-step {
+  border-left-color: #475569;
+  background: linear-gradient(135deg, rgba(248, 250, 252, .94), rgba(255, 255, 255, .98));
+}
+
+.aq-explanation-step-by-step .aq-explanation-label {
+  background: rgba(71, 85, 105, .11);
+  color: #475569;
+}
+
+.aq-explanation-step-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: aq-explanation-step;
+}
+
+.aq-explanation-step {
+  position: relative;
+  counter-increment: aq-explanation-step;
+  padding: 9px 0 9px 34px;
+  border-top: 1px solid rgba(15, 23, 42, .07);
+}
+
+.aq-explanation-step:first-child {
+  border-top: 0;
+}
+
+.aq-explanation-step::before {
+  content: counter(aq-explanation-step);
+  position: absolute;
+  left: 0;
+  top: 10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(71, 85, 105, .10);
+  color: #475569;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .72rem;
+  font-weight: 800;
+}
+
+.aq-explanation-step-title {
+  display: block;
+  margin: 0 0 3px;
+  color: var(--aq-text);
+  font-size: .82rem;
+  font-weight: 800;
+}
+
+.aq-explanation-step-text {
+  margin: 0;
+  color: #374151;
+  font-size: .82rem;
+  line-height: 1.55;
+}
+
 .aq-explanation-loading {
   display: inline-flex;
   align-items: center;
