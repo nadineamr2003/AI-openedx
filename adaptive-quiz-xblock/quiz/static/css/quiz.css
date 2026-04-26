@@ -3553,6 +3553,7 @@ body.aq-modal-open {
 .aq-mode-icon {
   font-size: 1.5rem;
   margin-bottom: 10px;
+  text-align: center;
 }
 
 .aq-mode-title {
@@ -3560,6 +3561,7 @@ body.aq-modal-open {
   font-weight: 800;
   margin: 0 0 4px;
   color: var(--aq-text);
+  text-align: center;
 }
 
 .aq-mode-sub {
@@ -3653,6 +3655,11 @@ body.aq-modal-open {
 }
 
 .aq-mode-guidance[data-selected-mode="challenge"] {
+  border-color: rgba(217, 119, 6, .24);
+  border-left-color: var(--aq-amber);
+}
+
+.aq-mode-guidance[data-selected-mode="diagnostic"] {
   border-color: rgba(217, 119, 6, .24);
   border-left-color: var(--aq-amber);
 }

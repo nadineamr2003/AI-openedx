@@ -224,7 +224,8 @@
       </div>
 
       <div class="aq-mode-grid" id="aq-mode-grid">
-        <button type="button" class="aq-mode-card aq-mode-card-selected" data-mode="normal_practice">
+        <button type="button" class="aq-mode-card aq-mode-card-selected" data-mode="normal_practice"
+          aria-describedby="aq-mode-normal-tooltip">
           <span class="aq-mode-pill aq-mode-pill-primary" id="aq-mode-pill-normal">Balanced</span>
           <div class="aq-mode-icon">🎯</div>
           <h3 class="aq-mode-title">Normal Practice</h3>
@@ -238,9 +239,11 @@
             <span class="aq-mode-point">Weak check-ins</span>
             <span class="aq-mode-point">Spaced review</span>
           </div>
+          <span class="aq-mode-tooltip" id="aq-mode-normal-tooltip" role="tooltip"></span>
         </button>
 
-        <button type="button" class="aq-mode-card" data-mode="weakness_review">
+        <button type="button" class="aq-mode-card" data-mode="weakness_review"
+          aria-describedby="aq-mode-weakness-tooltip">
           <span class="aq-mode-pill aq-mode-pill-muted" id="aq-mode-pill-weakness">Repair</span>
           <div class="aq-mode-icon">🛠️</div>
           <h3 class="aq-mode-title">Weakness Review</h3>
@@ -254,6 +257,7 @@
             <span class="aq-mode-point">Recovery-focused</span>
             <span class="aq-mode-point">More guided</span>
           </div>
+          <span class="aq-mode-tooltip" id="aq-mode-weakness-tooltip" role="tooltip"></span>
         </button>
 
         <button type="button" class="aq-mode-card" data-mode="challenge" aria-describedby="aq-mode-challenge-lock">
@@ -271,7 +275,7 @@
             <span class="aq-mode-point">Stretch practice</span>
           </div>
           <span class="aq-mode-tooltip" id="aq-mode-challenge-lock" role="tooltip">
-            Challenge is checked for the selected lecture scope. Build stronger mastery in more of these topics first.
+            Challenge unlocks when this selected lecture scope has a stronger foundation.
           </span>
         </button>
       </div>

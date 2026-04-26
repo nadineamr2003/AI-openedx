@@ -69,6 +69,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     },
     modeTouchedByUser: false,
     modeFraming: null,
+    diagnosticRequired: {
+      required: false,
+      reason: '',
+      affectedCount: 0,
+      selectedCount: 0
+    },
     workedExamplePrimer: null
   };
 
@@ -419,6 +425,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function setSelectedMode(mode) {
+    if (state.diagnosticRequired && state.diagnosticRequired.required) {
+      return false;
+    }
     if (mode === 'challenge' && !state.challengeReadiness.ready) {
       return false;
     }
@@ -429,6 +438,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
     renderModeGuidance();
     return true;
+  }
+
+  function clearSelectedMode() {
+    selectedMode = '';
+    element.querySelectorAll('.aq-mode-card').forEach(function (card) {
+      card.classList.remove('aq-mode-card-selected');
+    });
   }
 
   function getSelectedContentScopeTopics() {
@@ -449,6 +465,79 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       });
     });
     return topics;
+  }
+
+  function getSelectedContentItems() {
+    var selectedLookup = {};
+    selectedContentIds.forEach(function (id) {
+      selectedLookup[String(id)] = true;
+    });
+
+    return allContentItems.filter(function (item) {
+      return selectedLookup[String(item.id)];
+    });
+  }
+
+  function detectDiagnosticRequiredForSelectedScope(progressData) {
+    var selectedItems = getSelectedContentItems();
+    var selectedCount = selectedItems.length;
+    if (!progressData) {
+      return {
+        required: false,
+        reason: '',
+        affectedCount: 0,
+        selectedCount: selectedCount
+      };
+    }
+
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    var hasProgress = !!(progressData && progressData.has_progress);
+    var affectedCount = 0;
+
+    selectedItems.forEach(function (item) {
+      var topics = normalizeTopicList(item && item.topics);
+      if (!topics.length) return;
+
+      var explicitValue = item.diagnostic_needed ||
+        item.diagnostic_required ||
+        item.assessment_required ||
+        item.requires_diagnostic ||
+        item.needs_diagnostic;
+      if (explicitValue === true || explicitValue === 'true' || explicitValue === 'required') {
+        affectedCount += 1;
+        return;
+      }
+      if (
+        item.diagnostic_status === 'required' ||
+        item.diagnostic_status === 'pending' ||
+        item.diagnostic_status === 'needed' ||
+        item.diagnostic_status === 'stale'
+      ) {
+        affectedCount += 1;
+        return;
+      }
+
+      // Frontend-only V1 inference. The backend session/start endpoint remains
+      // authoritative; exposing version-aware diagnostic status in get_content
+      // would be preferable for a later pass.
+      var hasAnyTopicMastery = topics.some(function (topic) {
+        return Object.prototype.hasOwnProperty.call(mastery, topic);
+      });
+      if (!hasAnyTopicMastery) {
+        affectedCount += 1;
+      }
+    });
+
+    if (!affectedCount && progressData && hasProgress === false && getSelectedContentScopeTopics().length) {
+      affectedCount = selectedCount || 1;
+    }
+
+    return {
+      required: affectedCount > 0,
+      reason: affectedCount > 0 ? 'missing_scope_mastery' : '',
+      affectedCount: affectedCount,
+      selectedCount: selectedCount
+    };
   }
 
   function modeDisplayName(mode) {
@@ -506,6 +595,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function buildModeFraming(progressData, challengeReadiness) {
     var readiness = challengeReadiness || state.challengeReadiness || {};
     var signals = getScopedModeSignals(progressData);
+    var diagnosticRequired = detectDiagnosticRequiredForSelectedScope(progressData);
     var topicCount = signals.topics.length;
     var weakTopicCount = signals.weakTopics.length;
     var strongTopicCount = signals.strongTopics.length;
@@ -529,7 +619,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var recommendedMode = 'normal_practice';
     var reasonCode = 'balanced';
 
-    if (repairSignal) {
+    if (diagnosticRequired.required) {
+      recommendedMode = '';
+      reasonCode = 'diagnostic_required';
+    } else if (repairSignal) {
       recommendedMode = 'weakness_review';
       reasonCode = 'repair';
     } else if (challengeRecommended) {
@@ -540,23 +633,35 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       reasonCode = 'no_progress';
     }
 
-    var badges = {
-      normal_practice: recommendedMode === 'normal_practice' ? 'Recommended' : (repairSignal ? 'Safe choice' : 'Balanced'),
-      weakness_review: recommendedMode === 'weakness_review' ? 'Recommended' : (weakTopicCount > 0 ? 'Optional support' : 'Repair'),
-      challenge: recommendedMode === 'challenge' ? 'Recommended' : (challengeReady ? 'Available' : 'Locked')
-    };
+    var badges = diagnosticRequired.required
+      ? {
+        normal_practice: 'After assessment',
+        weakness_review: 'After assessment',
+        challenge: 'Locked'
+      }
+      : {
+        normal_practice: recommendedMode === 'normal_practice' ? 'Recommended' : (repairSignal ? 'Safe choice' : 'Balanced'),
+        weakness_review: recommendedMode === 'weakness_review' ? 'Recommended' : (weakTopicCount > 0 ? 'Optional support' : 'Repair'),
+        challenge: recommendedMode === 'challenge' ? 'Recommended' : (challengeReady ? 'Available' : 'Locked')
+      };
 
     var chips = [];
-    if (topicCount > 0) chips.push(formatModeSignalCount(topicCount, 'selected topic', 'selected topics'));
-    if (!hasProgress) {
+    if (diagnosticRequired.required) {
+      chips.push('Assessment required');
+      if (topicCount > 0) chips.push(formatModeSignalCount(topicCount, 'selected topic', 'selected topics'));
+      chips.push('Modes unlock after');
+    } else if (topicCount > 0) {
+      chips.push(formatModeSignalCount(topicCount, 'selected topic', 'selected topics'));
+    }
+    if (!diagnosticRequired.required && !hasProgress) {
       chips.push('No progress yet');
-    } else {
+    } else if (!diagnosticRequired.required) {
       if (weakTopicCount > 0) chips.push(weakTopicCount + ' need reinforcement');
       if (strongTopicCount > 0) chips.push(formatModeSignalCount(strongTopicCount, 'strong topic', 'strong topics'));
     }
-    if (challengeReady) {
+    if (!diagnosticRequired.required && challengeReady) {
       chips.push('Challenge ready');
-    } else if (!readiness.loading) {
+    } else if (!diagnosticRequired.required && !readiness.loading) {
       chips.push('Challenge locked');
     }
 
@@ -565,7 +670,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       reasonCode: reasonCode,
       badges: badges,
       chips: chips.slice(0, 3),
-      challengeTooltip: 'cChallenge is hecked for the selected lecture scope. Build stronger mastery in more of these topics first.',
+      diagnosticRequired: diagnosticRequired,
+      challengeTooltip: (readiness && readiness.message) || 'Challenge unlocks when this selected lecture scope has a stronger foundation.',
       topicCount: topicCount,
       weakTopicCount: weakTopicCount,
       strongTopicCount: strongTopicCount,
@@ -578,6 +684,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function getModeGuidanceCopy(mode, framing) {
     framing = framing || buildModeFraming(null, state.challengeReadiness);
+    if (framing.diagnosticRequired && framing.diagnosticRequired.required) {
+      return {
+        label: 'Quick assessment first',
+        title: 'Start with a short diagnostic for this selection',
+        text: (framing.diagnosticRequired.selectedCount === 1)
+          ? 'This selected lecture needs a quick calibration before practice modes unlock. You will answer a few setup questions first, then continue into personalised practice.'
+          : 'These selected lecture materials need a quick calibration before practice modes unlock. You will answer a few setup questions first, then continue into personalised practice.'
+      };
+    }
+
     var recommended = framing.recommendedMode || 'normal_practice';
     var isRecommended = mode === recommended;
     var recommendedName = modeDisplayName(recommended);
@@ -647,6 +763,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     });
   }
 
+  function updateModeStartButton(framing) {
+    var btn = $('#aq-btn-mode-start');
+    if (!btn) return;
+
+    var diagnosticRequired = !!(framing &&
+      framing.diagnosticRequired &&
+      framing.diagnosticRequired.required);
+    btn.textContent = diagnosticRequired ? 'Start Assessment →' : 'Start Quiz →';
+    btn.disabled = false;
+  }
+
   function renderModeGuidance() {
     var guidance = $('#aq-mode-guidance');
     if (!guidance) return;
@@ -658,7 +785,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var textEl = $('#aq-mode-guidance-text');
     var signalsEl = $('#aq-mode-guidance-signals');
 
-    guidance.setAttribute('data-selected-mode', selectedMode || 'normal_practice');
+    guidance.setAttribute(
+      'data-selected-mode',
+      (framing.diagnosticRequired && framing.diagnosticRequired.required) ? 'diagnostic' : (selectedMode || 'normal_practice')
+    );
     guidance.setAttribute('data-recommended-mode', framing.recommendedMode || 'normal_practice');
     if (labelEl) labelEl.textContent = copy.label;
     if (titleEl) titleEl.textContent = copy.title;
@@ -676,11 +806,23 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     renderModePills(framing);
+    updateModeStartButton(framing);
   }
 
   function applyModeFraming(progressData) {
     state.modeFraming = buildModeFraming(progressData, state.challengeReadiness);
-    if (!state.modeTouchedByUser) {
+    state.diagnosticRequired = state.modeFraming.diagnosticRequired || {
+      required: false,
+      reason: '',
+      affectedCount: 0,
+      selectedCount: 0
+    };
+    applyChallengeReadinessUi();
+
+    if (state.diagnosticRequired.required) {
+      clearSelectedMode();
+      renderModeGuidance();
+    } else if (!state.modeTouchedByUser) {
       setSelectedMode(state.modeFraming.recommendedMode || 'normal_practice');
     } else if (selectedMode === 'challenge' && !state.challengeReadiness.ready) {
       setSelectedMode(state.modeFraming.recommendedMode || 'normal_practice');
@@ -749,32 +891,49 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function applyChallengeReadinessUi() {
-    var card = element.querySelector('.aq-mode-card[data-mode="challenge"]');
-    var noteEl = $('#aq-mode-challenge-lock');
-    if (!card || !noteEl) return;
-
+    var framing = state.modeFraming || null;
+    var diagnosticRequired = !!(state.diagnosticRequired && state.diagnosticRequired.required);
     var readiness = state.challengeReadiness || {};
-    var disabled = readiness.loading || !readiness.ready;
+    var diagnosticTooltip = 'Practice modes unlock after the quick assessment for this selected lecture scope.';
+    var detailedChallengeTooltip = String(
+      (readiness && readiness.message) ||
+      (framing && framing.challengeTooltip) ||
+      'Challenge unlocks when this selected lecture scope has a stronger foundation.'
+    ).trim();
 
-    card.disabled = false;
-    card.setAttribute('aria-disabled', disabled ? 'true' : 'false');
-    card.classList.toggle('aq-mode-card-disabled', disabled);
+    [
+      { mode: 'normal_practice', tooltip: '#aq-mode-normal-tooltip' },
+      { mode: 'weakness_review', tooltip: '#aq-mode-weakness-tooltip' },
+      { mode: 'challenge', tooltip: '#aq-mode-challenge-lock' }
+    ].forEach(function (item) {
+      var card = element.querySelector('.aq-mode-card[data-mode="' + item.mode + '"]');
+      var tooltip = $(item.tooltip);
+      if (!card) return;
 
-    if (disabled && selectedMode === 'challenge') {
+      var disabled = diagnosticRequired ||
+        (item.mode === 'challenge' && (readiness.loading || !readiness.ready));
+      card.disabled = false;
+      card.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      card.classList.toggle('aq-mode-card-disabled', disabled);
+      card.classList.toggle('aq-mode-card-diagnostic', diagnosticRequired);
+
+      if (!tooltip) return;
+      if (diagnosticRequired) {
+        tooltip.textContent = diagnosticTooltip;
+      } else if (item.mode === 'challenge') {
+        tooltip.textContent = readiness.loading
+          ? 'Checking challenge readiness for the selected lecture scope.'
+          : (readiness.ready ? '' : detailedChallengeTooltip);
+      } else {
+        tooltip.textContent = '';
+      }
+    });
+
+    if (diagnosticRequired && selectedMode) {
+      clearSelectedMode();
+    } else if (!readiness.ready && selectedMode === 'challenge') {
       setSelectedMode('normal_practice');
     }
-
-    if (readiness.loading) {
-      noteEl.textContent = 'Checking challenge readiness for the selected lecture scope.';
-      return;
-    }
-
-    if (!readiness.ready) {
-      noteEl.textContent = 'Challenge is checked for the selected lecture scope. Build stronger mastery in more of these topics first.';
-      return;
-    }
-
-    noteEl.textContent = 'Challenge is available for this selected scope.';
   }
 
   function refreshChallengeReadiness() {
@@ -5511,6 +5670,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
       state.modeTouchedByUser = false;
       state.modeFraming = null;
+      state.diagnosticRequired = {
+        required: false,
+        reason: '',
+        affectedCount: 0,
+        selectedCount: selectedContentIds.length
+      };
       showScreen('mode');
       refreshChallengeReadiness();
     };
@@ -5538,7 +5703,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         return;
       }
 
-      startSessionWithIds(selectedContentIds, selectedCourseId, selectedMode);
+      startSessionWithIds(selectedContentIds, selectedCourseId, selectedMode || 'normal_practice');
     };
   }
 
