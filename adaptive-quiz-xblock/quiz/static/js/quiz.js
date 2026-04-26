@@ -67,6 +67,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       avgMastery: null,
       scopedTopicCount: 0
     },
+    modeTouchedByUser: false,
+    modeFraming: null,
     workedExamplePrimer: null
   };
 
@@ -418,13 +420,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function setSelectedMode(mode) {
     if (mode === 'challenge' && !state.challengeReadiness.ready) {
-      return;
+      return false;
     }
     selectedMode = mode || 'normal_practice';
 
     element.querySelectorAll('.aq-mode-card').forEach(function (card) {
       card.classList.toggle('aq-mode-card-selected', card.getAttribute('data-mode') === selectedMode);
     });
+    renderModeGuidance();
+    return true;
   }
 
   function getSelectedContentScopeTopics() {
@@ -445,6 +449,244 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       });
     });
     return topics;
+  }
+
+  function modeDisplayName(mode) {
+    if (mode === 'weakness_review') return 'Weakness Review';
+    if (mode === 'challenge') return 'Challenge';
+    return 'Normal Practice';
+  }
+
+  function formatModeSignalCount(count, singular, plural) {
+    var n = Math.max(parseInt(count, 10) || 0, 0);
+    return n + ' ' + (n === 1 ? singular : plural);
+  }
+
+  function getScopedModeSignals(progressData) {
+    var topics = getSelectedContentScopeTopics();
+    var topicLookup = {};
+    topics.forEach(function (topic) {
+      topicLookup[topic] = true;
+    });
+
+    var mastery = (progressData && progressData.topic_mastery) || {};
+    var labels = (progressData && progressData.topic_labels) || {};
+    var weakLookup = {};
+    var strongLookup = {};
+
+    normalizeTopicList(progressData && progressData.weak_topics).forEach(function (topic) {
+      if (topicLookup[topic]) weakLookup[topic] = true;
+    });
+    normalizeTopicList(progressData && progressData.strong_topics).forEach(function (topic) {
+      if (topicLookup[topic]) strongLookup[topic] = true;
+    });
+
+    topics.forEach(function (topic) {
+      var score = Number(mastery[topic]);
+      var label = String(labels[topic] || '').toLowerCase();
+      if (label === 'struggling' || (isFinite(score) && score < 0.50)) {
+        weakLookup[topic] = true;
+      }
+      if (
+        label === 'mastered' ||
+        label === 'proficient' ||
+        (isFinite(score) && score >= 0.70)
+      ) {
+        strongLookup[topic] = true;
+      }
+    });
+
+    return {
+      topics: topics,
+      weakTopics: Object.keys(weakLookup),
+      strongTopics: Object.keys(strongLookup)
+    };
+  }
+
+  function buildModeFraming(progressData, challengeReadiness) {
+    var readiness = challengeReadiness || state.challengeReadiness || {};
+    var signals = getScopedModeSignals(progressData);
+    var topicCount = signals.topics.length;
+    var weakTopicCount = signals.weakTopics.length;
+    var strongTopicCount = signals.strongTopics.length;
+    var hasMastery = !!(progressData && progressData.topic_mastery && Object.keys(progressData.topic_mastery).length);
+    var overallAccuracy = typeof (progressData && progressData.overall_accuracy) === 'number'
+      ? progressData.overall_accuracy
+      : null;
+    var hasProgress = !!(progressData && (progressData.has_progress || hasMastery || typeof overallAccuracy === 'number'));
+    var repairByAccuracy = typeof overallAccuracy === 'number' && overallAccuracy < 0.60;
+    var repairSignal = hasProgress && (
+      weakTopicCount >= 2 ||
+      weakTopicCount > strongTopicCount ||
+      repairByAccuracy
+    );
+    var challengeReady = !!readiness.ready;
+    var challengeRecommended = hasProgress &&
+      challengeReady &&
+      strongTopicCount >= 2 &&
+      weakTopicCount < strongTopicCount &&
+      !repairSignal;
+    var recommendedMode = 'normal_practice';
+    var reasonCode = 'balanced';
+
+    if (repairSignal) {
+      recommendedMode = 'weakness_review';
+      reasonCode = 'repair';
+    } else if (challengeRecommended) {
+      recommendedMode = 'challenge';
+      reasonCode = 'stretch';
+    } else if (!hasProgress) {
+      recommendedMode = 'normal_practice';
+      reasonCode = 'no_progress';
+    }
+
+    var badges = {
+      normal_practice: recommendedMode === 'normal_practice' ? 'Recommended' : (repairSignal ? 'Safe choice' : 'Balanced'),
+      weakness_review: recommendedMode === 'weakness_review' ? 'Recommended' : (weakTopicCount > 0 ? 'Optional support' : 'Repair'),
+      challenge: recommendedMode === 'challenge' ? 'Recommended' : (challengeReady ? 'Available' : 'Locked')
+    };
+
+    var chips = [];
+    if (topicCount > 0) chips.push(formatModeSignalCount(topicCount, 'selected topic', 'selected topics'));
+    if (!hasProgress) {
+      chips.push('No progress yet');
+    } else {
+      if (weakTopicCount > 0) chips.push(weakTopicCount + ' need reinforcement');
+      if (strongTopicCount > 0) chips.push(formatModeSignalCount(strongTopicCount, 'strong topic', 'strong topics'));
+    }
+    if (challengeReady) {
+      chips.push('Challenge ready');
+    } else if (!readiness.loading) {
+      chips.push('Challenge locked');
+    }
+
+    return {
+      recommendedMode: recommendedMode,
+      reasonCode: reasonCode,
+      badges: badges,
+      chips: chips.slice(0, 3),
+      challengeTooltip: 'cChallenge is hecked for the selected lecture scope. Build stronger mastery in more of these topics first.',
+      topicCount: topicCount,
+      weakTopicCount: weakTopicCount,
+      strongTopicCount: strongTopicCount,
+      hasProgress: hasProgress,
+      overallAccuracy: overallAccuracy,
+      challengeReady: challengeReady,
+      repairSignal: repairSignal
+    };
+  }
+
+  function getModeGuidanceCopy(mode, framing) {
+    framing = framing || buildModeFraming(null, state.challengeReadiness);
+    var recommended = framing.recommendedMode || 'normal_practice';
+    var isRecommended = mode === recommended;
+    var recommendedName = modeDisplayName(recommended);
+
+    if (isRecommended) {
+      if (mode === 'weakness_review') {
+        return {
+          label: 'Recommended mode',
+          title: 'Weakness Review fits this selection best',
+          text: 'This selected content includes topics that still need reinforcement, so focused review is a strong starting point.'
+        };
+      }
+      if (mode === 'challenge') {
+        return {
+          label: 'Recommended mode',
+          title: 'Challenge is available for this scope',
+          text: 'This selected scope shows enough mastery for harder practice, so Challenge is available if you want a stretch.'
+        };
+      }
+      return {
+        label: 'Recommended mode',
+        title: 'Normal Practice is the best balanced choice',
+        text: framing.reasonCode === 'no_progress'
+          ? 'There is not enough progress data for this selected content yet, so balanced adaptive practice is a good starting point.'
+          : 'This selected content has a mix of topics, so balanced adaptive practice is a good starting point.'
+      };
+    }
+
+    if (mode === 'normal_practice') {
+      return {
+        label: 'Selected mode',
+        title: 'You can use Normal Practice, but ' + recommendedName + ' may fit better',
+        text: 'Normal Practice keeps the session balanced. The recommendation points to the mode with the clearest signal for this selected scope.'
+      };
+    }
+    if (mode === 'weakness_review') {
+      return {
+        label: 'Selected mode',
+        title: framing.weakTopicCount > 0
+          ? 'You can use Weakness Review for extra support'
+          : 'You can use Weakness Review, but this scope does not show major weak signals',
+        text: 'Focused review is available if you want a steadier pass through the material before returning to broader practice.'
+      };
+    }
+    return {
+      label: 'Selected mode',
+      title: 'Challenge is available, but ' + recommendedName + ' may be steadier for this scope',
+      text: 'Challenge can stretch stronger topics. The recommendation stays with the mode that best matches the current selected-scope signals.'
+    };
+  }
+
+  function renderModePills(framing) {
+    var badges = (framing && framing.badges) || {};
+    [
+      { mode: 'normal_practice', id: '#aq-mode-pill-normal' },
+      { mode: 'weakness_review', id: '#aq-mode-pill-weakness' },
+      { mode: 'challenge', id: '#aq-mode-pill-challenge' }
+    ].forEach(function (item) {
+      var pill = $(item.id);
+      if (!pill) return;
+      var label = badges[item.mode] || '';
+      pill.textContent = label || pill.textContent;
+      pill.classList.toggle('aq-mode-pill-primary', label === 'Recommended');
+      pill.classList.toggle('aq-mode-pill-muted', label !== 'Recommended' && item.mode !== 'challenge');
+      pill.classList.toggle('aq-mode-pill-accent', label !== 'Recommended' && item.mode === 'challenge' && label !== 'Locked');
+      pill.classList.toggle('aq-mode-pill-locked', label === 'Locked');
+    });
+  }
+
+  function renderModeGuidance() {
+    var guidance = $('#aq-mode-guidance');
+    if (!guidance) return;
+
+    var framing = state.modeFraming || buildModeFraming(null, state.challengeReadiness);
+    var copy = getModeGuidanceCopy(selectedMode, framing);
+    var labelEl = $('#aq-mode-guidance-label');
+    var titleEl = $('#aq-mode-guidance-title');
+    var textEl = $('#aq-mode-guidance-text');
+    var signalsEl = $('#aq-mode-guidance-signals');
+
+    guidance.setAttribute('data-selected-mode', selectedMode || 'normal_practice');
+    guidance.setAttribute('data-recommended-mode', framing.recommendedMode || 'normal_practice');
+    if (labelEl) labelEl.textContent = copy.label;
+    if (titleEl) titleEl.textContent = copy.title;
+    if (textEl) textEl.textContent = copy.text;
+
+    if (signalsEl) {
+      signalsEl.innerHTML = '';
+      (framing.chips || []).slice(0, 3).forEach(function (chip) {
+        var chipEl = document.createElement('span');
+        chipEl.className = 'aq-mode-guidance-chip';
+        chipEl.textContent = chip;
+        signalsEl.appendChild(chipEl);
+      });
+      signalsEl.classList.toggle('aq-hidden', !signalsEl.children.length);
+    }
+
+    renderModePills(framing);
+  }
+
+  function applyModeFraming(progressData) {
+    state.modeFraming = buildModeFraming(progressData, state.challengeReadiness);
+    if (!state.modeTouchedByUser) {
+      setSelectedMode(state.modeFraming.recommendedMode || 'normal_practice');
+    } else if (selectedMode === 'challenge' && !state.challengeReadiness.ready) {
+      setSelectedMode(state.modeFraming.recommendedMode || 'normal_practice');
+    } else {
+      renderModeGuidance();
+    }
   }
 
   function buildChallengeReadiness(progressData) {
@@ -514,7 +756,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var readiness = state.challengeReadiness || {};
     var disabled = readiness.loading || !readiness.ready;
 
-    card.disabled = disabled;
+    card.disabled = false;
     card.setAttribute('aria-disabled', disabled ? 'true' : 'false');
     card.classList.toggle('aq-mode-card-disabled', disabled);
 
@@ -523,19 +765,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     }
 
     if (readiness.loading) {
-      noteEl.textContent = 'Checking challenge readiness for this lecture...';
-      noteEl.classList.remove('aq-hidden');
+      noteEl.textContent = 'Checking challenge readiness for the selected lecture scope.';
       return;
     }
 
     if (!readiness.ready) {
-      noteEl.textContent = readiness.message || 'Unlocks when this lecture has a stronger foundation.';
-      noteEl.classList.remove('aq-hidden');
+      noteEl.textContent = 'Challenge is checked for the selected lecture scope. Build stronger mastery in more of these topics first.';
       return;
     }
 
-    noteEl.textContent = '';
-    noteEl.classList.add('aq-hidden');
+    noteEl.textContent = 'Challenge is available for this selected scope.';
   }
 
   function refreshChallengeReadiness() {
@@ -547,6 +786,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       scopedTopicCount: 0
     };
     applyChallengeReadinessUi();
+    applyModeFraming(null);
 
     jQuery.ajax({
       type: 'POST',
@@ -554,16 +794,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({ selected_course_id: selectedCourseId }),
       contentType: 'application/json',
       success: function (data) {
-        var readiness = buildChallengeReadiness((data && data.success) ? data : null);
+        var progressData = (data && data.success) ? data : null;
+        var readiness = buildChallengeReadiness(progressData);
         readiness.loading = false;
         state.challengeReadiness = readiness;
         applyChallengeReadinessUi();
+        applyModeFraming(progressData);
       },
       error: function () {
         var readiness = buildChallengeReadiness(null);
         readiness.loading = false;
         state.challengeReadiness = readiness;
         applyChallengeReadinessUi();
+        applyModeFraming(null);
       }
     });
   }
@@ -572,9 +815,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var cards = element.querySelectorAll('.aq-mode-card');
     cards.forEach(function (card) {
       card.addEventListener('click', function () {
-        if (card.disabled || card.classList.contains('aq-mode-card-disabled')) {
+        if (card.getAttribute('aria-disabled') === 'true' || card.classList.contains('aq-mode-card-disabled')) {
           return;
         }
+        state.modeTouchedByUser = true;
         setSelectedMode(card.getAttribute('data-mode'));
       });
     });
@@ -5265,6 +5509,8 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         return;
       }
 
+      state.modeTouchedByUser = false;
+      state.modeFraming = null;
       showScreen('mode');
       refreshChallengeReadiness();
     };
