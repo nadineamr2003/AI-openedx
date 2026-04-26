@@ -5062,29 +5062,107 @@ Respond with ONLY the simpler explanation text, no preamble.
 
     raise ValueError("All providers/models failed to produce a simpler explanation.\n" + "\n".join(all_failures))
 
-def _fallback_step_by_step_from_text(text: str) -> dict:
-    body = str(text or "").strip()
-    if not body:
-        body = "Use the question cue, compare it with the options, and choose the answer that matches the explanation."
+def _looks_like_jsonish_text(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    return (
+        value.startswith("{") or
+        value.startswith("[") or
+        '"steps"' in lowered or
+        '"title"' in lowered or
+        '"intro"' in lowered or
+        "```json" in lowered
+    )
+
+
+def _extract_json_object_text(raw: str) -> str | None:
+    value = _strip_markdown_fences(str(raw or "")).strip()
+    if not value:
+        return None
+    if value.startswith("{") and value.endswith("}"):
+        return value
+
+    start = value.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(value)):
+        char = value[index]
+        if escape:
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return value[start:index + 1]
+    return None
+
+
+def _fallback_step_by_step_from_context(
+    *,
+    question: str = "",
+    explanation: str = "",
+    selected_answer: str = "",
+    correct_answer: str = "",
+) -> dict:
+    question_text = str(question or "").strip()
+    explanation_text = str(explanation or "").strip()
+    selected_key = str(selected_answer or "").strip()
+    correct_key = str(correct_answer or "").strip()
+    comparison_text = (
+        "Compare your selected answer with the correct answer, then use the explanation to see which option matches the cue."
+    )
+    if selected_key and correct_key and selected_key != correct_key:
+        comparison_text = (
+            "Compare the selected option with the correct option. The correct answer follows the cue described in the explanation."
+        )
 
     return {
-        "intro": "Here is the reasoning path:",
+        "intro": "Here is a clearer way to reason through it:",
         "steps": [
             {
                 "title": "Identify the concept",
-                "text": "Start by naming the idea the question is testing."
+                "text": (
+                    "Start by naming the idea the question is testing."
+                    if not question_text
+                    else "Start with the concept or situation described in the question."
+                )
             },
             {
                 "title": "Use the key cue",
-                "text": body
+                "text": explanation_text or "Use the main clue in the question and compare it with the answer options."
             },
             {
-                "title": "Choose the best fit",
-                "text": "The correct option is the one that matches that cue most directly."
+                "title": "Choose the best option",
+                "text": comparison_text
             },
         ],
-        "takeaway": "Focus on the cue that connects the question to the explanation."
+        "takeaway": "The correct answer follows from the key concept explained above."
     }
+
+
+def _fallback_step_by_step_from_text(text: str, fallback_text: str = "") -> dict:
+    if _looks_like_jsonish_text(text):
+        return _fallback_step_by_step_from_context(explanation=fallback_text)
+    body = str(text or fallback_text or "").strip()
+    if not body:
+        return _fallback_step_by_step_from_context()
+    return _fallback_step_by_step_from_context(explanation=body)
 
 
 def _normalize_step_by_step_result(result: dict, fallback_text: str) -> dict:
@@ -5102,6 +5180,9 @@ def _normalize_step_by_step_result(result: dict, fallback_text: str) -> dict:
                 title = "Step " + str(index + 1)
                 text = str(step or "").strip()
 
+            if _looks_like_jsonish_text(title) or _looks_like_jsonish_text(text):
+                continue
+
             if title and text:
                 steps.append({
                     "title": title[:90],
@@ -5110,7 +5191,7 @@ def _normalize_step_by_step_result(result: dict, fallback_text: str) -> dict:
 
     steps = steps[:5]
     if len(steps) < 3:
-        return _fallback_step_by_step_from_text(fallback_text)
+        return _fallback_step_by_step_from_context(explanation=fallback_text)
 
     return {
         "intro": intro,
@@ -5205,15 +5286,21 @@ Rules:
                     raw = await _call_model(client, provider_name, model, prompt)
                     raw = _strip_markdown_fences(raw).strip()
 
+                    json_text = _extract_json_object_text(raw)
                     try:
-                        result = json.loads(raw)
+                        result = json.loads(json_text or raw)
                     except json.JSONDecodeError:
                         logger.warning(
                             "[LLM] JSON parse fallback step_by_step_explanation provider=%s model=%s",
                             provider_name,
                             model,
                         )
-                        return _fallback_step_by_step_from_text(raw)
+                        return _fallback_step_by_step_from_context(
+                            question=question,
+                            explanation=explanation,
+                            selected_answer=selected_answer,
+                            correct_answer=correct_answer,
+                        )
 
                     normalized = _normalize_step_by_step_result(result, explanation)
                     logger.info(

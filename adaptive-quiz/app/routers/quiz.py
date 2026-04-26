@@ -5191,22 +5191,22 @@ async def support_explain_step_by_step(data: dict):
     except Exception:
         return {
             "step_by_step_explanation": {
-                "intro": "Here is the reasoning path:",
+                "intro": "Here is a clearer way to reason through it:",
                 "steps": [
                     {
                         "title": "Identify the concept",
-                        "text": "Start with the concept named in the question."
+                        "text": "Start with the concept or situation described in the question."
                     },
                     {
-                        "title": "Use the explanation",
-                        "text": explanation or "Compare the question cue with the answer options."
+                        "title": "Use the key cue",
+                        "text": explanation or "Use the main clue in the question and compare it with the answer options."
                     },
                     {
-                        "title": "Pick the best fit",
-                        "text": "Choose the option that matches the explanation most directly."
+                        "title": "Choose the best option",
+                        "text": "The correct answer follows the cue described in the explanation."
                     },
                 ],
-                "takeaway": "Focus on the cue that connects the question to the correct concept."
+                "takeaway": "The correct answer follows from the key concept explained above."
             }
         }
 

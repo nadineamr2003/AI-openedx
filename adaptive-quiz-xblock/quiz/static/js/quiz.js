@@ -1627,14 +1627,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         label: 'See results',
         handler: function () { showResults(data); }
       };
-      return actions;
+    } else {
+      actions.advance = {
+        id: 'advance',
+        label: context.recoveryStepResult ? 'Continue quiz' : 'Next question',
+        handler: function () { loadNextQuestion(); }
+      };
     }
-
-    actions.advance = {
-      id: 'advance',
-      label: context.recoveryStepResult ? 'Continue quiz' : 'Next question',
-      handler: function () { loadNextQuestion(); }
-    };
 
     if (context.hasExplain) {
       actions.explain_simpler = {
@@ -1647,12 +1646,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (context.hasStepByStep) {
       actions.step_by_step_explanation = {
         id: 'step_by_step_explanation',
-        label: 'Work through step by step',
+        label: context.sessionComplete ? 'Step-by-step reasoning' : 'Work through step by step',
         handler: function (btn) { handleStepByStepExplanation(btn); }
       };
     }
 
-    if (context.hasSimilar) {
+    if (!context.sessionComplete && context.hasSimilar) {
       actions.one_more_like_this = {
         id: 'one_more_like_this',
         label: 'One more question like this',
@@ -1660,7 +1659,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       };
     }
 
-    if (context.recoveryStepAvailable) {
+    if (!context.sessionComplete && context.recoveryStepAvailable) {
       actions.start_recovery = {
         id: 'start_recovery',
         label: 'Try guided step',
@@ -1927,14 +1926,95 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function normalizeStepByStepExplanation(data) {
-    if (typeof data === 'string') {
+    function safeFallbackStepByStep(prose) {
+      var text = String(prose || '').trim();
+      var useProse = text && !looksLikeJsonishText(text);
       return {
-        intro: 'Here is the reasoning path:',
+        intro: 'Here is a clearer way to reason through it:',
         steps: [
-          { title: 'Work through the idea', text: data }
+          {
+            title: 'Identify the concept',
+            text: 'Start with the concept or situation described in the question.'
+          },
+          {
+            title: 'Use the key cue',
+            text: useProse
+              ? text
+              : 'Use the main clue in the question and compare it with the answer options.'
+          },
+          {
+            title: 'Choose the best option',
+            text: 'The correct answer follows the cue described in the explanation.'
+          }
         ],
-        takeaway: ''
+        takeaway: 'The correct answer follows from the key concept explained above.'
       };
+    }
+
+    function stripJsonFences(text) {
+      var value = String(text || '').trim();
+      if (value.indexOf('```') === 0) {
+        var parts = value.split('```');
+        if (parts.length >= 2) {
+          value = parts[1].replace(/^json\s*/i, '').trim();
+        }
+      }
+      return value;
+    }
+
+    function extractJsonObjectText(text) {
+      var value = stripJsonFences(text);
+      var start = value.indexOf('{');
+      if (start === -1) return '';
+      var depth = 0;
+      var inString = false;
+      var escape = false;
+      for (var index = start; index < value.length; index++) {
+        var char = value.charAt(index);
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === '\\') {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+        if (char === '{') depth += 1;
+        if (char === '}') {
+          depth -= 1;
+          if (depth === 0) return value.slice(start, index + 1);
+        }
+      }
+      return '';
+    }
+
+    function looksLikeJsonishText(text) {
+      var value = String(text || '').trim().toLowerCase();
+      return !!(
+        value.indexOf('{') === 0 ||
+        value.indexOf('[') === 0 ||
+        value.indexOf('"steps"') !== -1 ||
+        value.indexOf('"title"') !== -1 ||
+        value.indexOf('"intro"') !== -1 ||
+        value.indexOf('```json') !== -1
+      );
+    }
+
+    if (typeof data === 'string') {
+      var stripped = stripJsonFences(data);
+      var parsed = null;
+      try {
+        parsed = JSON.parse(extractJsonObjectText(stripped) || stripped);
+      } catch (err) {
+        parsed = null;
+      }
+      if (parsed) return normalizeStepByStepExplanation(parsed);
+      return safeFallbackStepByStep(stripped);
     }
 
     data = data || {};
@@ -1951,20 +2031,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         text: String((step && step.text) || '').trim()
       };
     }).filter(function (step) {
-      return step.title && step.text;
+      return step.title &&
+        step.text &&
+        !looksLikeJsonishText(step.title) &&
+        !looksLikeJsonishText(step.text);
     }).slice(0, 5);
 
     if (!steps.length) {
-      steps.push({
-        title: 'Review the reasoning',
-        text: 'Compare the question cue with the standard explanation, then match it to the correct option.'
-      });
+      return safeFallbackStepByStep('');
     }
+    if (steps.length < 3) return safeFallbackStepByStep('');
 
     return {
-      intro: String(data.intro || 'Here is the reasoning path:').trim(),
+      intro: String(data.intro || 'Here is a clearer way to reason through it:').trim(),
       steps: steps,
-      takeaway: String(data.takeaway || '').trim()
+      takeaway: String(data.takeaway || 'The correct answer follows from the key concept explained above.').trim()
     };
   }
 
@@ -2020,9 +2101,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function buildNextStepRationale(stateKey, primaryActionId, context) {
     if (stateKey === 'session_wrap') {
       return pickCopyVariant('session_wrap_rationale', [
-        'The best next step is to review your results and see what to practise next.',
-        'You’ve finished this session, so reviewing the outcome will help guide the next step.',
-        'Reviewing the session now will make the next practice choice clearer.'
+        'You’ve finished the session. You can review this final explanation first, or go straight to results.',
+        'The session is complete, so you can inspect this final answer or open your results.',
+        'You can review this last explanation once more, or go straight to the session results.'
       ], context);
     }
 
