@@ -31,6 +31,7 @@ from app.services.adaptation import (
 from app.services.ai_engine import (
     generate_question,
     generate_question_with_metadata,
+    generate_concept_bridge,
     generate_simple_explanation,
     generate_step_by_step_explanation,
     generate_worked_example_support,
@@ -5207,6 +5208,122 @@ async def support_explain_step_by_step(data: dict):
                     },
                 ],
                 "takeaway": "The correct answer follows from the key concept explained above."
+            }
+        }
+
+def _topic_index(topics: list, topic: str) -> int:
+    target = str(topic or "").strip().lower()
+    if not target:
+        return -1
+    for index, item in enumerate(topics or []):
+        if str(item or "").strip().lower() == target:
+            return index
+    return -1
+
+
+async def _resolve_concept_bridge_content(data: dict) -> dict:
+    course_id = str(data.get("course_id") or "").strip()
+    from_topic = str(data.get("from_topic") or "").strip()
+    to_topic = str(data.get("to_topic") or data.get("topic") or "").strip()
+    content_id = str(data.get("content_id") or "").strip()
+    selected_content_ids = [
+        str(item or "").strip()
+        for item in (data.get("selected_content_ids") or [])
+        if str(item or "").strip()
+    ]
+    candidate_ids = _dedupe_keep_order(([content_id] if content_id else []) + selected_content_ids)
+
+    if not course_id or not candidate_ids:
+        return {}
+
+    db = get_db()
+    for candidate_id in candidate_ids:
+        try:
+            oid = ObjectId(candidate_id)
+        except Exception:
+            continue
+
+        doc = await db.course_content.find_one({
+            "_id": oid,
+            "course_id": course_id,
+            "active": True,
+        })
+        if not doc:
+            continue
+
+        topics = doc.get("topics") or []
+        from_index = _topic_index(topics, from_topic)
+        to_index = _topic_index(topics, to_topic)
+        if from_index == -1 or to_index == -1 or from_index >= to_index:
+            continue
+
+        return {
+            "content_id": str(doc["_id"]),
+            "content_title": str(doc.get("title") or data.get("content_title") or ""),
+            "content_topics": topics,
+            "source_text": str(doc.get("source_text") or ""),
+        }
+
+    return {}
+
+
+@router.post("/support/concept_bridge")
+async def support_concept_bridge(data: dict):
+    """Generate a short on-demand bridge from an earlier selected-content topic to the current mistaken topic."""
+    from_topic = str(data.get("from_topic") or "").strip()
+    to_topic = str(data.get("to_topic") or data.get("topic") or "this topic").strip()
+    resolved_content = await _resolve_concept_bridge_content(data)
+    content_title = (
+        resolved_content.get("content_title")
+        or str(data.get("content_title") or "").strip()
+    )
+
+    try:
+        bridge = await generate_concept_bridge(
+            from_topic=from_topic,
+            to_topic=to_topic,
+            question=str(data.get("question_text") or data.get("question") or ""),
+            explanation=str(data.get("explanation") or ""),
+            options=data.get("options") or {},
+            selected_answer=str(data.get("selected_answer") or ""),
+            correct_answer=str(data.get("correct_answer") or ""),
+            source_text=str(resolved_content.get("source_text") or ""),
+            content_title=content_title,
+        )
+        bridge["from_topic"] = bridge.get("from_topic") or from_topic
+        bridge["to_topic"] = bridge.get("to_topic") or to_topic
+        bridge["content_title"] = bridge.get("content_title") or content_title
+        bridge["content_id"] = resolved_content.get("content_id") or str(data.get("content_id") or "")
+        return {"concept_bridge": bridge}
+
+    except Exception:
+        logger.exception(
+            "Concept bridge generation failed course=%s from_topic=%s to_topic=%s",
+            data.get("course_id"),
+            from_topic,
+            to_topic,
+        )
+        return {
+            "concept_bridge": {
+                "from_topic": from_topic,
+                "to_topic": to_topic,
+                "content_title": content_title,
+                "intro": "Here is a simple bridge between the earlier idea and this question.",
+                "steps": [
+                    {
+                        "title": "Earlier idea",
+                        "text": f"Start with the earlier idea: {from_topic or 'the related earlier concept'}."
+                    },
+                    {
+                        "title": "Connection",
+                        "text": f"A useful connection is how that earlier idea helps frame {to_topic or 'the current topic'}."
+                    },
+                    {
+                        "title": "Apply it here",
+                        "text": str(data.get("explanation") or "Use the explanation to match the question cue to the correct concept.")
+                    },
+                ],
+                "takeaway": "The current topic becomes easier when this earlier idea is connected to the question cue."
             }
         }
 

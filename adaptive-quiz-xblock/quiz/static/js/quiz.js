@@ -12,6 +12,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var urlSubmitRecovery = runtime.handlerUrl(element, 'submit_recovery_answer');
   var urlExplain = runtime.handlerUrl(element, 'explain_simpler');
   var urlStepByStep = runtime.handlerUrl(element, 'explain_step_by_step');
+  var urlConceptBridge = runtime.handlerUrl(element, 'concept_bridge');
   var urlSimilar = runtime.handlerUrl(element, 'similar_question');
   var urlStartRecovery = runtime.handlerUrl(element, 'start_recovery_step');
   var urlPracticeRecovery = runtime.handlerUrl(element, 'practice_recovery_step');
@@ -51,6 +52,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     historyPageSize: 3,
     explainSimplerPending: false,
     stepByStepExplanationPending: false,
+    conceptBridgePending: false,
     recoveryStartPending: false,
     lastFeedbackContext: null,
     lastAnswerMeta: null,
@@ -1286,8 +1288,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return {
       simplerUsed: false,
       stepByStepUsed: false,
+      conceptBridgeUsed: false,
       simplerText: null,
-      stepByStepData: null
+      stepByStepData: null,
+      conceptBridgeData: null,
+      conceptBridgeCandidate: null
     };
   }
 
@@ -1302,7 +1307,66 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function syncExplanationUsedUmbrella() {
     if (!state.lastFeedbackContext) return;
     var formats = getExplanationFormatsState();
-    state.lastFeedbackContext.explanationAlreadyUsed = !!(formats.simplerUsed || formats.stepByStepUsed);
+    state.lastFeedbackContext.explanationAlreadyUsed = !!(
+      formats.simplerUsed ||
+      formats.stepByStepUsed ||
+      formats.conceptBridgeUsed
+    );
+  }
+
+  function normalizeTopicName(topic) {
+    return String(topic || '').trim().toLowerCase();
+  }
+
+  function getContentItemId(item) {
+    return String((item && (item.id || item.content_id)) || '').trim();
+  }
+
+  function getConceptBridgeCandidate(questionOrContext) {
+    var currentTopic = String(
+      (questionOrContext && (questionOrContext.topic || questionOrContext.currentTopic)) ||
+      (state.currentQuestion && state.currentQuestion.topic) ||
+      ''
+    ).trim();
+    var normalizedCurrentTopic = normalizeTopicName(currentTopic);
+    if (!normalizedCurrentTopic || !selectedContentIds || !selectedContentIds.length) {
+      return { available: false };
+    }
+
+    var selectedLookup = {};
+    selectedContentIds.forEach(function (contentId) {
+      selectedLookup[String(contentId)] = true;
+    });
+
+    var best = null;
+    (allContentItems || []).forEach(function (item) {
+      var contentId = getContentItemId(item);
+      if (!contentId || !selectedLookup[contentId]) return;
+
+      var topics = Array.isArray(item.topics) ? item.topics : [];
+      var currentIndex = -1;
+      for (var index = 0; index < topics.length; index++) {
+        if (normalizeTopicName(topics[index]) === normalizedCurrentTopic) {
+          currentIndex = index;
+          break;
+        }
+      }
+      if (currentIndex <= 0) return;
+
+      var candidate = {
+        available: true,
+        fromTopic: String(topics[currentIndex - 1] || '').trim(),
+        toTopic: currentTopic,
+        contentId: contentId,
+        contentTitle: item.title || '',
+        contentTopics: topics.slice(),
+        topicIndex: currentIndex
+      };
+      if (!candidate.fromTopic) return;
+      if (!best || candidate.topicIndex < best.topicIndex) best = candidate;
+    });
+
+    return best || { available: false };
   }
 
   function normalizeSubmittedConfidence(confidence) {
@@ -1475,6 +1539,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     state.lastFeedbackContext = null;
     state.lastAnswerMeta = null;
     state.workedExamplePrimer = null;
+    state.conceptBridgePending = false;
 
     updateHeader(q, resp.questions_seen || state.questionsSeenSoFar);
     renderRecoveryIntro(q);
@@ -1685,10 +1750,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var explanationFormats = getExplanationFormatsState();
     var simplerExplanationUsed = !!explanationFormats.simplerUsed;
     var stepByStepExplanationUsed = !!explanationFormats.stepByStepUsed;
+    var conceptBridgeUsed = !!explanationFormats.conceptBridgeUsed;
+    var conceptBridgeCandidate = explanationFormats.conceptBridgeCandidate;
+    if (!conceptBridgeCandidate && !conceptBridgeUsed && data && !data.is_correct) {
+      conceptBridgeCandidate = getConceptBridgeCandidate({
+        topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || ''
+      });
+      if (conceptBridgeCandidate && conceptBridgeCandidate.available) {
+        explanationFormats.conceptBridgeCandidate = conceptBridgeCandidate;
+      }
+    }
     var explanationAlreadyUsed = !!(
       (state.lastFeedbackContext && state.lastFeedbackContext.explanationAlreadyUsed) ||
       simplerExplanationUsed ||
-      stepByStepExplanationUsed
+      stepByStepExplanationUsed ||
+      conceptBridgeUsed
     );
     var recoveryReason = data.recovery_reason || '';
     var normalizedRecoveryReason = String(recoveryReason).trim().toLowerCase();
@@ -1708,6 +1784,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         !data.recovery_step_result &&
         !data.session_complete &&
         supportFeatures.indexOf('one_more_like_this') !== -1,
+      hasConceptBridge: false,
+      conceptBridgeCandidate: conceptBridgeCandidate && conceptBridgeCandidate.available ? conceptBridgeCandidate : null,
+      conceptBridgeUsed: conceptBridgeUsed,
       confidenceProvided: confidenceProvided,
       confidence: confidence,
       isLowConfidence: confidenceProvided && confidence === 'low',
@@ -1720,6 +1799,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       explanationAlreadyUsed: explanationAlreadyUsed,
       simplerExplanationUsed: simplerExplanationUsed,
       stepByStepExplanationUsed: stepByStepExplanationUsed,
+      currentTopicMastery: typeof data.updated_mastery === 'number' ? data.updated_mastery : null,
       topic: (state.currentQuestion && state.currentQuestion.topic) || data.recovery_topic || 'General',
       difficulty: state.currentQuestion && state.currentQuestion.difficulty,
       questionTextLength: state.currentQuestion && state.currentQuestion.question
@@ -1736,6 +1816,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     };
 
     context.errorType = classifyErrorType(context);
+    context.hasConceptBridge = !!(
+      !context.isCorrect &&
+      !context.sessionComplete &&
+      !context.recoveryStepResult &&
+      !context.conceptBridgeUsed &&
+      context.conceptBridgeCandidate &&
+      (
+        context.recoveryStepAvailable ||
+        context.recoveryReasonIndicatesRepeatedDifficulty ||
+        context.thoughtfulStruggleSignal ||
+        context.isMediumOrHighConfidence ||
+        context.isLowConfidence ||
+        (typeof context.currentTopicMastery === 'number' && context.currentTopicMastery < 0.55)
+      )
+    );
     return context;
   }
 
@@ -1759,7 +1854,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     if (context.hasExplain) {
       actions.explain_simpler = {
         id: 'explain_simpler',
-        label: 'Simpler explanation',
+        label: 'Explain with an analogy',
         handler: function (btn) { handleExplainSimpler(btn); }
       };
     }
@@ -1769,6 +1864,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         id: 'step_by_step_explanation',
         label: context.sessionComplete ? 'Step-by-step reasoning' : 'Work through step by step',
         handler: function (btn) { handleStepByStepExplanation(btn); }
+      };
+    }
+
+    if (context.hasConceptBridge) {
+      actions.concept_bridge = {
+        id: 'concept_bridge',
+        label: 'Connect the concepts',
+        handler: function (btn) { handleConceptBridge(btn); }
       };
     }
 
@@ -1817,6 +1920,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       stateKey === 'repeated_weakness' ||
       stateKey === 'thoughtful_struggle' ||
       primaryActionId === 'start_recovery' ||
+      primaryActionId === 'concept_bridge' ||
       context.recoveryStepAvailable
     ) {
       return 'support';
@@ -2223,6 +2327,105 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     updateReadAloudButtonState();
   }
 
+  function normalizeConceptBridgeData(data) {
+    data = data || {};
+    var rawSteps = Array.isArray(data.steps) ? data.steps : [];
+    var steps = rawSteps.map(function (step, index) {
+      if (typeof step === 'string') {
+        return {
+          title: 'Step ' + (index + 1),
+          text: step
+        };
+      }
+      return {
+        title: String((step && step.title) || ('Step ' + (index + 1))).trim(),
+        text: String((step && step.text) || '').trim()
+      };
+    }).filter(function (step) {
+      return step.title && step.text;
+    }).slice(0, 3);
+
+    while (steps.length < 3) {
+      var fallbackSteps = [
+        {
+          title: 'Earlier idea',
+          text: 'Start with the earlier idea named in the selected lecture.'
+        },
+        {
+          title: 'Connection',
+          text: 'Connect that idea to the current topic before choosing an answer.'
+        },
+        {
+          title: 'Apply it here',
+          text: 'Use the question cue and the explanation to decide which option fits best.'
+        }
+      ];
+      steps.push(fallbackSteps[steps.length]);
+    }
+
+    return {
+      fromTopic: String(data.from_topic || data.fromTopic || '').trim(),
+      toTopic: String(data.to_topic || data.toTopic || '').trim(),
+      contentTitle: String(data.content_title || data.contentTitle || '').trim(),
+      intro: String(data.intro || 'This topic connects to an earlier idea from the selected lecture.').trim(),
+      steps: steps,
+      takeaway: String(data.takeaway || 'The current topic becomes easier when this earlier idea is connected to the question cue.').trim()
+    };
+  }
+
+  function renderConceptBridge(bridgeData) {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return;
+
+    var bridge = normalizeConceptBridgeData(bridgeData);
+    var flowText = [bridge.fromTopic, bridge.toTopic].filter(Boolean).join(' to ');
+    var bodyParts = [];
+    bodyParts.push(bridge.intro);
+    if (flowText) bodyParts.push('From ' + flowText + '.');
+    bridge.steps.forEach(function (step) {
+      bodyParts.push(step.title + ': ' + step.text);
+    });
+
+    stopExplanationReadAloud();
+    expEl.classList.remove('aq-explanation-loading');
+    expEl.setAttribute('data-explanation-body', bodyParts.join(' '));
+    expEl.setAttribute('data-explanation-mode', 'concept_bridge');
+    expEl.setAttribute('data-explanation-takeaway', bridge.takeaway || '');
+    expEl.removeAttribute('data-explanation-intro');
+
+    var stepsHtml = bridge.steps.map(function (step) {
+      return '<li class="aq-concept-bridge-step">' +
+        '<span class="aq-explanation-step-title">' + escapeHtml(step.title) + '</span>' +
+        '<p class="aq-explanation-step-text">' + escapeHtml(step.text) + '</p>' +
+        '</li>';
+    }).join('');
+
+    expEl.innerHTML =
+      '<div class="aq-explanation-card aq-concept-bridge">' +
+      '<div class="aq-explanation-card-header">' +
+      '<span class="aq-explanation-label">Concept bridge</span>' +
+      getReadAloudButtonMarkup() +
+      '</div>' +
+      '<h4 class="aq-explanation-title">' + escapeHtml(pickCopyVariant('concept_bridge_render_title', [
+        'Reconnect earlier idea',
+        'Bridge this concept',
+        'From earlier concept to current question'
+      ], { topic: bridge.toTopic || '' })) + '</h4>' +
+      (bridge.contentTitle
+        ? '<p class="aq-concept-bridge-source">' + escapeHtml(bridge.contentTitle) + '</p>'
+        : '') +
+      '<div class="aq-concept-bridge-flow">' +
+      '<span class="aq-concept-bridge-topic">' + escapeHtml(bridge.fromTopic || 'Earlier idea') + '</span>' +
+      '<span class="aq-concept-bridge-arrow" aria-hidden="true">→</span>' +
+      '<span class="aq-concept-bridge-topic">' + escapeHtml(bridge.toTopic || 'Current topic') + '</span>' +
+      '</div>' +
+      '<p class="aq-explanation-body">' + escapeHtml(bridge.intro) + '</p>' +
+      '<ol class="aq-concept-bridge-steps">' + stepsHtml + '</ol>' +
+      '<p class="aq-explanation-takeaway"><strong>Concept anchor:</strong> ' + escapeHtml(bridge.takeaway) + '</p>' +
+      '</div>';
+    updateReadAloudButtonState();
+  }
+
   function renderStructuredExplanationForFeedback(data, selectedKey, recoveryOfferVisible, options) {
     options = options || {};
     var context = buildNextStepContext(data, selectedKey, !!recoveryOfferVisible);
@@ -2239,6 +2442,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         'You’ve finished the session. You can review this final explanation first, or go straight to results.',
         'The session is complete, so you can inspect this final answer or open your results.',
         'You can review this last explanation once more, or go straight to the session results.'
+      ], context);
+    }
+
+    if (primaryActionId === 'concept_bridge') {
+      return pickCopyVariant('concept_bridge_rationale', [
+        'This mistake may connect to an earlier idea from the same selected lecture. A short bridge can help before another attempt.',
+        'A short bridge can reconnect the earlier concept before you try the next step.',
+        'This topic may be easier once the earlier idea is connected to the question cue.'
+      ], context);
+    }
+
+    if (primaryActionId === 'explain_simpler') {
+      return pickCopyVariant('simpler_primary_rationale', [
+        'Your answer suggests a lower-complexity explanation may help before continuing.',
+        'A simpler explanation can make the key idea easier to hold before you move on.',
+        'This is a recommended explanation format; you can use it first or continue when you are ready.'
       ], context);
     }
 
@@ -2423,6 +2642,45 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
           'See your session results',
           'Review your session',
           'Open your results'
+        ], context),
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
+      };
+    }
+
+    if (primaryActionId === 'concept_bridge') {
+      return {
+        tone: 'reflective',
+        badge: 'Recommended support path',
+        title: pickCopyVariant('concept_bridge_title', [
+          'Build a concept bridge',
+          'Reconnect this to an earlier idea',
+          'Bridge the concept'
+        ], context),
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
+      };
+    }
+
+    if (primaryActionId === 'explain_simpler') {
+      return {
+        tone: 'reflective',
+        badge: 'Recommended explanation format',
+        title: pickCopyVariant('simpler_primary_title', [
+          'Simplify the idea first',
+          'Try a simpler explanation',
+          'Lower the complexity first'
+        ], context),
+        text: buildNextStepRationale(stateKey, primaryActionId, context)
+      };
+    }
+
+    if (primaryActionId === 'step_by_step_explanation') {
+      return {
+        tone: 'reflective',
+        badge: 'Recommended explanation format',
+        title: pickCopyVariant('step_primary_title', [
+          'Work through the reasoning',
+          'Review the reasoning path',
+          'Step through the answer'
         ], context),
         text: buildNextStepRationale(stateKey, primaryActionId, context)
       };
@@ -2613,40 +2871,56 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var stateKey = getNextStepState(context);
     var primaryPreferenceMap = {
       session_wrap: ['see_results'],
-      repeated_weakness: ['start_recovery', 'step_by_step_explanation', 'explain_simpler', 'advance'],
+      repeated_weakness: ['start_recovery', 'concept_bridge', 'step_by_step_explanation', 'explain_simpler', 'advance'],
       thoughtful_struggle: context.isLowConfidence
-        ? ['explain_simpler', 'step_by_step_explanation', 'one_more_like_this', 'advance']
-        : ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'advance'],
+        ? ['explain_simpler', 'concept_bridge', 'step_by_step_explanation', 'one_more_like_this', 'advance']
+        : ['concept_bridge', 'step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'advance'],
       confident_mistake: context.errorType === 'careless_reading'
-        ? ['explain_simpler', 'one_more_like_this', 'step_by_step_explanation', 'advance', 'start_recovery']
+        ? ['explain_simpler', 'one_more_like_this', 'concept_bridge', 'step_by_step_explanation', 'advance', 'start_recovery']
         : context.isMediumOrHighConfidence
-          ? ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'advance', 'start_recovery']
-          : ['explain_simpler', 'step_by_step_explanation', 'one_more_like_this', 'advance', 'start_recovery'],
+          ? ['step_by_step_explanation', 'concept_bridge', 'explain_simpler', 'one_more_like_this', 'advance', 'start_recovery']
+          : ['explain_simpler', 'concept_bridge', 'step_by_step_explanation', 'one_more_like_this', 'advance', 'start_recovery'],
       uncertain_success: ['one_more_like_this', 'step_by_step_explanation', 'advance'],
       strong_momentum: ['advance', 'one_more_like_this']
     };
     if (context.explanationAlreadyUsed) {
-      primaryPreferenceMap.repeated_weakness = ['start_recovery', 'one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
-      primaryPreferenceMap.thoughtful_struggle = ['one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
-      primaryPreferenceMap.confident_mistake = ['one_more_like_this', 'advance', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.repeated_weakness = ['start_recovery', 'one_more_like_this', 'advance', 'concept_bridge', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.thoughtful_struggle = ['one_more_like_this', 'advance', 'concept_bridge', 'step_by_step_explanation', 'explain_simpler'];
+      primaryPreferenceMap.confident_mistake = ['one_more_like_this', 'advance', 'concept_bridge', 'step_by_step_explanation', 'explain_simpler'];
       primaryPreferenceMap.uncertain_success = ['one_more_like_this', 'advance', 'step_by_step_explanation'];
     }
-    var fallbackOrder = ['see_results', 'start_recovery', 'step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+    var fallbackOrder = ['see_results', 'start_recovery', 'concept_bridge', 'step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
     var primary = firstAvailableAction(actions, primaryPreferenceMap[stateKey] || []) || firstAvailableAction(actions, fallbackOrder);
 
     if (!primary) return null;
 
     var secondaryPriority = primary.id === 'start_recovery'
-      ? ['step_by_step_explanation', 'explain_simpler', 'continue_normally', 'one_more_like_this', 'advance']
+      ? ['concept_bridge', 'step_by_step_explanation', 'explain_simpler', 'continue_normally', 'one_more_like_this', 'advance']
       : primary.id === 'explain_simpler'
-        ? ['step_by_step_explanation', 'one_more_like_this', 'continue_normally', 'advance']
+        ? ['concept_bridge', 'step_by_step_explanation', 'one_more_like_this', 'continue_normally', 'advance']
         : primary.id === 'step_by_step_explanation'
-          ? ['explain_simpler', 'one_more_like_this', 'continue_normally', 'advance']
-          : ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
-    var secondary = secondaryPriority
-      .filter(function (id) { return id !== primary.id && !!actions[id]; })
-      .slice(0, 2)
-      .map(function (id) { return actions[id]; });
+          ? ['concept_bridge', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance']
+          : primary.id === 'concept_bridge'
+          ? ['step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance']
+            : ['concept_bridge', 'step_by_step_explanation', 'explain_simpler', 'one_more_like_this', 'continue_normally', 'advance'];
+    var forwardActionId = null;
+    if (!context.sessionComplete && primary.id !== 'advance' && primary.id !== 'continue_normally') {
+      if (context.recoveryStepAvailable && actions.continue_normally) {
+        forwardActionId = 'continue_normally';
+      } else if (actions.advance) {
+        forwardActionId = 'advance';
+      }
+    }
+    var secondaryIds = secondaryPriority.filter(function (id) {
+      return id !== primary.id && id !== forwardActionId && !!actions[id];
+    });
+    if (forwardActionId) {
+      secondaryIds = secondaryIds.slice(0, 2);
+      secondaryIds.push(forwardActionId);
+    } else {
+      secondaryIds = secondaryIds.slice(0, 3);
+    }
+    var secondary = secondaryIds.map(function (id) { return actions[id]; });
     var copy = getNextStepCopy(stateKey, primary.id, context);
     var visualTone = getNextStepVisualTone(stateKey, primary, context);
 
@@ -2697,7 +2971,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     primaryWrap.appendChild(primaryButton);
 
     secondaryWrap.innerHTML = '';
-    (nextStep.secondary || []).slice(0, 2).forEach(function (action) {
+    (nextStep.secondary || []).slice(0, 3).forEach(function (action) {
       secondaryWrap.appendChild(createNextStepActionButton(action, 'secondary'));
     });
 
@@ -3097,6 +3371,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     btn.classList.toggle('aq-btn-support-disabled', !!isLoading);
     btn.textContent = isLoading ? 'Building steps…' : defaultLabel;
     setAdaptiveActionButtonState('step_by_step_explanation', !!isLoading, isLoading ? 'Building steps…' : null);
+  }
+
+  function setConceptBridgeButtonState(btn, isLoading) {
+    if (!btn) return;
+    var defaultLabel = btn.getAttribute('data-default-label') || 'Build concept bridge';
+    btn.disabled = !!isLoading;
+    btn.classList.toggle('aq-btn-support-disabled', !!isLoading);
+    btn.textContent = isLoading ? 'Building bridge…' : defaultLabel;
+    setAdaptiveActionButtonState('concept_bridge', !!isLoading, isLoading ? 'Building bridge…' : null);
   }
 
   function formatDateTime(isoString) {
@@ -4346,6 +4629,77 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         setStepByStepButtonState(btn, false);
         setExplanationText(originalExplanation);
         showExplainStatus('Could not build the step-by-step explanation just now.');
+      }
+    });
+  }
+
+  function handleConceptBridge(btn) {
+    if (state.conceptBridgePending) return;
+    if (!state.lastFeedbackContext || !state.lastFeedbackContext.data) return;
+
+    var originalExplanation = getExplanationTextFromEl();
+    var formats = getExplanationFormatsState();
+    var candidate = formats.conceptBridgeCandidate || getConceptBridgeCandidate({
+      topic: state.currentQuestion && state.currentQuestion.topic
+    });
+
+    if (!candidate || !candidate.available) {
+      showExplainStatus('Could not find an earlier concept to bridge from this question.');
+      refreshNextStepPanelFromCurrentFeedback();
+      return;
+    }
+
+    formats.conceptBridgeCandidate = candidate;
+
+    if (formats.conceptBridgeData) {
+      formats.conceptBridgeUsed = true;
+      syncExplanationUsedUmbrella();
+      renderConceptBridge(formats.conceptBridgeData);
+      hideExplainStatus();
+      refreshNextStepPanelFromCurrentFeedback();
+      return;
+    }
+
+    state.conceptBridgePending = true;
+    hideExplainStatus();
+    setConceptBridgeButtonState(btn, true);
+    setExplanationLoading('Building concept bridge…');
+
+    jQuery.ajax({
+      type: 'POST',
+      url: urlConceptBridge,
+      data: JSON.stringify({
+        candidate: candidate,
+        selected_answer: state.lastFeedbackContext.selectedKey,
+        selected_content_ids: selectedContentIds.slice()
+      }),
+      contentType: 'application/json',
+      success: function (data) {
+        state.conceptBridgePending = false;
+        setConceptBridgeButtonState(btn, false);
+
+        if (data && data.success && data.concept_bridge) {
+          if (state.lastFeedbackContext) {
+            var latestFormats = getExplanationFormatsState();
+            latestFormats.conceptBridgeUsed = true;
+            latestFormats.conceptBridgeData = data.concept_bridge;
+            latestFormats.conceptBridgeCandidate = candidate;
+            syncExplanationUsedUmbrella();
+          }
+          renderConceptBridge(data.concept_bridge);
+          hideExplainStatus();
+          refreshNextStepPanelFromCurrentFeedback();
+          return;
+        }
+
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not build the concept bridge just now.');
+      },
+      error: function () {
+        state.conceptBridgePending = false;
+        setConceptBridgeButtonState(btn, false);
+        setExplanationText(originalExplanation);
+        showExplainStatus('Could not build the concept bridge just now.');
       }
     });
   }

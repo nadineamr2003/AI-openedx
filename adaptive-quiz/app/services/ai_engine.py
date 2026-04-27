@@ -5332,6 +5332,257 @@ Rules:
     raise ValueError("All providers/models failed to produce a step-by-step explanation.\n" + "\n".join(all_failures))
 
 
+def _fallback_concept_bridge(
+    *,
+    from_topic: str,
+    to_topic: str,
+    explanation: str = "",
+    content_title: str = "",
+) -> dict:
+    clean_from = str(from_topic or "the earlier idea").strip()
+    clean_to = str(to_topic or "this topic").strip()
+    explanation_text = str(explanation or "").strip()
+    return {
+        "from_topic": clean_from,
+        "to_topic": clean_to,
+        "content_title": str(content_title or "").strip(),
+        "intro": "Here is a simple bridge between the earlier idea and this question.",
+        "steps": [
+            {
+                "title": "Earlier idea",
+                "text": f"Start with {clean_from}: the earlier idea that gives this question useful context."
+            },
+            {
+                "title": "Connection",
+                "text": f"A useful connection is how {clean_from} helps frame the decision or cue in {clean_to}."
+            },
+            {
+                "title": "Apply it here",
+                "text": explanation_text or "Use the question cue and compare it with the answer options to identify the best fit."
+            },
+        ],
+        "takeaway": "The current topic becomes easier when this earlier idea is connected to the question cue."
+    }
+
+
+def _normalize_concept_bridge_result(
+    result: dict,
+    *,
+    from_topic: str,
+    to_topic: str,
+    explanation: str = "",
+    content_title: str = "",
+) -> dict:
+    if not isinstance(result, dict):
+        return _fallback_concept_bridge(
+            from_topic=from_topic,
+            to_topic=to_topic,
+            explanation=explanation,
+            content_title=content_title,
+        )
+
+    raw_steps = result.get("steps") or []
+    steps: list[dict] = []
+    if isinstance(raw_steps, list):
+        for index, step in enumerate(raw_steps):
+            if isinstance(step, dict):
+                title = str(step.get("title") or ("Step " + str(index + 1))).strip()
+                text = str(step.get("text") or "").strip()
+            else:
+                title = "Step " + str(index + 1)
+                text = str(step or "").strip()
+
+            if _looks_like_jsonish_text(title) or _looks_like_jsonish_text(text):
+                continue
+            if title and text:
+                steps.append({
+                    "title": title[:90],
+                    "text": text
+                })
+
+    if len(steps) < 3:
+        return _fallback_concept_bridge(
+            from_topic=from_topic,
+            to_topic=to_topic,
+            explanation=explanation,
+            content_title=content_title,
+        )
+
+    return {
+        "from_topic": str(result.get("from_topic") or from_topic or "").strip(),
+        "to_topic": str(result.get("to_topic") or to_topic or "").strip(),
+        "content_title": str(result.get("content_title") or content_title or "").strip(),
+        "intro": str(
+            result.get("intro")
+            or "This topic connects to an earlier idea from the selected lecture."
+        ).strip(),
+        "steps": steps[:3],
+        "takeaway": str(
+            result.get("takeaway")
+            or "The current topic becomes easier when this earlier idea is connected to the question cue."
+        ).strip(),
+    }
+
+
+async def generate_concept_bridge(
+    *,
+    from_topic: str,
+    to_topic: str,
+    question: str,
+    explanation: str,
+    options: dict[str, str] | None = None,
+    selected_answer: str = "",
+    correct_answer: str = "",
+    source_text: str = "",
+    content_title: str = "",
+) -> dict:
+    clean_from = str(from_topic or "").strip()
+    clean_to = str(to_topic or "").strip()
+    options = options or {}
+    selected_key = str(selected_answer or "").strip()
+    correct_key = str(correct_answer or "").strip()
+    selected_text = str(options.get(selected_key) or "").strip()
+    correct_text = str(options.get(correct_key) or "").strip()
+    serialized_options = json.dumps(options, ensure_ascii=False)
+    bridge_source = str(source_text or "").strip()
+    if bridge_source:
+        bridge_source, _, _ = _select_question_context(
+            bridge_source,
+            " ".join([clean_from, clean_to]).strip() or clean_to or clean_from,
+        )
+
+    prompt = f"""
+Create a compact concept bridge for a learner who answered a quiz question incorrectly.
+
+Selected lecture/content title: {content_title}
+Earlier topic: {clean_from}
+Current topic: {clean_to}
+Question: {question}
+Options: {serialized_options}
+Selected answer key: {selected_key}
+Selected answer text: {selected_text}
+Correct answer key: {correct_key}
+Correct answer text: {correct_text}
+Standard explanation: {explanation}
+Relevant source text excerpt:
+{bridge_source}
+
+Return ONLY valid JSON with this exact shape:
+{{
+  "from_topic": "{clean_from}",
+  "to_topic": "{clean_to}",
+  "intro": "This topic connects to an earlier idea from the selected lecture.",
+  "steps": [
+    {{"title": "Earlier idea", "text": "..."}},
+    {{"title": "Connection", "text": "..."}},
+    {{"title": "Apply it here", "text": "..."}}
+  ],
+  "takeaway": "..."
+}}
+
+Rules:
+- Use exactly 3 short steps.
+- Step 1 explains the earlier idea.
+- Step 2 connects the earlier idea to the current topic.
+- Step 3 applies the bridge to this question or mistake.
+- Be supportive and student-friendly.
+- Avoid harsh diagnosis; do not say the learner lacks prerequisite knowledge.
+- Stay grounded in the source text, question, options, and standard explanation.
+- Do not invent facts beyond the provided context.
+- If the connection is weak, phrase it carefully as "A useful connection is..."
+- Keep the whole bridge concise.
+"""
+
+    all_failures: list[str] = []
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for provider_name in PROVIDER_ORDER:
+            provider_cfg = PROVIDERS.get(provider_name)
+            if not provider_cfg:
+                logger.info(f"[LLM] Skipping provider={provider_name} for concept_bridge")
+                continue
+
+            cooldown_remaining = _provider_cooldown_remaining(provider_name)
+            if cooldown_remaining > 0:
+                logger.info(
+                    "[LLM] Skipping provider=%s cooldown_remaining=%ss for concept_bridge",
+                    provider_name,
+                    int(cooldown_remaining),
+                )
+                continue
+
+            if not provider_cfg["api_key"]:
+                logger.info(f"[LLM] Skipping provider={provider_name} for concept_bridge")
+                continue
+
+            models = PROVIDER_MODELS.get(provider_name, [])
+            for model in models:
+                model_cooldown_remaining = _model_cooldown_remaining(provider_name, model)
+                if model_cooldown_remaining > 0:
+                    logger.info(
+                        "[LLM] Skipping model cooldown provider=%s model=%s remaining=%ss for concept_bridge",
+                        provider_name,
+                        model,
+                        int(model_cooldown_remaining),
+                    )
+                    continue
+
+                try:
+                    raw = await _call_model(client, provider_name, model, prompt)
+                    raw = _strip_markdown_fences(raw).strip()
+                    json_text = _extract_json_object_text(raw)
+                    try:
+                        result = json.loads(json_text or raw)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "[LLM] JSON parse fallback concept_bridge provider=%s model=%s",
+                            provider_name,
+                            model,
+                        )
+                        return _fallback_concept_bridge(
+                            from_topic=clean_from,
+                            to_topic=clean_to,
+                            explanation=explanation,
+                            content_title=content_title,
+                        )
+
+                    normalized = _normalize_concept_bridge_result(
+                        result,
+                        from_topic=clean_from,
+                        to_topic=clean_to,
+                        explanation=explanation,
+                        content_title=content_title,
+                    )
+                    logger.info(
+                        "[LLM] SUCCESS concept_bridge provider=%s model=%s",
+                        provider_name,
+                        model,
+                    )
+                    return normalized
+
+                except ProviderHTTPError as e:
+                    _record_failure_cooldown(e.provider, e.model, e.status_code, e.message)
+                    msg = f"[LLM] HTTP failure concept_bridge provider={e.provider} model={e.model} status={e.status_code} details={e.message}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+                except Exception as e:
+                    msg = f"[LLM] Unexpected concept_bridge error provider={provider_name} model={model} error={_safe_exception_text(e)}"
+                    logger.warning(msg)
+                    all_failures.append(msg)
+                    continue
+
+    if all_failures:
+        logger.warning("Concept bridge fallback after provider failures: %s", " | ".join(all_failures[-3:]))
+    return _fallback_concept_bridge(
+        from_topic=clean_from,
+        to_topic=clean_to,
+        explanation=explanation,
+        content_title=content_title,
+    )
+
+
 async def generate_worked_example_support(
     *,
     topic: str,

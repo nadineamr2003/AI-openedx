@@ -27,6 +27,7 @@ DIAGNOSTIC_GENERATE_TIMEOUT = 120
 SIMILAR_QUESTION_TIMEOUT = 120
 SESSION_START_TIMEOUT = 60
 ANSWER_SUBMIT_TIMEOUT = 45
+CONCEPT_BRIDGE_TIMEOUT = 45
 
 
 class AdaptiveQuizXBlock(XBlock):
@@ -1999,6 +2000,39 @@ window.aqsToggleActive = function(contentId, nextActive) {{
             return {
                 "success": True,
                 "step_by_step_explanation": resp.get("step_by_step_explanation", {})
+            }
+        return {"success": False, "error": "Could not reach backend."}
+
+    @XBlock.json_handler
+    def concept_bridge(self, data, suffix=""):
+        """Proxy to /api/quiz/support/concept_bridge for an on-demand topic bridge."""
+        question = json.loads(self.current_question_json) if self.current_question_json else {}
+        candidate = data.get("candidate") or {}
+        resp = self._api(
+            "/api/quiz/support/concept_bridge",
+            payload={
+                "student_id": self._student_id(),
+                "course_id": self._active_course_id(),
+                "session_id": self.active_session_id or None,
+                "content_id": candidate.get("contentId") or candidate.get("content_id") or "",
+                "content_title": candidate.get("contentTitle") or candidate.get("content_title") or "",
+                "selected_content_ids": data.get("selected_content_ids") or [],
+                "from_topic": candidate.get("fromTopic") or candidate.get("from_topic") or "",
+                "to_topic": candidate.get("toTopic") or candidate.get("to_topic") or question.get("topic", self.current_topic),
+                "topic": question.get("topic", self.current_topic),
+                "question_text": question.get("question", ""),
+                "options": question.get("options", {}),
+                "selected_answer": data.get("selected_answer", ""),
+                "correct_answer": question.get("correct_answer", ""),
+                "difficulty": question.get("difficulty", self.current_difficulty),
+                "explanation": question.get("explanation", ""),
+            },
+            timeout=CONCEPT_BRIDGE_TIMEOUT,
+        )
+        if resp:
+            return {
+                "success": True,
+                "concept_bridge": resp.get("concept_bridge", {})
             }
         return {"success": False, "error": "Could not reach backend."}
 
