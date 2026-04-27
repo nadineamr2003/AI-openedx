@@ -77,7 +77,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       affectedCount: 0,
       selectedCount: 0
     },
-    workedExamplePrimer: null
+    workedExamplePrimer: null,
+    readingExplanation: false,
+    explanationUtterance: null
   };
 
   var reviewState = {
@@ -120,6 +122,121 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function $(sel) { return element.querySelector(sel); }
 
+  function supportsSpeechSynthesis() {
+    return !!(window.speechSynthesis && window.SpeechSynthesisUtterance);
+  }
+
+  function getReadAloudButtonMarkup() {
+    return '<div class="aq-explanation-actions">' +
+      '<button class="aq-explanation-audio-btn" id="aq-btn-read-explanation" type="button">Read aloud</button>' +
+      '</div>';
+  }
+
+  function cleanSpeechPart(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function getCurrentExplanationSpeechText() {
+    var expEl = $('#aq-explanation');
+    if (!expEl) return '';
+
+    var parts = [];
+    var mode = expEl.getAttribute('data-explanation-mode') || '';
+
+    function addText(text) {
+      var cleaned = cleanSpeechPart(text);
+      if (cleaned) parts.push(cleaned);
+    }
+
+    if (mode === 'step_by_step_explanation') {
+      addText(expEl.getAttribute('data-explanation-intro'));
+      Array.prototype.forEach.call(expEl.querySelectorAll('.aq-explanation-step'), function (step) {
+        addText(step.querySelector('.aq-explanation-step-title') &&
+          step.querySelector('.aq-explanation-step-title').textContent);
+        addText(step.querySelector('.aq-explanation-step-text') &&
+          step.querySelector('.aq-explanation-step-text').textContent);
+      });
+      addText(expEl.getAttribute('data-explanation-takeaway'));
+      if (parts.length) return parts.join('. ');
+    }
+
+    addText(expEl.querySelector('.aq-explanation-title') &&
+      expEl.querySelector('.aq-explanation-title').textContent);
+    addText(expEl.getAttribute('data-explanation-body'));
+    addText(expEl.getAttribute('data-explanation-takeaway'));
+
+    if (!parts.length) {
+      var clone = expEl.cloneNode(true);
+      Array.prototype.forEach.call(clone.querySelectorAll('button, .aq-explanation-actions, .aq-explanation-label'), function (node) {
+        node.parentNode.removeChild(node);
+      });
+      addText(clone.textContent);
+    }
+
+    return parts.join('. ');
+  }
+
+  function updateReadAloudButtonState() {
+    var btn = $('#aq-btn-read-explanation');
+    if (!btn) return;
+
+    if (!supportsSpeechSynthesis()) {
+      btn.classList.add('aq-hidden');
+      btn.disabled = true;
+      btn.title = 'Read aloud is not supported in this browser.';
+      return;
+    }
+
+    btn.classList.remove('aq-hidden');
+    btn.disabled = !cleanSpeechPart(getCurrentExplanationSpeechText());
+    btn.textContent = state.readingExplanation ? 'Stop reading' : 'Read aloud';
+    btn.setAttribute('aria-pressed', state.readingExplanation ? 'true' : 'false');
+    btn.title = state.readingExplanation ? 'Stop reading this explanation' : 'Read this explanation aloud';
+    btn.onclick = handleExplanationReadAloud;
+  }
+
+  function stopExplanationReadAloud() {
+    if (supportsSpeechSynthesis()) {
+      window.speechSynthesis.cancel();
+    }
+    state.readingExplanation = false;
+    state.explanationUtterance = null;
+    updateReadAloudButtonState();
+  }
+
+  function handleExplanationReadAloud() {
+    if (!supportsSpeechSynthesis()) {
+      updateReadAloudButtonState();
+      return;
+    }
+
+    if (state.readingExplanation) {
+      stopExplanationReadAloud();
+      return;
+    }
+
+    var text = getCurrentExplanationSpeechText();
+    if (!text) {
+      updateReadAloudButtonState();
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    var utterance = new window.SpeechSynthesisUtterance(text);
+    state.explanationUtterance = utterance;
+    state.readingExplanation = true;
+    utterance.onend = function () {
+      if (state.explanationUtterance === utterance) {
+        state.readingExplanation = false;
+        state.explanationUtterance = null;
+        updateReadAloudButtonState();
+      }
+    };
+    utterance.onerror = utterance.onend;
+    window.speechSynthesis.speak(utterance);
+    updateReadAloudButtonState();
+  }
+
   var SCREENS = ['start', 'help', 'loading', 'question', 'worked-example', 'results', 'dashboard', 'history', 'course', 'content', 'mode', 'diagnostic', 'diagnostic-results'];
 
   var COURSE_PICKER_COPY = {
@@ -157,6 +274,9 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function showScreen(name) {
+    if (name !== 'question' && state.readingExplanation) {
+      stopExplanationReadAloud();
+    }
     SCREENS.forEach(function (s) {
       var el = element.querySelector('#aq-screen-' + s);
       if (el) el.classList.toggle('aq-hidden', s !== name);
@@ -1340,6 +1460,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   function renderQuestion(resp) {
+    stopExplanationReadAloud();
     if (!resp || !resp.success || !resp.question) {
       alert('Could not load question: ' + (resp && resp.error ? resp.error : 'Unknown error'));
       showScreen('start');
@@ -1910,19 +2031,26 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var expEl = $('#aq-explanation');
     if (!expEl || !viewModel) return;
 
+    stopExplanationReadAloud();
     expEl.classList.remove('aq-explanation-loading');
     expEl.setAttribute('data-explanation-body', viewModel.body || '');
     expEl.setAttribute('data-explanation-mode', viewModel.mode || 'standard');
+    expEl.setAttribute('data-explanation-takeaway', viewModel.takeaway || '');
+    expEl.removeAttribute('data-explanation-intro');
 
     expEl.innerHTML =
       '<div class="aq-explanation-card ' + escapeHtml(viewModel.toneClass || 'aq-explanation-correct') + '">' +
+      '<div class="aq-explanation-card-header">' +
       '<span class="aq-explanation-label">' + escapeHtml(viewModel.label || 'Explanation') + '</span>' +
+      getReadAloudButtonMarkup() +
+      '</div>' +
       '<h4 class="aq-explanation-title">' + escapeHtml(viewModel.title || 'Explanation') + '</h4>' +
       '<p class="aq-explanation-body">' + escapeHtml(viewModel.body || '') + '</p>' +
       (viewModel.takeaway
         ? '<p class="aq-explanation-takeaway">' + escapeHtml(viewModel.takeaway) + '</p>'
         : '') +
       '</div>';
+    updateReadAloudButtonState();
   }
 
   function normalizeStepByStepExplanation(data) {
@@ -2057,9 +2185,12 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     var body = normalized.steps.map(function (step) {
       return step.title + ': ' + step.text;
     }).join(' ');
+    stopExplanationReadAloud();
     expEl.classList.remove('aq-explanation-loading');
     expEl.setAttribute('data-explanation-body', body || normalized.intro || '');
     expEl.setAttribute('data-explanation-mode', 'step_by_step_explanation');
+    expEl.setAttribute('data-explanation-intro', normalized.intro || '');
+    expEl.setAttribute('data-explanation-takeaway', normalized.takeaway || '');
 
     var stepsHtml = normalized.steps.map(function (step) {
       return '<li class="aq-explanation-step">' +
@@ -2070,7 +2201,10 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     expEl.innerHTML =
       '<div class="aq-explanation-card aq-explanation-step-by-step">' +
+      '<div class="aq-explanation-card-header">' +
       '<span class="aq-explanation-label">Step-by-step explanation</span>' +
+      getReadAloudButtonMarkup() +
+      '</div>' +
       '<h4 class="aq-explanation-title">' + escapeHtml(pickCopyVariant('step_by_step_explanation_title', [
         'Work through the reasoning',
         'Step-by-step reasoning',
@@ -2086,6 +2220,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         ? '<p class="aq-explanation-takeaway">' + escapeHtml(normalized.takeaway) + '</p>'
         : '') +
       '</div>';
+    updateReadAloudButtonState();
   }
 
   function renderStructuredExplanationForFeedback(data, selectedKey, recoveryOfferVisible, options) {
@@ -2768,15 +2903,22 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return;
     }
 
+    stopExplanationReadAloud();
     expEl.classList.remove('aq-explanation-loading');
     expEl.setAttribute('data-explanation-body', text || '');
     expEl.setAttribute('data-explanation-mode', 'standard');
+    expEl.setAttribute('data-explanation-takeaway', '');
+    expEl.removeAttribute('data-explanation-intro');
     expEl.innerHTML =
       '<div class="aq-explanation-card aq-explanation-correct">' +
+      '<div class="aq-explanation-card-header">' +
       '<span class="aq-explanation-label">Explanation</span>' +
+      getReadAloudButtonMarkup() +
+      '</div>' +
       '<h4 class="aq-explanation-title">Explanation</h4>' +
       '<p class="aq-explanation-body">' + escapeHtml(normalizeExplanationText(text)) + '</p>' +
       '</div>';
+    updateReadAloudButtonState();
   }
 
 
@@ -2784,10 +2926,16 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function setExplanationLoading(message) {
     var expEl = $('#aq-explanation');
     if (!expEl) return;
+    stopExplanationReadAloud();
     expEl.classList.add('aq-explanation-loading');
+    expEl.removeAttribute('data-explanation-body');
+    expEl.removeAttribute('data-explanation-mode');
+    expEl.removeAttribute('data-explanation-intro');
+    expEl.removeAttribute('data-explanation-takeaway');
     expEl.innerHTML =
       '<span class="aq-inline-spinner" aria-hidden="true"></span>' +
       '<span>' + escapeHtml(message || 'Simplifying explanation…') + '</span>';
+    updateReadAloudButtonState();
   }
 
   function getExplainStatusEl() {

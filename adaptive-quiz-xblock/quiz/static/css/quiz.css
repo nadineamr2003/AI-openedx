@@ -1150,11 +1150,19 @@
   background: linear-gradient(135deg, rgba(248, 250, 252, .94), rgba(255, 255, 255, .98));
 }
 
+.aq-explanation-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
 .aq-explanation-label {
   display: inline-flex;
   align-items: center;
   width: fit-content;
-  margin-bottom: 7px;
+  margin-bottom: 0;
   padding: 4px 9px;
   border-radius: 999px;
   background: rgba(43, 78, 222, .09);
@@ -1163,6 +1171,45 @@
   font-weight: 800;
   letter-spacing: .05em;
   text-transform: uppercase;
+}
+
+.aq-explanation-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.aq-explanation-audio-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid rgba(43, 78, 222, .16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .78);
+  color: var(--aq-primary);
+  font-family: var(--aq-font);
+  font-size: .72rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background .15s var(--aq-ease), border-color .15s var(--aq-ease), color .15s var(--aq-ease);
+}
+
+.aq-explanation-audio-btn:hover {
+  background: var(--aq-primary-light);
+  border-color: rgba(43, 78, 222, .28);
+}
+
+.aq-explanation-audio-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(43, 78, 222, .14);
+}
+
+.aq-explanation-audio-btn[aria-pressed="true"] {
+  background: var(--aq-primary);
+  border-color: var(--aq-primary);
+  color: #fff;
 }
 
 .aq-explanation-title {
@@ -3930,6 +3977,11 @@ body.aq-modal-open {
 
   .aq-q-card {
     padding: 20px 16px;
+  }
+
+  .aq-explanation-card-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .aq-loading-wrap {
