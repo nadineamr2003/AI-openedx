@@ -93,6 +93,11 @@ GIT_CHALLENGE_SAFE_BLOCKING_REASONS = {
     "git_merge_conflict_logic_failure",
     "git_visibility_push_vs_pull_confusion",
 }
+GIT_CHALLENGE_FRAGILE_FALLBACK_BUCKETS = {
+    "commit_quality",
+    "ci_cd_fundamentals",
+    "merge_conflicts",
+}
 RECOVERY_SUPPORT_MESSAGE = (
     "You seem to be struggling with this concept. I can simplify it and give you one focused "
     "recovery question before we continue."
@@ -458,9 +463,360 @@ def _git_challenge_opening_topic_candidates(
     return prioritized + [topic for topic in ordered_topics if topic not in prioritized]
 
 
-def _git_challenge_fallback_topics(session_topics: list[str] | None, failed_topic: str) -> list[str]:
-    ordered = _git_challenge_opening_topic_candidates(session_topics or [], difficulty=4)
-    return [topic for topic in ordered if topic != failed_topic]
+def _git_challenge_topic_key(topic: str | None) -> str:
+    return str(topic or "").strip().lower()
+
+
+def _git_topic_has_source_support(topic: str, source_text: str | None) -> bool:
+    text = str(source_text or "").strip().lower()
+    if not text:
+        return False
+
+    topic_bucket = _git_topic_bucket(topic)
+    support_terms = {
+        "local_vs_remote": ("local", "remote", "repository", "repositories", "clone", "distributed"),
+        "distributed_vcs": ("local", "remote", "repository", "repositories", "clone", "distributed"),
+        "git_workflow_basics": ("local", "remote", "repository", "repositories", "clone", "distributed", "branch", "merge", "commit"),
+        "branching_and_merging": ("branch", "branches", "merge", "merging"),
+        "commit_quality": ("commit", "message", "meaningful", "atomic", "changes"),
+        "ci_cd_fundamentals": ("ci", "cd", "continuous integration", "continuous delivery", "pipeline", "build", "test"),
+        "merge_conflicts": ("conflict", "merge conflict", "resolve", "same file"),
+    }
+    terms = support_terms.get(topic_bucket)
+    if not terms:
+        return False
+    return any(term in text for term in terms)
+
+
+def _git_template_topic(
+    requested_topic: str,
+    session_topics: list[str] | None,
+    source_text: str | None,
+) -> str:
+    scoped_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in ([requested_topic] + list(session_topics or []))
+        if str(topic).strip()
+    ])
+    for topic in scoped_topics:
+        if _git_topic_has_source_support(topic, source_text):
+            return topic
+    for topic in scoped_topics:
+        if _git_topic_bucket(topic) in {"local_vs_remote", "distributed_vcs", "git_workflow_basics"}:
+            return topic
+    return requested_topic or "Distributed Version Control"
+
+
+def build_git_template_fallback_question(
+    topic: str,
+    difficulty: int,
+    source_text: str | None = None,
+    session_topics: list[str] | None = None,
+    excluded_hashes: list[str] | None = None,
+) -> dict:
+    safe_difficulty = min(int(difficulty or 3), 3)
+
+    templates = {
+        "local_vs_remote": {
+            "question": "In Git, what is the best description of the difference between a local repository and a remote repository?",
+            "correct": "The local repository is the developer's own copy, while the remote repository is shared with others.",
+            "options": [
+                "The local repository is the developer's own copy, while the remote repository is shared with others.",
+                "The local repository stores only issues, while the remote repository stores only source files.",
+                "The local repository is read-only, while the remote repository is used for editing files.",
+                "The local repository exists only after pushing, while the remote repository exists before cloning.",
+            ],
+        },
+        "distributed_vcs": {
+            "question": "What does distributed version control allow each developer to have?",
+            "correct": "A complete local copy of the repository history.",
+            "options": [
+                "A complete local copy of the repository history.",
+                "Only the latest file versions without previous commits.",
+                "Access to change the remote repository without committing locally.",
+                "A central server that stores all history while local copies store none.",
+            ],
+        },
+        "branching_and_merging": {
+            "question": "Why would a developer create a branch before changing code?",
+            "correct": "To work on changes separately before merging them back.",
+            "options": [
+                "To work on changes separately before merging them back.",
+                "To permanently delete the main version of the code.",
+                "To publish changes to every remote repository automatically.",
+                "To prevent Git from recording commits for the work.",
+            ],
+        },
+        "merge_conflicts": {
+            "question": "When does a merge conflict usually happen?",
+            "correct": "When different changes affect the same part of a file and Git cannot combine them automatically.",
+            "options": [
+                "When different changes affect the same part of a file and Git cannot combine them automatically.",
+                "When a developer creates a branch before making any commits.",
+                "When a repository is cloned from a remote server for the first time.",
+                "When a commit message is shorter than the file name.",
+            ],
+        },
+        "commit_quality": {
+            "question": "What makes a commit useful in a Git workflow?",
+            "correct": "A focused change with a meaningful message.",
+            "options": [
+                "A focused change with a meaningful message.",
+                "A large set of unrelated changes with a vague message.",
+                "A change that is saved locally without being recorded by Git.",
+                "A remote branch that replaces the need for commit history.",
+            ],
+        },
+        "ci_cd_fundamentals": {
+            "question": "What is the main role of CI in a development workflow?",
+            "correct": "To automatically check integrated changes through builds or tests.",
+            "options": [
+                "To automatically check integrated changes through builds or tests.",
+                "To manually resolve every merge conflict before a branch is created.",
+                "To replace Git commits with project-management tickets.",
+                "To make the local repository different from the remote repository.",
+            ],
+        },
+    }
+
+    candidate_topics = _dedupe_keep_order([
+        _git_template_topic(topic, session_topics, source_text),
+        *[
+            str(candidate).strip()
+            for candidate in (session_topics or [])
+            if str(candidate).strip()
+        ],
+        "Distributed Version Control",
+        "Local vs Remote Repository",
+    ])
+    excluded_hash_set = set(excluded_hashes or [])
+    fallback_question = None
+
+    for template_topic in candidate_topics:
+        topic_bucket = _git_topic_bucket(template_topic)
+        selected = templates.get(topic_bucket or "")
+        if not selected:
+            continue
+        if topic_bucket in GIT_CHALLENGE_FRAGILE_FALLBACK_BUCKETS and not _git_topic_has_source_support(template_topic, source_text):
+            continue
+
+        options = dict(zip(("A", "B", "C", "D"), selected["options"]))
+        question = {
+            "question": selected["question"],
+            "options": options,
+            "correct_answer": "A",
+            "explanation": selected["correct"],
+            "topic": template_topic,
+            "difficulty": safe_difficulty,
+            "generation_profile": "git_challenge",
+            "generation_fallback": "git_template",
+        }
+        question = ensure_question_concept_focus(question, course_id="CSEN603")
+        question["question_family"] = _question_family(question, course_id="CSEN603") or _git_challenge_topic_family_hint(template_topic)
+        if fallback_question is None:
+            fallback_question = question
+        if _question_hash_for_tracking(question) not in excluded_hash_set:
+            return question
+
+    if fallback_question is not None:
+        return fallback_question
+
+    raise ValueError("No Git template fallback could be built.")
+
+
+def _git_challenge_question_log_entries(question_log: list[dict] | None) -> list[dict]:
+    entries: list[dict] = []
+    for entry in question_log or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("is_recovery_step") or entry.get("counts_toward_session_score") is False:
+            continue
+        entries.append(entry)
+    return entries
+
+
+def _git_challenge_recent_topic_counts(question_log: list[dict] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in _git_challenge_question_log_entries(question_log):
+        topic_key = _git_challenge_topic_key(entry.get("topic"))
+        if not topic_key:
+            continue
+        counts[topic_key] = counts.get(topic_key, 0) + 1
+    return counts
+
+
+def _git_challenge_recent_family_counts(question_log: list[dict] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in _git_challenge_question_log_entries(question_log):
+        family_key = _normalized_question_family(entry.get("question_family"))
+        if not family_key:
+            family_key = _normalized_question_family(_question_family(entry))
+        if not family_key:
+            continue
+        counts[family_key] = counts.get(family_key, 0) + 1
+    return counts
+
+
+def _git_challenge_recent_bucket_counts(question_log: list[dict] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in _git_challenge_question_log_entries(question_log):
+        bucket = _git_topic_bucket(str(entry.get("topic") or ""))
+        if not bucket:
+            continue
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def _git_challenge_topic_family_hint(topic: str) -> str:
+    bucket = _git_topic_bucket(topic)
+    if bucket == "local_vs_remote":
+        return GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN
+    return str(bucket or "").strip()
+
+
+def _git_challenge_previous_topic_bucket_and_family(
+    question_log: list[dict] | None,
+) -> tuple[str | None, str | None, str | None]:
+    entries = _git_challenge_question_log_entries(question_log)
+    if not entries:
+        return None, None, None
+
+    previous = entries[-1]
+    previous_topic = _git_challenge_topic_key(previous.get("topic")) or None
+    previous_bucket = _git_topic_bucket(str(previous.get("topic") or ""))
+    previous_family = _normalized_question_family(previous.get("question_family"))
+    if not previous_family:
+        previous_family = _normalized_question_family(_question_family(previous))
+    return previous_topic, previous_bucket, previous_family or None
+
+
+def _git_challenge_topic_variety_score(
+    topic: str,
+    *,
+    index: int,
+    topic_counts: dict[str, int],
+    bucket_counts: dict[str, int],
+    family_counts: dict[str, int],
+    previous_topic: str | None,
+    previous_bucket: str | None,
+    previous_family: str | None,
+    has_non_local_candidate: bool,
+) -> tuple[int, int]:
+    topic_key = _git_challenge_topic_key(topic)
+    family_hint = _git_challenge_topic_family_hint(topic)
+    bucket = _git_topic_bucket(topic)
+    topic_count = topic_counts.get(topic_key, 0)
+    bucket_count = bucket_counts.get(bucket or "", 0)
+    family_count = family_counts.get(family_hint, 0) if family_hint else 0
+
+    score = topic_count * 20 + bucket_count * 12 + family_count * 10
+    if topic_count > 1:
+        score += 40
+    if bucket_count > 1:
+        score += 25
+    if family_count > 1:
+        score += 20
+    if previous_topic and topic_key == previous_topic:
+        score += 30
+    if previous_bucket and bucket and bucket == previous_bucket:
+        score += 20
+    if previous_family and family_hint and family_hint == previous_family:
+        score += 20
+    if has_non_local_candidate and bucket == "local_vs_remote" and topic_count >= 1:
+        score += 25
+    if has_non_local_candidate and bucket == "git_workflow_basics" and family_counts.get(GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN, 0):
+        score += 15
+
+    return score, index
+
+
+def _git_challenge_topics_by_variety(
+    requested_topic: str,
+    session_topics: list[str] | None,
+    question_log: list[dict] | None,
+    difficulty: int,
+) -> list[str]:
+    scoped_topics = _dedupe_keep_order([
+        str(topic).strip()
+        for topic in (session_topics or [])
+        if str(topic).strip()
+    ])
+    requested_topic = str(requested_topic or "").strip()
+    if requested_topic and (not scoped_topics or requested_topic in scoped_topics):
+        scoped_topics = _dedupe_keep_order([requested_topic] + scoped_topics)
+    if not scoped_topics and requested_topic:
+        scoped_topics = [requested_topic]
+
+    candidates = [
+        topic
+        for topic in _git_challenge_opening_topic_candidates(scoped_topics, difficulty=difficulty)
+        if _git_topic_bucket(topic)
+    ]
+    if not candidates:
+        return [requested_topic] if requested_topic else []
+
+    topic_counts = _git_challenge_recent_topic_counts(question_log)
+    bucket_counts = _git_challenge_recent_bucket_counts(question_log)
+    family_counts = _git_challenge_recent_family_counts(question_log)
+    previous_topic, previous_bucket, previous_family = _git_challenge_previous_topic_bucket_and_family(question_log)
+    has_non_local_candidate = any(_git_topic_bucket(topic) != "local_vs_remote" for topic in candidates)
+
+    indexed_candidates = list(enumerate(candidates))
+    indexed_candidates.sort(
+        key=lambda item: _git_challenge_topic_variety_score(
+            item[1],
+            index=item[0],
+            topic_counts=topic_counts,
+            bucket_counts=bucket_counts,
+            family_counts=family_counts,
+            previous_topic=previous_topic,
+            previous_bucket=previous_bucket,
+            previous_family=previous_family,
+            has_non_local_candidate=has_non_local_candidate,
+        )
+    )
+    return [topic for _, topic in indexed_candidates]
+
+
+def _choose_git_challenge_topic_with_variety(
+    requested_topic: str,
+    session_topics: list[str] | None,
+    question_log: list[dict] | None,
+    difficulty: int,
+) -> str:
+    ordered = _git_challenge_topics_by_variety(requested_topic, session_topics, question_log, difficulty)
+    return ordered[0] if ordered else requested_topic
+
+
+def _git_challenge_fallback_topics(
+    session_topics: list[str] | None,
+    failed_topic: str,
+    source_text: str | None,
+    question_log: list[dict] | None = None,
+) -> list[str]:
+    ordered = _git_challenge_topics_by_variety(failed_topic, session_topics, question_log, difficulty=4)
+    failed_key = _git_challenge_topic_key(failed_topic)
+    fallback_topics: list[str] = []
+    for topic in ordered:
+        if _git_challenge_topic_key(topic) == failed_key:
+            continue
+
+        topic_bucket = _git_topic_bucket(topic)
+        has_support = _git_topic_has_source_support(topic, source_text)
+        if not has_support:
+            logger.info(
+                "[CHALLENGE] Git fallback topic skipped unsupported topic=%s reason=insufficient_source_support",
+                topic,
+            )
+            continue
+        if topic_bucket in GIT_CHALLENGE_FRAGILE_FALLBACK_BUCKETS and topic not in (session_topics or []):
+            logger.info(
+                "[CHALLENGE] Git fallback topic skipped unsupported topic=%s reason=not_in_selected_scope",
+                topic,
+            )
+            continue
+        fallback_topics.append(topic)
+    return fallback_topics
 
 
 def _git_opening_generation_difficulty(topic: str, difficulty: int) -> int:
@@ -579,9 +935,19 @@ def _apply_git_challenge_runtime_guard(
     recent_concepts: list[str] | None = None,
     recent_families: list[str] | None = None,
     session_topics: list[str] | None = None,
+    question_log: list[dict] | None = None,
 ) -> tuple[str, int]:
     if not _is_git_challenge_scope(course_id, source_text, mode):
         return topic, difficulty
+
+    varied_topic = _choose_git_challenge_topic_with_variety(
+        requested_topic=topic,
+        session_topics=session_topics,
+        question_log=question_log,
+        difficulty=difficulty,
+    )
+    if varied_topic and varied_topic != topic:
+        return varied_topic, _git_challenge_safe_generation_difficulty(varied_topic, difficulty)
 
     topic_bucket = _git_topic_bucket(topic)
     local_remote_repeat = _git_recent_local_remote_repeat(recent_concepts, recent_families)
@@ -944,6 +1310,8 @@ async def _generate_question_with_soft_dedupe(
     max_live_attempts: int | None = None,
     max_provider_model_attempts: int | None = None,
     allow_last_resort: bool = True,
+    allow_dedupe_relaxation: bool = True,
+    question_position: int | None = None,
 ) -> dict:
     recent_hash_set = set(recent_hashes)
     concept_policy = _concept_dedupe_policy(target_questions, mode)
@@ -1020,6 +1388,16 @@ async def _generate_question_with_soft_dedupe(
                 question_family or "unknown",
             )
 
+        if generation_profile == "git_challenge" and not hash_duplicate:
+            if concept_duplicate or family_duplicate:
+                logger.info(
+                    "[CHALLENGE] Git accepting repeated family for reliability topic=%s family=%s question_position=%s",
+                    topic,
+                    question_family or concept_focus or "unknown",
+                    question_position or "unknown",
+                )
+            return question
+
         if attempt < attempts:
             retry_reason = "hash_concept_or_family"
             logger.info(
@@ -1032,6 +1410,28 @@ async def _generate_question_with_soft_dedupe(
             )
             continue
 
+        if generation_profile == "git_challenge" and hash_duplicate:
+            logger.info(
+                "[DEDUPE] Git live exact duplicate blocked course=%s topic=%s difficulty=%s attempts=%s hash=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempts,
+                _hash_preview(question_hash),
+            )
+            raise ValueError("Exact duplicate Git question blocked before fallback.")
+
+        if not allow_dedupe_relaxation:
+            logger.info(
+                "[DEDUPE] Live dedupe blocked pending Git topic fallback course=%s topic=%s difficulty=%s attempts=%s concept=%s family=%s",
+                course_id,
+                topic,
+                difficulty,
+                attempts,
+                concept_focus or "unknown",
+                question_family or "unknown",
+            )
+            raise ValueError("Live dedupe repeat blocked before Git topic fallback.")
         logger.info(
             "[DEDUPE] Live dedupe relaxed course=%s topic=%s difficulty=%s attempts=%s concept=%s family=%s",
             course_id,
@@ -3348,12 +3748,6 @@ async def _generate_first_question(
     opening_candidates = [topic]
 
     if git_opening_challenge:
-        logger.info(
-            "[CHALLENGE] Git live-first mode active session=%s opening_topic=%s requested_difficulty=%s",
-            session_id,
-            topic,
-            requested_opening_difficulty,
-        )
         opening_candidates = _git_challenge_opening_topic_candidates(
             state.get("session_topics") or [topic],
             difficulty=requested_opening_difficulty,
@@ -3500,7 +3894,12 @@ async def _generate_first_question(
 
         return question
 
-    async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
+    async def _live_generate_topic(
+        active_topic: str,
+        active_difficulty: int,
+        *,
+        allow_dedupe_relaxation: bool = True,
+    ) -> dict:
         if git_opening_challenge:
             logger.info(
                 "[CHALLENGE] Git live generation topic=%s difficulty=%s question_position=%s",
@@ -3543,6 +3942,8 @@ async def _generate_first_question(
                 if git_opening_challenge
                 else not _git_challenge_blocks_early_last_resort(opening_question_position)
             ),
+            allow_dedupe_relaxation=allow_dedupe_relaxation,
+            question_position=opening_question_position,
         )
         generated_difficulty = int(question.get("difficulty", active_difficulty))
         logger.info(
@@ -3577,10 +3978,10 @@ async def _generate_first_question(
         live_difficulty = difficulty
         if git_opening_challenge and GIT_CHALLENGE_LIVE_FIRST:
             logger.info(
-                "[CHALLENGE] Git live-first mode active session=%s topic=%s difficulty=%s question_position=%s",
-                session_id,
+                "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
                 live_topic,
                 live_difficulty,
+                requested_opening_difficulty,
                 opening_question_position,
             )
             question = None
@@ -3618,7 +4019,11 @@ async def _generate_first_question(
 
         if question is None:
             try:
-                question = await _live_generate_topic(live_topic, live_difficulty)
+                question = await _live_generate_topic(
+                    live_topic,
+                    live_difficulty,
+                    allow_dedupe_relaxation=not git_opening_challenge,
+                )
                 topic = live_topic
                 difficulty = live_difficulty
             except ValueError as original_error:
@@ -3629,6 +4034,8 @@ async def _generate_first_question(
                 for fallback_topic in _git_challenge_fallback_topics(
                     state.get("session_topics") or opening_candidates,
                     live_topic,
+                    source_text,
+                    [],
                 ):
                     logger.warning(
                         "[CHALLENGE] Git live fallback after failure session=%s failed_topic=%s fallback_topic=%s fallback_difficulty=%s",
@@ -3638,7 +4045,11 @@ async def _generate_first_question(
                         fallback_difficulty,
                     )
                     try:
-                        question = await _live_generate_topic(fallback_topic, fallback_difficulty)
+                        question = await _live_generate_topic(
+                            fallback_topic,
+                            fallback_difficulty,
+                            allow_dedupe_relaxation=False,
+                        )
                     except ValueError:
                         continue
 
@@ -3653,7 +4064,32 @@ async def _generate_first_question(
                     break
 
                 if question is None:
-                    raise original_error
+                    try:
+                        question = await _live_generate_topic(
+                            live_topic,
+                            3,
+                            allow_dedupe_relaxation=True,
+                        )
+                        topic = live_topic
+                        difficulty = 3
+                    except ValueError:
+                        try:
+                            question = build_git_template_fallback_question(
+                                live_topic,
+                                live_difficulty,
+                                source_text=source_text,
+                                session_topics=state.get("session_topics") or opening_candidates,
+                                excluded_hashes=recent_hashes,
+                            )
+                            topic = str(question.get("topic", live_topic))
+                            difficulty = int(question.get("difficulty", 3))
+                            logger.warning(
+                                "[CHALLENGE] Git template fallback used topic=%s difficulty=%s",
+                                topic,
+                                difficulty,
+                            )
+                        except ValueError:
+                            raise original_error
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -3748,9 +4184,10 @@ async def generate(req: GenerateRequest):
         session_target_questions = int((session_doc or {}).get("target_questions", req.question_count or 10) or 10)
         session_mode = str((session_doc or {}).get("selected_mode") or state.get("current_session_mode") or req.mode or "normal_practice")
         git_workflow_scope = is_csen603_git_workflow_scope(req.course_id, req.topic, req.source_text)
-        recent_concepts = _recent_concept_focuses_from_question_log((session_doc or {}).get("question_log") or [])
+        question_log = (session_doc or {}).get("question_log") or []
+        recent_concepts = _recent_concept_focuses_from_question_log(question_log)
         recent_families = (
-            _recent_question_families_from_question_log((session_doc or {}).get("question_log") or [], course_id=req.course_id)
+            _recent_question_families_from_question_log(question_log, course_id=req.course_id)
             if git_workflow_scope else []
         )
         session_topics = (session_doc or {}).get("session_topics") or state.get("session_topics") or [req.topic]
@@ -3763,6 +4200,7 @@ async def generate(req: GenerateRequest):
             recent_concepts=recent_concepts,
             recent_families=recent_families,
             session_topics=session_topics,
+            question_log=question_log,
         )
         if effective_topic != req.topic or effective_difficulty != req.difficulty:
             logger.info(
@@ -3778,14 +4216,6 @@ async def generate(req: GenerateRequest):
         preferred_only = _state_is_focused_followup(state)
         git_challenge_safe_mode = _is_git_challenge_scope(req.course_id, req.source_text, session_mode)
         question_position = _git_challenge_next_question_position(session_doc)
-        if git_challenge_safe_mode:
-            logger.info(
-                "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
-                effective_topic,
-                effective_difficulty,
-                req.difficulty,
-                question_position,
-            )
 
         async def _try_cached_topic(active_topic: str, active_difficulty: int) -> dict | None:
             cached = await _get_cached_question(
@@ -3916,7 +4346,12 @@ async def generate(req: GenerateRequest):
 
             return None
 
-        async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
+        async def _live_generate_topic(
+            active_topic: str,
+            active_difficulty: int,
+            *,
+            allow_dedupe_relaxation: bool = True,
+        ) -> dict:
             if git_challenge_safe_mode:
                 logger.info(
                     "[CHALLENGE] Git live generation topic=%s difficulty=%s question_position=%s",
@@ -3960,6 +4395,8 @@ async def generate(req: GenerateRequest):
                     if git_challenge_safe_mode
                     else not (git_challenge_safe_mode and _git_challenge_blocks_early_last_resort(question_position))
                 ),
+                allow_dedupe_relaxation=allow_dedupe_relaxation,
+                question_position=question_position,
             )
             generated_difficulty = int(question.get("difficulty", active_difficulty))
             logger.info(
@@ -3994,9 +4431,10 @@ async def generate(req: GenerateRequest):
             live_difficulty = effective_difficulty
             if git_challenge_safe_mode and GIT_CHALLENGE_LIVE_FIRST:
                 logger.info(
-                    "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s question_position=%s",
+                    "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
                     live_topic,
                     live_difficulty,
+                    req.difficulty,
                     question_position,
                 )
                 question = None
@@ -4025,7 +4463,11 @@ async def generate(req: GenerateRequest):
 
             if question is None:
                 try:
-                    question = await _live_generate_topic(live_topic, live_difficulty)
+                    question = await _live_generate_topic(
+                        live_topic,
+                        live_difficulty,
+                        allow_dedupe_relaxation=not git_challenge_safe_mode,
+                    )
                     effective_topic = live_topic
                     effective_difficulty = live_difficulty
                 except ValueError as original_error:
@@ -4033,7 +4475,12 @@ async def generate(req: GenerateRequest):
                         raise
 
                     fallback_difficulty = min(int(live_difficulty), 4)
-                    for fallback_topic in _git_challenge_fallback_topics(session_topics, live_topic):
+                    for fallback_topic in _git_challenge_fallback_topics(
+                        session_topics,
+                        live_topic,
+                        req.source_text,
+                        question_log,
+                    ):
                         logger.warning(
                             "[CHALLENGE] Git live fallback after failure failed_topic=%s fallback_topic=%s fallback_difficulty=%s question_position=%s",
                             live_topic,
@@ -4042,7 +4489,11 @@ async def generate(req: GenerateRequest):
                             question_position,
                         )
                         try:
-                            question = await _live_generate_topic(fallback_topic, fallback_difficulty)
+                            question = await _live_generate_topic(
+                                fallback_topic,
+                                fallback_difficulty,
+                                allow_dedupe_relaxation=False,
+                            )
                         except ValueError:
                             continue
 
@@ -4051,7 +4502,32 @@ async def generate(req: GenerateRequest):
                         break
 
                     if question is None:
-                        raise original_error
+                        try:
+                            question = await _live_generate_topic(
+                                live_topic,
+                                3,
+                                allow_dedupe_relaxation=True,
+                            )
+                            effective_topic = live_topic
+                            effective_difficulty = 3
+                        except ValueError:
+                            try:
+                                question = build_git_template_fallback_question(
+                                    live_topic,
+                                    live_difficulty,
+                                    source_text=req.source_text,
+                                    session_topics=session_topics,
+                                    excluded_hashes=recent_hashes,
+                                )
+                                effective_topic = str(question.get("topic", live_topic))
+                                effective_difficulty = int(question.get("difficulty", 3))
+                                logger.warning(
+                                    "[CHALLENGE] Git template fallback used topic=%s difficulty=%s",
+                                    effective_topic,
+                                    effective_difficulty,
+                                )
+                            except ValueError:
+                                raise original_error
         except ValueError:
             raise
 

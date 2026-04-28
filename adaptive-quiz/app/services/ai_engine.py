@@ -66,16 +66,38 @@ DIAGNOSTIC_PROVIDER_PRIORITY = ["cerebras", "huggingface", "groq"]
 GIT_CHALLENGE_SAFE_PROVIDER_ORDER = [
     "groq",
     "cerebras",
-    "huggingface",
-    "fireworks",
     "mistral",
+    "gemini",
+    "openrouter",
+    "fireworks",
+    "huggingface",
 ]
 GIT_CHALLENGE_SAFE_MODEL_PREFERENCES = {
-    "groq": ["llama-3.1-8b-instant"],
+    "groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
     "cerebras": ["llama-3.1-8b", "qwen-3-235b-a22b-instruct-2507"],
-    "huggingface": ["meta-llama/Llama-3.1-8B-Instruct:cerebras"],
-    "fireworks": ["accounts/fireworks/models/deepseek-v3p1"],
     "mistral": ["mistral-small-latest"],
+    "gemini": ["gemini-3-flash-preview"],
+    "openrouter": [
+        "openrouter/free",
+        "openai/gpt-oss-120b:free",
+        "openai/gpt-oss-20b:free",
+        "z-ai/glm-4.5-air:free",
+        "google/gemma-4-26b-a4b-it:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemma-3-4b-it:free",
+    ],
+    "fireworks": ["accounts/fireworks/models/deepseek-v3p1"],
+    "huggingface": ["meta-llama/Llama-3.1-8B-Instruct:cerebras"],
+}
+GIT_CHALLENGE_SAFE_MODEL_LIMITS = {
+    "groq": 2,
+    "cerebras": 2,
+    "mistral": 1,
+    "gemini": 1,
+    "openrouter": 1,
+    "fireworks": 1,
+    "huggingface": 1,
 }
 
 # Keep provider model lists in env so you can tune them without editing code.
@@ -514,6 +536,22 @@ GIT_FRAGILE_LAST_RESORT_REASONS = {
     "git_visibility_push_vs_pull_confusion",
     "git_dual_correct_operational_options",
 }
+GIT_CHALLENGE_SOFT_RESERVE_REASONS = {
+    "too_many_out_of_source_specifics",
+    "weak_distractors_high_difficulty",
+    "plain_recall_high_difficulty",
+}
+GIT_CHALLENGE_FATAL_RESERVE_REASONS = {
+    "git_local_update_wrong_action",
+    "git_visibility_push_vs_pull_confusion",
+    "git_topic_family_misalignment",
+    "git_commit_quality_wrong_focus",
+    "git_ci_cd_topic_drift",
+    "git_merge_conflict_logic_failure",
+    "git_merge_conflict_wording_failure",
+    "git_dual_correct_operational_options",
+    "admin_question",
+}
 
 NAMED_CONCEPT_ALIASES = {
     "command": ["command pattern"],
@@ -886,6 +924,49 @@ def _brittle_reason_subset(reasons: list[str]) -> list[str]:
 
 def _blocks_last_resort_accept(reasons: list[str]) -> bool:
     return any(reason in LAST_RESORT_BLOCKING_REASONS for reason in reasons)
+
+
+def _git_challenge_has_fatal_reserve_reason(reasons: list[str]) -> bool:
+    return any(reason in GIT_CHALLENGE_FATAL_RESERVE_REASONS for reason in reasons)
+
+
+def _git_challenge_soft_only_reserve_reasons(reasons: list[str]) -> bool:
+    return bool(reasons) and not _git_challenge_has_fatal_reserve_reason(reasons) and all(
+        reason in GIT_CHALLENGE_SOFT_RESERVE_REASONS
+        for reason in reasons
+    )
+
+
+def _git_challenge_out_of_source_can_be_soft(q: dict, source_text: str | None, reasons: list[str]) -> bool:
+    if "too_many_out_of_source_specifics" not in reasons:
+        return False
+    if _git_challenge_has_fatal_reserve_reason(reasons):
+        return False
+    if len(source_text or "") > 7000:
+        return False
+
+    topic_bucket = _git_topic_bucket(str(q.get("topic", "")))
+    if not topic_bucket:
+        return False
+
+    question_blob = _git_text_blob(q)
+    forbidden_drift = {
+        "admin",
+        "jira",
+        "project management",
+        "ui",
+        "backend",
+        "database",
+    }
+    if topic_bucket != "ci_cd_fundamentals":
+        forbidden_drift.update({"pipeline", "continuous integration", "continuous delivery", "continuous deployment"})
+    if topic_bucket not in {"merge_conflicts", "branching_and_merging"}:
+        forbidden_drift.update({"merge conflict", "conflicting changes"})
+    if any(term in question_blob for term in forbidden_drift):
+        return False
+
+    focus_markers = _git_topic_focus_markers(topic_bucket)
+    return not focus_markers or any(marker in question_blob for marker in focus_markers)
 
 
 def _blocks_last_resort_accept_for_candidate(
@@ -1863,6 +1944,17 @@ def _record_failure_cooldown(
     retry_after = _extract_retry_after_seconds(message)
     lowered = message.lower()
 
+    if provider_name == "huggingface" and status_code == 402:
+        seconds = retry_after if retry_after is not None else 21600
+        _set_provider_cooldown(provider_name, seconds)
+        logger.info(
+            "[LLM] Provider cooldown set provider=%s seconds=%s reason=%s",
+            provider_name,
+            seconds,
+            "payment_required_402",
+        )
+        return
+
     if provider_name == "gemini":
         now = time.time()
         if status_code == 429:
@@ -2236,7 +2328,8 @@ def _provider_models_for_generation(provider_name: str, generation_profile: str 
                 continue
             seen.add(model)
             ordered.append(model)
-        return ordered
+        limit = GIT_CHALLENGE_SAFE_MODEL_LIMITS.get(provider_name)
+        return ordered[:limit] if limit is not None else ordered
 
     if generation_profile != "diagnostic":
         return models
@@ -3934,6 +4027,9 @@ def _git_challenge_safe_blocks_reserve_candidate(q: dict, reasons: list[str], co
     question_blob = _git_text_blob(q)
     question_family = _git_family(q, course_id)
 
+    if _git_challenge_soft_only_reserve_reasons(reasons):
+        return False
+
     if any(
         reason in reasons
         for reason in (
@@ -3943,6 +4039,8 @@ def _git_challenge_safe_blocks_reserve_candidate(q: dict, reasons: list[str], co
             "git_branching_stem_too_elaborate",
             "git_merge_conflict_logic_failure",
             "git_visibility_push_vs_pull_confusion",
+            "git_dual_correct_operational_options",
+            "admin_question",
         )
     ):
         return True
@@ -4369,6 +4467,16 @@ def _difficulty_mismatch_reasons(
 
     reasons.extend(_git_correctness_reasons(q, source_text, course_id))
 
+    if (
+        validation_profile == "git_challenge"
+        and _git_challenge_out_of_source_can_be_soft(q, source_text, reasons)
+    ):
+        logger.info(
+            "[LLM] Git challenge out-of-source downgraded to soft topic=%s selected_chars=%s",
+            q.get("topic"),
+            len(source_text or ""),
+        )
+
     return reasons
 
 
@@ -4574,7 +4682,13 @@ async def _generate_question_once(
                     q = json.loads(raw)
                     q = ensure_question_concept_focus(q, course_id=course_id)
 
-                    validation_profile = "diagnostic" if generation_profile == "diagnostic" else "default"
+                    validation_profile = (
+                        "diagnostic"
+                        if generation_profile == "diagnostic"
+                        else "git_challenge"
+                        if generation_profile == "git_challenge"
+                        else "default"
+                    )
                     is_valid, reasons = validate_question(
                         q,
                         selected_context,
@@ -4598,7 +4712,11 @@ async def _generate_question_once(
                         logger.warning(msg)
                         all_failures.append(msg)
                         brittle_reasons = _brittle_reason_subset(reasons)
-                        if brittle_policy["risky_generation"] and brittle_reasons:
+                        git_soft_validation = (
+                            generation_profile == "git_challenge"
+                            and _git_challenge_soft_only_reserve_reasons(reasons)
+                        )
+                        if brittle_policy["risky_generation"] and brittle_reasons and not git_soft_validation:
                             brittle_validation_failures += 1
                             logger.info(
                                 "[LLM] Hard-short-scope validation pressure topic=%s difficulty=%s count=%s reasons=%s",
@@ -4609,18 +4727,27 @@ async def _generate_question_once(
                             )
 
                         core_valid, _ = validate_question_core_only(q)
+                        git_soft_reserve = (
+                            generation_profile == "git_challenge"
+                            and _git_challenge_soft_only_reserve_reasons(reasons)
+                        )
                         if (
                             core_valid
                             and reserve_candidate is None
-                            and not _blocks_last_resort_accept_for_candidate(
-                                q,
-                                reasons,
-                                source_text=selected_context,
-                                course_id=course_id,
-                            )
-                            and not (
-                                generation_profile == "git_challenge"
-                                and _git_challenge_safe_blocks_reserve_candidate(q, reasons, course_id)
+                            and (
+                                git_soft_reserve
+                                or (
+                                    not _blocks_last_resort_accept_for_candidate(
+                                        q,
+                                        reasons,
+                                        source_text=selected_context,
+                                        course_id=course_id,
+                                    )
+                                    and not (
+                                        generation_profile == "git_challenge"
+                                        and _git_challenge_safe_blocks_reserve_candidate(q, reasons, course_id)
+                                    )
+                                )
                             )
                         ):
                             reserve_candidate = {
@@ -4629,12 +4756,20 @@ async def _generate_question_once(
                                 "model": model,
                                 "strict_reasons": reasons,
                             }
-                            logger.info(
-                                "[LLM] Reserve candidate stored provider=%s model=%s reasons=%s",
-                                provider_name,
-                                model,
-                                reason_text,
-                            )
+                            if git_soft_reserve:
+                                logger.info(
+                                    "[LLM] Git soft reserve accepted provider=%s model=%s reasons=%s",
+                                    provider_name,
+                                    model,
+                                    reason_text,
+                                )
+                            else:
+                                logger.info(
+                                    "[LLM] Reserve candidate stored provider=%s model=%s reasons=%s",
+                                    provider_name,
+                                    model,
+                                    reason_text,
+                                )
                         elif core_valid and _blocks_last_resort_accept_for_candidate(
                             q,
                             reasons,
@@ -4661,6 +4796,7 @@ async def _generate_question_once(
                         if (
                             brittle_policy["risky_generation"]
                             and brittle_validation_failures >= HARD_SHORT_SCOPE_VALIDATION_FAILURE_LIMIT
+                            and not git_soft_validation
                         ):
                             raise NoValidQuestionError(
                                 "High-difficulty generation became brittle on this narrow source scope.",
@@ -4781,7 +4917,11 @@ async def _generate_question_once(
         reserve_brittle_reasons = _brittle_reason_subset(
             reserve_candidate.get("strict_reasons", [])
         )
-        if brittle_policy["risky_generation"] and reserve_brittle_reasons:
+        git_soft_reserve = (
+            generation_profile == "git_challenge"
+            and _git_challenge_soft_only_reserve_reasons(reserve_candidate.get("strict_reasons", []))
+        )
+        if brittle_policy["risky_generation"] and reserve_brittle_reasons and not git_soft_reserve:
             logger.warning(
                 "[LLM] Skipping last resort for hard-short-scope topic=%s difficulty=%s reasons=%s",
                 topic,
