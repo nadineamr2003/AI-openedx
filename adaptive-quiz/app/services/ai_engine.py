@@ -4909,6 +4909,24 @@ async def generate_question_with_metadata(
                 raise ValueError(str(error)) from error
 
             fallback_context = dict(getattr(error, "fallback_context", {}) or {})
+            if generation_profile == "git_challenge":
+                fallback_candidates = _fallback_difficulty_candidates(
+                    current_difficulty,
+                    attempted_difficulties,
+                )
+                if fallback_candidates:
+                    next_difficulty = fallback_candidates[0]
+                    logger.warning(
+                        "[LLM] Git challenge difficulty fallback topic=%s current=%s fallback=%s exit_reason=%s",
+                        topic,
+                        current_difficulty,
+                        next_difficulty,
+                        fallback_context.get("exit_reason"),
+                    )
+                    attempted_difficulties.append(next_difficulty)
+                    current_difficulty = next_difficulty
+                    continue
+
             if git_fragile_topic_guard and current_difficulty >= 5 and 4 not in attempted_difficulties:
                 logger.warning(
                     "[LLM] Git fragile-topic difficulty fallback topic=%s requested_difficulty=%s fallback_difficulty=%s exit_reason=%s",

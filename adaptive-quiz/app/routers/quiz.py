@@ -75,6 +75,9 @@ GIT_OPENING_CHALLENGE_SAFE_BUCKET_ORDER = (
     "branching_and_merging",
 )
 GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS = 1
+GIT_CHALLENGE_LIVE_FIRST = True
+GIT_CHALLENGE_LIVE_PROVIDER_ATTEMPT_BUDGET = 6
+GIT_CHALLENGE_REPLENISH_CACHE = False
 GIT_CHALLENGE_CONCEPT_REPEAT_TOKEN = "local_vs_remote_repo"
 GIT_CHALLENGE_SAFE_ALLOWED_DVC_CONCEPTS = {
     "distributed_vcs",
@@ -453,6 +456,11 @@ def _git_challenge_opening_topic_candidates(
                 break
 
     return prioritized + [topic for topic in ordered_topics if topic not in prioritized]
+
+
+def _git_challenge_fallback_topics(session_topics: list[str] | None, failed_topic: str) -> list[str]:
+    ordered = _git_challenge_opening_topic_candidates(session_topics or [], difficulty=4)
+    return [topic for topic in ordered if topic != failed_topic]
 
 
 def _git_opening_generation_difficulty(topic: str, difficulty: int) -> int:
@@ -1452,8 +1460,7 @@ def _git_challenge_blocks_early_last_resort(question_position: int) -> bool:
 
 
 def _git_challenge_live_model_attempt_budget(topic: str) -> int:
-    stable_buckets = {"local_vs_remote", "git_workflow_basics", "distributed_vcs"}
-    return 3 if _git_topic_bucket(topic) in stable_buckets else 1
+    return GIT_CHALLENGE_LIVE_PROVIDER_ATTEMPT_BUDGET
 
 
 def _effective_cache_target(
@@ -3342,7 +3349,7 @@ async def _generate_first_question(
 
     if git_opening_challenge:
         logger.info(
-            "[CHALLENGE] Git bank-first mode active session=%s opening_topic=%s requested_difficulty=%s",
+            "[CHALLENGE] Git live-first mode active session=%s opening_topic=%s requested_difficulty=%s",
             session_id,
             topic,
             requested_opening_difficulty,
@@ -3388,24 +3395,25 @@ async def _generate_first_question(
         )
         if cached:
             cached_difficulty = int(cached.get("difficulty", active_difficulty) or active_difficulty)
-            asyncio.create_task(
-                _replenish_cache(
-                    topic=active_topic,
-                    difficulty=cached_difficulty,
-                    course_id=course_id,
-                    source_text=source_text,
-                    source_scope_key=source_scope_key,
-                    prompt_version=CACHE_PROMPT_VERSION,
-                    target=_effective_cache_target(
-                        state,
-                        active_topic,
-                        cached_difficulty,
-                        git_challenge_safe_mode=git_opening_challenge,
-                    ),
-                    mode=session_mode,
-                    git_workflow_scope=git_opening_challenge,
+            if not git_opening_challenge or GIT_CHALLENGE_REPLENISH_CACHE:
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=active_topic,
+                        difficulty=cached_difficulty,
+                        course_id=course_id,
+                        source_text=source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=CACHE_PROMPT_VERSION,
+                        target=_effective_cache_target(
+                            state,
+                            active_topic,
+                            cached_difficulty,
+                            git_challenge_safe_mode=git_opening_challenge,
+                        ),
+                        mode=session_mode,
+                        git_workflow_scope=git_opening_challenge,
+                    )
                 )
-            )
             return cached
 
         question = None
@@ -3470,33 +3478,42 @@ async def _generate_first_question(
 
             if question:
                 recovered_difficulty = int(question.get("difficulty", active_difficulty) or active_difficulty)
-                asyncio.create_task(
-                    _replenish_cache(
-                        topic=active_topic,
-                        difficulty=recovered_difficulty,
-                        course_id=course_id,
-                        source_text=source_text,
-                        source_scope_key=source_scope_key,
-                        prompt_version=CACHE_PROMPT_VERSION,
-                        target=_effective_cache_target(
-                            state,
-                            active_topic,
-                            recovered_difficulty,
-                            git_challenge_safe_mode=git_opening_challenge,
-                        ),
-                        mode=session_mode,
-                        git_workflow_scope=git_opening_challenge,
+                if not git_opening_challenge or GIT_CHALLENGE_REPLENISH_CACHE:
+                    asyncio.create_task(
+                        _replenish_cache(
+                            topic=active_topic,
+                            difficulty=recovered_difficulty,
+                            course_id=course_id,
+                            source_text=source_text,
+                            source_scope_key=source_scope_key,
+                            prompt_version=CACHE_PROMPT_VERSION,
+                            target=_effective_cache_target(
+                                state,
+                                active_topic,
+                                recovered_difficulty,
+                                git_challenge_safe_mode=git_opening_challenge,
+                            ),
+                            mode=session_mode,
+                            git_workflow_scope=git_opening_challenge,
+                        )
                     )
-                )
 
         return question
 
     async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
-        logger.info(
-            "[CHALLENGE] Git bank-first entering live generation topic=%s difficulty=%s",
-            active_topic,
-            active_difficulty,
-        )
+        if git_opening_challenge:
+            logger.info(
+                "[CHALLENGE] Git live generation topic=%s difficulty=%s question_position=%s",
+                active_topic,
+                active_difficulty,
+                opening_question_position,
+            )
+        else:
+            logger.info(
+                "[CACHE] Live generation topic=%s difficulty=%s",
+                active_topic,
+                active_difficulty,
+            )
 
         if _state_is_focused_followup(state):
             logger.info(
@@ -3521,7 +3538,11 @@ async def _generate_first_question(
             git_workflow_scope=git_opening_challenge,
             max_live_attempts=GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS if git_opening_challenge else None,
             max_provider_model_attempts=_git_challenge_live_model_attempt_budget(active_topic) if git_opening_challenge else None,
-            allow_last_resort=not _git_challenge_blocks_early_last_resort(opening_question_position),
+            allow_last_resort=(
+                True
+                if git_opening_challenge
+                else not _git_challenge_blocks_early_last_resort(opening_question_position)
+            ),
         )
         generated_difficulty = int(question.get("difficulty", active_difficulty))
         logger.info(
@@ -3530,36 +3551,48 @@ async def _generate_first_question(
             active_difficulty,
             generated_difficulty,
         )
-        asyncio.create_task(
-            _replenish_cache(
-                topic=active_topic,
-                difficulty=generated_difficulty,
-                course_id=course_id,
-                source_text=source_text,
-                source_scope_key=source_scope_key,
-                prompt_version=CACHE_PROMPT_VERSION,
-                target=_effective_cache_target(
-                    state,
-                    active_topic,
-                    generated_difficulty,
-                    git_challenge_safe_mode=git_opening_challenge,
-                ),
-                mode=session_mode,
-                git_workflow_scope=git_opening_challenge,
+        if not git_opening_challenge or GIT_CHALLENGE_REPLENISH_CACHE:
+            asyncio.create_task(
+                _replenish_cache(
+                    topic=active_topic,
+                    difficulty=generated_difficulty,
+                    course_id=course_id,
+                    source_text=source_text,
+                    source_scope_key=source_scope_key,
+                    prompt_version=CACHE_PROMPT_VERSION,
+                    target=_effective_cache_target(
+                        state,
+                        active_topic,
+                        generated_difficulty,
+                        git_challenge_safe_mode=git_opening_challenge,
+                    ),
+                    mode=session_mode,
+                    git_workflow_scope=git_opening_challenge,
+                )
             )
-        )
         return question
 
     try:
-        question = await _try_cached_topic(topic, difficulty)
         live_topic = topic
         live_difficulty = difficulty
-        if question is None and git_opening_challenge:
+        if git_opening_challenge and GIT_CHALLENGE_LIVE_FIRST:
+            logger.info(
+                "[CHALLENGE] Git live-first mode active session=%s topic=%s difficulty=%s question_position=%s",
+                session_id,
+                live_topic,
+                live_difficulty,
+                opening_question_position,
+            )
+            question = None
+        else:
+            question = await _try_cached_topic(topic, difficulty)
+
+        if question is None and git_opening_challenge and not GIT_CHALLENGE_LIVE_FIRST:
             repick_topic = _git_challenge_alternate_topic(opening_candidates, current_topic=topic)
             if repick_topic:
                 repick_difficulty = _git_challenge_safe_generation_difficulty(repick_topic, requested_opening_difficulty)
                 logger.info(
-                    "[CHALLENGE] Git bank-first repick session=%s from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
+                    "[CHALLENGE] Git cache-first repick session=%s from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
                     session_id,
                     topic,
                     repick_topic,
@@ -3584,9 +3617,43 @@ async def _generate_first_question(
                     difficulty = repick_difficulty
 
         if question is None:
-            question = await _live_generate_topic(live_topic, live_difficulty)
-            topic = live_topic
-            difficulty = live_difficulty
+            try:
+                question = await _live_generate_topic(live_topic, live_difficulty)
+                topic = live_topic
+                difficulty = live_difficulty
+            except ValueError as original_error:
+                if not git_opening_challenge:
+                    raise
+
+                fallback_difficulty = min(int(live_difficulty), 4)
+                for fallback_topic in _git_challenge_fallback_topics(
+                    state.get("session_topics") or opening_candidates,
+                    live_topic,
+                ):
+                    logger.warning(
+                        "[CHALLENGE] Git live fallback after failure session=%s failed_topic=%s fallback_topic=%s fallback_difficulty=%s",
+                        session_id,
+                        live_topic,
+                        fallback_topic,
+                        fallback_difficulty,
+                    )
+                    try:
+                        question = await _live_generate_topic(fallback_topic, fallback_difficulty)
+                    except ValueError:
+                        continue
+
+                    topic = fallback_topic
+                    difficulty = fallback_difficulty
+                    await _update_session_opening_plan(
+                        state=state,
+                        session_id=session_id,
+                        opening_topic=topic,
+                        opening_difficulty=difficulty,
+                    )
+                    break
+
+                if question is None:
+                    raise original_error
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -3713,7 +3780,7 @@ async def generate(req: GenerateRequest):
         question_position = _git_challenge_next_question_position(session_doc)
         if git_challenge_safe_mode:
             logger.info(
-                "[CHALLENGE] Git bank-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
+                "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s requested_difficulty=%s question_position=%s",
                 effective_topic,
                 effective_difficulty,
                 req.difficulty,
@@ -3737,24 +3804,25 @@ async def generate(req: GenerateRequest):
             )
             if cached:
                 cached_difficulty = int(cached.get("difficulty", active_difficulty) or active_difficulty)
-                asyncio.create_task(
-                    _replenish_cache(
-                        topic=active_topic,
-                        difficulty=cached_difficulty,
-                        course_id=req.course_id,
-                        source_text=req.source_text,
-                        source_scope_key=source_scope_key,
-                        prompt_version=prompt_version,
-                        target=_effective_cache_target(
-                            state,
-                            active_topic,
-                            cached_difficulty,
-                            git_challenge_safe_mode=git_challenge_safe_mode,
-                        ),
-                        mode=session_mode,
-                        git_workflow_scope=git_workflow_scope,
+                if not git_challenge_safe_mode or GIT_CHALLENGE_REPLENISH_CACHE:
+                    asyncio.create_task(
+                        _replenish_cache(
+                            topic=active_topic,
+                            difficulty=cached_difficulty,
+                            course_id=req.course_id,
+                            source_text=req.source_text,
+                            source_scope_key=source_scope_key,
+                            prompt_version=prompt_version,
+                            target=_effective_cache_target(
+                                state,
+                                active_topic,
+                                cached_difficulty,
+                                git_challenge_safe_mode=git_challenge_safe_mode,
+                            ),
+                            mode=session_mode,
+                            git_workflow_scope=git_workflow_scope,
+                        )
                     )
-                )
                 return cached
 
             recovered = None
@@ -3825,35 +3893,43 @@ async def generate(req: GenerateRequest):
 
             if recovered:
                 recovered_difficulty = int(recovered.get("difficulty", active_difficulty) or active_difficulty)
-                asyncio.create_task(
-                    _replenish_cache(
-                        topic=active_topic,
-                        difficulty=recovered_difficulty,
-                        course_id=req.course_id,
-                        source_text=req.source_text,
-                        source_scope_key=source_scope_key,
-                        prompt_version=prompt_version,
-                        target=_effective_cache_target(
-                            state,
-                            active_topic,
-                            recovered_difficulty,
-                            git_challenge_safe_mode=git_challenge_safe_mode,
-                        ),
-                        mode=session_mode,
-                        git_workflow_scope=git_workflow_scope,
+                if not git_challenge_safe_mode or GIT_CHALLENGE_REPLENISH_CACHE:
+                    asyncio.create_task(
+                        _replenish_cache(
+                            topic=active_topic,
+                            difficulty=recovered_difficulty,
+                            course_id=req.course_id,
+                            source_text=req.source_text,
+                            source_scope_key=source_scope_key,
+                            prompt_version=prompt_version,
+                            target=_effective_cache_target(
+                                state,
+                                active_topic,
+                                recovered_difficulty,
+                                git_challenge_safe_mode=git_challenge_safe_mode,
+                            ),
+                            mode=session_mode,
+                            git_workflow_scope=git_workflow_scope,
+                        )
                     )
-                )
                 return recovered
 
             return None
 
         async def _live_generate_topic(active_topic: str, active_difficulty: int) -> dict:
-            logger.info(
-                "[CHALLENGE] Git bank-first entering live generation topic=%s difficulty=%s question_position=%s",
-                active_topic,
-                active_difficulty,
-                question_position,
-            )
+            if git_challenge_safe_mode:
+                logger.info(
+                    "[CHALLENGE] Git live generation topic=%s difficulty=%s question_position=%s",
+                    active_topic,
+                    active_difficulty,
+                    question_position,
+                )
+            else:
+                logger.info(
+                    "[CACHE] Live generation topic=%s difficulty=%s",
+                    active_topic,
+                    active_difficulty,
+                )
             if _state_is_focused_followup(state):
                 logger.info(
                     "[FOLLOWUP] Live generation only after relaxed cache miss topic=%s difficulty=%s",
@@ -3879,7 +3955,11 @@ async def generate(req: GenerateRequest):
                 git_workflow_scope=git_workflow_scope,
                 max_live_attempts=GIT_OPENING_CHALLENGE_MAX_LIVE_ATTEMPTS if git_challenge_safe_mode else None,
                 max_provider_model_attempts=_git_challenge_live_model_attempt_budget(active_topic) if git_challenge_safe_mode else None,
-                allow_last_resort=not (git_challenge_safe_mode and _git_challenge_blocks_early_last_resort(question_position)),
+                allow_last_resort=(
+                    True
+                    if git_challenge_safe_mode
+                    else not (git_challenge_safe_mode and _git_challenge_blocks_early_last_resort(question_position))
+                ),
             )
             generated_difficulty = int(question.get("difficulty", active_difficulty))
             logger.info(
@@ -3888,37 +3968,47 @@ async def generate(req: GenerateRequest):
                 active_difficulty,
                 generated_difficulty,
             )
-            asyncio.create_task(
-                _replenish_cache(
-                    topic=active_topic,
-                    difficulty=generated_difficulty,
-                    course_id=req.course_id,
-                    source_text=req.source_text,
-                    source_scope_key=source_scope_key,
-                    prompt_version=prompt_version,
-                    target=_effective_cache_target(
-                        state,
-                        active_topic,
-                        generated_difficulty,
-                        git_challenge_safe_mode=git_challenge_safe_mode,
-                    ),
-                    mode=session_mode,
-                    git_workflow_scope=git_workflow_scope,
+            if not git_challenge_safe_mode or GIT_CHALLENGE_REPLENISH_CACHE:
+                asyncio.create_task(
+                    _replenish_cache(
+                        topic=active_topic,
+                        difficulty=generated_difficulty,
+                        course_id=req.course_id,
+                        source_text=req.source_text,
+                        source_scope_key=source_scope_key,
+                        prompt_version=prompt_version,
+                        target=_effective_cache_target(
+                            state,
+                            active_topic,
+                            generated_difficulty,
+                            git_challenge_safe_mode=git_challenge_safe_mode,
+                        ),
+                        mode=session_mode,
+                        git_workflow_scope=git_workflow_scope,
+                    )
                 )
-            )
             return question
 
         try:
-            question = await _try_cached_topic(effective_topic, effective_difficulty)
             live_topic = effective_topic
             live_difficulty = effective_difficulty
+            if git_challenge_safe_mode and GIT_CHALLENGE_LIVE_FIRST:
+                logger.info(
+                    "[CHALLENGE] Git live-first mode active topic=%s difficulty=%s question_position=%s",
+                    live_topic,
+                    live_difficulty,
+                    question_position,
+                )
+                question = None
+            else:
+                question = await _try_cached_topic(effective_topic, effective_difficulty)
 
-            if question is None and git_challenge_safe_mode:
+            if question is None and git_challenge_safe_mode and not GIT_CHALLENGE_LIVE_FIRST:
                 repick_topic = _git_challenge_alternate_topic(session_topics, current_topic=effective_topic)
                 if repick_topic:
                     repick_difficulty = _git_challenge_safe_generation_difficulty(repick_topic, req.difficulty)
                     logger.info(
-                        "[CHALLENGE] Git bank-first repick from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
+                        "[CHALLENGE] Git cache-first repick from_topic=%s to_topic=%s from_difficulty=%s to_difficulty=%s",
                         effective_topic,
                         repick_topic,
                         effective_difficulty,
@@ -3934,9 +4024,34 @@ async def generate(req: GenerateRequest):
                         live_difficulty = repick_difficulty
 
             if question is None:
-                question = await _live_generate_topic(live_topic, live_difficulty)
-                effective_topic = live_topic
-                effective_difficulty = live_difficulty
+                try:
+                    question = await _live_generate_topic(live_topic, live_difficulty)
+                    effective_topic = live_topic
+                    effective_difficulty = live_difficulty
+                except ValueError as original_error:
+                    if not git_challenge_safe_mode:
+                        raise
+
+                    fallback_difficulty = min(int(live_difficulty), 4)
+                    for fallback_topic in _git_challenge_fallback_topics(session_topics, live_topic):
+                        logger.warning(
+                            "[CHALLENGE] Git live fallback after failure failed_topic=%s fallback_topic=%s fallback_difficulty=%s question_position=%s",
+                            live_topic,
+                            fallback_topic,
+                            fallback_difficulty,
+                            question_position,
+                        )
+                        try:
+                            question = await _live_generate_topic(fallback_topic, fallback_difficulty)
+                        except ValueError:
+                            continue
+
+                        effective_topic = fallback_topic
+                        effective_difficulty = fallback_difficulty
+                        break
+
+                    if question is None:
+                        raise original_error
         except ValueError:
             raise
 
@@ -4447,12 +4562,13 @@ async def session_start(req: GenerateRequest):
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
-    if is_focused_followup:
+    prefill_git_challenge_safe_mode = _is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode)
+    if is_focused_followup and (not prefill_git_challenge_safe_mode or GIT_CHALLENGE_REPLENISH_CACHE):
         cache_target = _effective_cache_target(
             state,
             resolved_topics[0],
             state["current_difficulty"],
-            git_challenge_safe_mode=_is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode),
+            git_challenge_safe_mode=prefill_git_challenge_safe_mode,
         )
         logger.info(
             "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
@@ -4834,12 +4950,13 @@ async def session_finalize(req: SessionFinalizeRequest):
     state["session_count"] = state.get("session_count", 0) + 1
     await _save_state(state)
 
-    if is_focused_followup:
+    prefill_git_challenge_safe_mode = _is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode)
+    if is_focused_followup and (not prefill_git_challenge_safe_mode or GIT_CHALLENGE_REPLENISH_CACHE):
         cache_target = _effective_cache_target(
             state,
             resolved_topics[0],
             state["current_difficulty"],
-            git_challenge_safe_mode=_is_git_challenge_scope(req.course_id, resolved_source_text, requested_mode),
+            git_challenge_safe_mode=prefill_git_challenge_safe_mode,
         )
         logger.info(
             "[FOLLOWUP] Eager prefill started topic=%s difficulty=%s",
