@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.routers import quiz
+from app.routers import quiz , events
 from app.db.mongodb import connect_db, close_db
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -28,5 +28,6 @@ async def shutdown():
     await close_db()
 
 app.include_router(quiz.router)
+app.include_router(events.router)
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
