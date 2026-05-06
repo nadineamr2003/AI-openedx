@@ -148,7 +148,7 @@
     <div class="aq-panel">
       <div class="aq-panel-header aq-panel-header-with-action">
         <div class="aq-panel-header-main">
-          <div class="aq-step-badge">Step 2 of 3</div>
+          <div class="aq-step-badge" id="aq-content-step-badge">Step 2 of 3</div>
           <h2 class="aq-panel-title">What do you want to practise?</h2>
           <p class="aq-panel-sub">Pick one or more lectures — your quiz will be generated from the content you select.
           </p>
@@ -219,7 +219,7 @@
     <div class="aq-panel aq-mode-panel">
       <div class="aq-panel-header aq-panel-header-with-action">
         <div class="aq-panel-header-main">
-          <div class="aq-step-badge">Step 3 of 3</div>
+          <div class="aq-step-badge" id="aq-mode-step-badge">Step 3 of 3</div>
           <h2 class="aq-panel-title">Choose your practice mode</h2>
           <p class="aq-panel-sub">Pick the style of session you want for this attempt.</p>
         </div>
@@ -706,6 +706,15 @@
 
           </div>
         </div>
+      </div>
+
+      <div class="aq-dashboard-no-progress aq-hidden" id="aq-dashboard-no-progress">
+        <h3 class="aq-dashboard-no-progress-title">No quiz progress yet</h3>
+        <p class="aq-dashboard-no-progress-text">
+          Start a quiz in this course to unlock adaptive progress insights, topic mastery, mistake patterns, and
+          personalized next steps.
+        </p>
+        <button class="aq-btn aq-btn-primary" id="aq-btn-dashboard-empty-start" type="button">Start a quiz</button>
       </div>
 
       <div class="aq-stats-grid aq-stats-grid-4">

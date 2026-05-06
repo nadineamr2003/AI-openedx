@@ -1,8 +1,3 @@
-/* ══════════════════════════════════════════════════════════════
-   Adaptive Quiz XBlock — Professional UI
-   Aesthetic: Refined Academic — clean, premium, trustworthy
-   ══════════════════════════════════════════════════════════════ */
-
 /* ── Tokens ──────────────────────────────────────────────────────────── */
 .aq-root {
   --aq-primary: #2B4EDE;
@@ -542,6 +537,7 @@
   flex-direction: column;
   gap: 8px;
   margin-bottom: 8px;
+  min-height:200px;
 }
 
 .aq-list label {
@@ -2434,6 +2430,30 @@
 .aq-dashboard-focus-text {
   margin: 0;
   font-size: .87rem;
+  line-height: 1.55;
+  color: #334155;
+}
+
+.aq-dashboard-no-progress {
+  margin: 0 0 18px;
+  padding: 20px;
+  border: 1px solid var(--aq-border);
+  border-radius: var(--aq-radius-md);
+  background: #F8FAFC;
+  box-shadow: var(--aq-shadow-sm);
+}
+
+.aq-dashboard-no-progress-title {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+  line-height: 1.35;
+  color: var(--aq-text);
+}
+
+.aq-dashboard-no-progress-text {
+  margin: 0 0 14px;
+  max-width: 62ch;
+  font-size: .9rem;
   line-height: 1.55;
   color: #334155;
 }

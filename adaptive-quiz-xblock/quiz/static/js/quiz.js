@@ -2,22 +2,24 @@
 (function () {
   if (window.__edxTrackerInjected) return;
   window.__edxTrackerInjected = true;
+
   // Username comes from main.html on legacy pages; in the MFE iframe we fall back to a generic id.
   if (!window.OPENEDX_USERNAME) {
     try {
       window.OPENEDX_USERNAME =
         (window.parent && window.parent.OPENEDX_USERNAME) ||
-        document.cookie.match(/edx-user-info=.*?\\054 \"username\":\\\"([^\"]+)/)?.[1] ||
+        document.cookie.match(/edx-user-info=.*?\054 "username":"([^"]+)/)?.[1] ||
         "anonymous";
-    } catch (e) { window.OPENEDX_USERNAME = "anonymous"; }
+    } catch (e) {
+      window.OPENEDX_USERNAME = "anonymous";
+    }
   }
+
   var s = document.createElement("script");
   s.src = "http://localhost:8100/tracker.js";
   s.async = true;
   (document.head || document.documentElement).appendChild(s);
 })();
-
-/* ── Adaptive Quiz XBlock — quiz.js ────────────────────────────────── */
 
 function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var LONG_TIME_CONTEXT_THRESHOLD_MS = 90 * 1000;
@@ -83,6 +85,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     confidenceDismissMenuOpen: false,
     resumePromptSession: null,
     resumeActionPending: false,
+    singleCourseFlow: false,
     challengeReadiness: {
       ready: false,
       loading: false,
@@ -368,7 +371,43 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   function goHome() {
     closeResumePrompt();
     pickerMode = 'quiz';
+    state.singleCourseFlow = false;
     showScreen('start');
+  }
+
+  function shouldSkipCoursePicker(courses) {
+    return Array.isArray(courses) && courses.length === 1;
+  }
+
+  function selectOnlyCourseAndContinue(course) {
+    selectedCourseId = course.course_id;
+    selectedCourseName = course.course_name || course.course_id;
+    state.singleCourseFlow = true;
+
+    if (pickerMode === 'progress') {
+      loadDashboard('start', selectedCourseId, selectedCourseName);
+    } else if (pickerMode === 'history') {
+      loadFullSessionHistory(selectedCourseId, 'start');
+    } else {
+      checkForResumableSession();
+    }
+  }
+
+  function getSetupStepTotal() {
+    return state.singleCourseFlow ? 2 : 3;
+  }
+
+  function updateSetupStepLabels() {
+    var total = getSetupStepTotal();
+    var contentStep = $('#aq-content-step-badge');
+    var modeStep = $('#aq-mode-step-badge');
+
+    if (contentStep) {
+      contentStep.textContent = state.singleCourseFlow ? 'Step 1 of ' + total : 'Step 2 of ' + total;
+    }
+    if (modeStep) {
+      modeStep.textContent = state.singleCourseFlow ? 'Step 2 of ' + total : 'Step 3 of ' + total;
+    }
   }
 
   function loadCoursePicker() {
@@ -378,13 +417,19 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       data: JSON.stringify({}), contentType: 'application/json',
       success: function (data) {
         if (!data.success || !data.courses || data.courses.length === 0) {
+          state.singleCourseFlow = false;
           alert('No courses available yet.');
           showScreen('start');
           return;
         }
+        if (shouldSkipCoursePicker(data.courses)) {
+          selectOnlyCourseAndContinue(data.courses[0]);
+          return;
+        }
+        state.singleCourseFlow = false;
         renderCoursePicker(data.courses);
       },
-      error: function () { alert('Could not load courses.'); showScreen('start'); }
+      error: function () { state.singleCourseFlow = false; alert('Could not load courses.'); showScreen('start'); }
     });
   }
 
@@ -394,6 +439,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       return String(course.course_id) === String(selectedCourseId);
     });
     if (!list) { showScreen('start'); return; }
+    state.singleCourseFlow = false;
     configureCoursePickerForMode();
     list.innerHTML = '';
     courses.forEach(function (course, index) {
@@ -475,7 +521,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       contentType: 'application/json',
       success: function (data) {
         if (data && data.success && data.session) {
-          showScreen('course');
+          showScreen(state.singleCourseFlow ? 'start' : 'course');
           openResumePrompt(data.session);
           return;
         }
@@ -497,20 +543,21 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       success: function (data) {
         if (!data.success || !data.items || data.items.length === 0) {
           alert('No content found for this course yet.');
-          showScreen('course');
+          showScreen(state.singleCourseFlow ? 'start' : 'course');
           return;
         }
         allContentItems = data.items || [];
         renderContentPicker(allContentItems);
         initContentFilters(allContentItems);
       },
-      error: function () { alert('Could not load course content.'); showScreen('course'); }
+      error: function () { alert('Could not load course content.'); showScreen(state.singleCourseFlow ? 'start' : 'course'); }
     });
   }
 
   function renderContentPicker(items) {
     var list = $('#aq-content-list');
     if (!list) { showScreen('start'); return; }
+    updateSetupStepLabels();
     list.innerHTML = '';
     if (!items || items.length === 0) {
       list.innerHTML = '<p style="color:#6B7280;font-size:.88rem;padding:16px 0;">No content matches the selected filters.</p>';
@@ -4075,6 +4122,17 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     return model;
   }
 
+  function hasAnyLearnerProgress(data) {
+    if (!data) return false;
+
+    var mastery = data.topic_mastery || {};
+    var masteryCount = Object.keys(mastery).length;
+    var sessionCount = parseInt(data.session_count || 0, 10) || 0;
+    var totalAnswers = parseInt(data.total_answers || 0, 10) || 0;
+
+    return !!data.has_progress || masteryCount > 0 || sessionCount > 0 || totalAnswers > 0;
+  }
+
   function setDashboardPerspectiveClass(node, perspective) {
     if (!node) return;
     ['repair', 'stretch', 'growth'].forEach(function (name) {
@@ -4085,6 +4143,15 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   function startDashboardNewSession() {
     pickerMode = 'quiz';
+    loadCoursePicker();
+  }
+
+  function startDashboardEmptyQuiz() {
+    pickerMode = 'quiz';
+    if (selectedCourseId) {
+      loadContentPicker(selectedCourseId);
+      return;
+    }
     loadCoursePicker();
   }
 
@@ -5073,6 +5140,14 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     var topicsWrap = $('#aq-dashboard-topics');
     var emptyEl = $('#aq-dashboard-empty');
+    var topSummaryEl = $('#aq-dashboard-top-summary');
+    var noProgressEl = $('#aq-dashboard-no-progress');
+    var noProgressStartBtn = $('#aq-btn-dashboard-empty-start');
+    var dashboardSections = [
+      $('#aq-dashboard-section-topic-mastery'),
+      $('#aq-dashboard-section-mistake-journal'),
+      $('#aq-dashboard-section-session-history')
+    ];
     if (topicsWrap) topicsWrap.innerHTML = '';
 
     var overallAccuracy = '—';
@@ -5091,7 +5166,26 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
       if (el) el.textContent = fields[sel];
     });
 
-    if (!data.has_progress || !data.topic_mastery || Object.keys(data.topic_mastery).length === 0) {
+    if (noProgressStartBtn) noProgressStartBtn.onclick = startDashboardEmptyQuiz;
+
+    if (!hasAnyLearnerProgress(data)) {
+      state.dashboardModel = null;
+      if (topSummaryEl) topSummaryEl.classList.add('aq-hidden');
+      if (noProgressEl) noProgressEl.classList.remove('aq-hidden');
+      dashboardSections.forEach(function (section) {
+        if (section) section.classList.add('aq-hidden');
+      });
+      if (emptyEl) emptyEl.classList.remove('aq-hidden');
+      showScreen('dashboard');
+      return;
+    }
+    if (topSummaryEl) topSummaryEl.classList.remove('aq-hidden');
+    if (noProgressEl) noProgressEl.classList.add('aq-hidden');
+    dashboardSections.forEach(function (section) {
+      if (section) section.classList.remove('aq-hidden');
+    });
+
+    if (!data.topic_mastery || Object.keys(data.topic_mastery).length === 0) {
       if (emptyEl) emptyEl.classList.remove('aq-hidden');
       showScreen('dashboard');
       return;
@@ -5870,6 +5964,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
     function renderAdaptiveDashboard() {
       if (isStaleDashboardLoad() || !adaptiveData.progress) return;
+      if (!hasAnyLearnerProgress(adaptiveData.progress)) return;
 
       var model = buildDashboardModel(
         adaptiveData.progress,
@@ -5984,11 +6079,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         if (data && data.success === false) {
           if (data.error === 'challenge_not_ready') {
             alert(data.message || 'Challenge mode is not available for this lecture yet.');
+            updateSetupStepLabels();
             showScreen('mode');
             refreshChallengeReadiness();
             return;
           }
           alert((data && data.message) || (data && data.error) || 'Could not start quiz.');
+          updateSetupStepLabels();
           showScreen('mode');
           return;
         }
@@ -6283,6 +6380,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         if (!data.success) {
           if (data.error === 'challenge_not_ready') {
             alert(data.message || 'Challenge mode is not available for this lecture yet.');
+            updateSetupStepLabels();
             showScreen('mode');
             refreshChallengeReadiness();
             return;
@@ -6335,7 +6433,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
 
   var backResultsBtn = $('#aq-btn-back-results');
   if (backResultsBtn) backResultsBtn.onclick = function () {
-    showScreen(state.dashboardOrigin === 'results' ? 'results' : 'start');
+    if (state.dashboardOrigin === 'results') {
+      showScreen('results');
+    } else {
+      goHome();
+    }
   };
 
   var timeThinkingBtn = $('#aq-time-thinking');
@@ -6417,7 +6519,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var courseBackBtn = $('#aq-btn-course-back');
   if (courseBackBtn) courseBackBtn.onclick = function () {
     closeResumePrompt();
-    showScreen('start');
+    goHome();
   };
 
   var courseContinueBtn = $('#aq-btn-course-continue');
@@ -6531,7 +6633,13 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   }
 
   var contentBackBtn = $('#aq-btn-content-back');
-  if (contentBackBtn) contentBackBtn.onclick = function () { showScreen('course'); };
+  if (contentBackBtn) contentBackBtn.onclick = function () {
+    if (state.singleCourseFlow) {
+      goHome();
+    } else {
+      showScreen('course');
+    }
+  };
 
   var contentStartBtn = $('#aq-btn-content-start');
   if (contentStartBtn) {
@@ -6552,6 +6660,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
         affectedCount: 0,
         selectedCount: selectedContentIds.length
       };
+      updateSetupStepLabels();
       showScreen('mode');
       refreshChallengeReadiness();
     };
@@ -6560,6 +6669,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var modeBackBtn = $('#aq-btn-mode-back');
   if (modeBackBtn) {
     modeBackBtn.onclick = function () {
+      updateSetupStepLabels();
       showScreen('content');
     };
   }
@@ -6569,6 +6679,7 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
     modeStartBtn.onclick = function () {
       if (!selectedContentIds || selectedContentIds.length === 0) {
         alert('Please select at least one content item.');
+        updateSetupStepLabels();
         showScreen('content');
         return;
       }
@@ -6593,7 +6704,11 @@ function AdaptiveQuizXBlock(runtime, element, initArgs) {
   var historyBackBtn = $('#aq-btn-history-back');
   if (historyBackBtn) {
     historyBackBtn.onclick = function () {
-      showScreen(state.historyOrigin === 'start' ? 'start' : 'dashboard');
+      if (state.historyOrigin === 'start') {
+        goHome();
+      } else {
+        showScreen('dashboard');
+      }
     };
   }
 
