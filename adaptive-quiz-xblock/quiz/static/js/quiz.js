@@ -1,3 +1,22 @@
+// === Behavior tracker loader ===
+(function () {
+  if (window.__edxTrackerInjected) return;
+  window.__edxTrackerInjected = true;
+  // Username comes from main.html on legacy pages; in the MFE iframe we fall back to a generic id.
+  if (!window.OPENEDX_USERNAME) {
+    try {
+      window.OPENEDX_USERNAME =
+        (window.parent && window.parent.OPENEDX_USERNAME) ||
+        document.cookie.match(/edx-user-info=.*?\\054 \"username\":\\\"([^\"]+)/)?.[1] ||
+        "anonymous";
+    } catch (e) { window.OPENEDX_USERNAME = "anonymous"; }
+  }
+  var s = document.createElement("script");
+  s.src = "http://localhost:8100/tracker.js";
+  s.async = true;
+  (document.head || document.documentElement).appendChild(s);
+})();
+
 /* ── Adaptive Quiz XBlock — quiz.js ────────────────────────────────── */
 
 function AdaptiveQuizXBlock(runtime, element, initArgs) {

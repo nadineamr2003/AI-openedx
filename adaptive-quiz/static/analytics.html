@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Behavior Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f7f8fb; --card: #fff; --border: #e6e8ef;
+    --text: #0f172a; --muted: #64748b;
+    --primary: #6366f1; --primary-soft: #eef0ff;
+    --amber: #f59e0b; --amber-soft: #fef5e0;
+    --emerald: #10b981; --emerald-soft: #d8f5e6;
+    --violet: #8b5cf6; --violet-soft: #f0e9ff;
+    --rose: #ec4899; --rose-soft: #fde4ef;
+    --shadow: 0 1px 3px rgba(15,23,42,.04), 0 1px 2px rgba(15,23,42,.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0; background: var(--bg); color: var(--text);
+    padding: 32px 24px; max-width: 1400px; margin: 0 auto;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 28px;
+  }
+  header h1 {
+    margin: 0 0 4px; font-size: 28px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  header .sub { color: var(--muted); font-size: 14px; }
+  .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; background: var(--emerald-soft); color: #047857;
+    border-radius: 100px; font-size: 12px; font-weight: 600;
+  }
+  .live::before {
+    content: ''; width: 8px; height: 8px; background: var(--emerald);
+    border-radius: 50%; animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  .cards-row {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 16px; margin-bottom: 20px;
+  }
+  .card {
+    background: var(--card); padding: 18px; border-radius: 14px;
+    box-shadow: var(--shadow); border: 1px solid var(--border);
+  }
+  .card .icon-tile {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 18px; margin-bottom: 12px;
+  }
+  .card .num { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+  .card .label { color: var(--muted); font-size: 12px; margin-top: 6px; font-weight: 500; }
+  .icon-primary { background: var(--primary-soft); color: var(--primary); }
+  .icon-amber   { background: var(--amber-soft);   color: var(--amber); }
+  .icon-emerald { background: var(--emerald-soft); color: var(--emerald); }
+  .icon-violet  { background: var(--violet-soft);  color: var(--violet); }
+  .icon-rose    { background: var(--rose-soft);    color: var(--rose); }
+
+  .charts-row {
+    display: grid; grid-template-columns: 2fr 1fr;
+    gap: 16px; margin-bottom: 20px;
+  }
+  .charts-row.equal { grid-template-columns: 1fr 1fr; }
+
+  .panel {
+    background: var(--card); padding: 20px; border-radius: 14px;
+    box-shadow: var(--shadow); border: 1px solid var(--border);
+  }
+  .panel h2 {
+    margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted);
+  }
+  .panel .desc { font-size: 16px; font-weight: 600; margin: 4px 0 16px; color: var(--text); }
+  .chart-wrap { position: relative; height: 240px; }
+
+  .events-panel { padding: 20px; }
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .filters input, .filters select {
+    padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 13px; font-family: inherit; background: white; color: var(--text);
+  }
+  .filters input:focus, .filters select:focus {
+    outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+  .btn {
+    padding: 8px 16px; background: var(--primary); color: white; border: 0;
+    border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:hover { background: #5759e6; }
+  .btn-ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { background: #f8fafc; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { background: #fafbff; }
+  th {
+    text-align: left; padding: 10px 12px; font-weight: 600; color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 12px; border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: #fafbff; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .pill {
+    display: inline-flex; align-items: center; padding: 3px 10px;
+    border-radius: 100px; font-size: 11px; font-weight: 600;
+  }
+  .pill.clicked { background: var(--primary-soft); color: var(--primary); }
+  .pill.hovered { background: var(--amber-soft); color: #b45309; }
+
+  .session-cell {
+    font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted);
+    cursor: pointer; user-select: all;
+  }
+  .session-cell:hover { color: var(--primary); }
+
+  .empty { text-align: center; padding: 40px; color: var(--muted); font-size: 14px; }
+
+  @media (max-width: 1024px) {
+    .cards-row { grid-template-columns: repeat(2, 1fr); }
+    .charts-row, .charts-row.equal { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Behavior Tracker</h1>
+    <div class="sub">Open edX user clicks &amp; hovers · auto-refreshes every 10s</div>
+  </div>
+  <div class="live">Live</div>
+</header>
+
+<div class="cards-row" id="cards"></div>
+
+<div class="charts-row">
+  <div class="panel">
+    <h2>Activity</h2>
+    <div class="desc">Clicks &amp; hovers — last 24 hours</div>
+    <div class="chart-wrap"><canvas id="timelineChart"></canvas></div>
+  </div>
+  <div class="panel">
+    <h2>Action breakdown</h2>
+    <div class="desc">Clicks vs hovers</div>
+    <div class="chart-wrap"><canvas id="donutChart"></canvas></div>
+  </div>
+</div>
+
+<div class="charts-row equal">
+  <div class="panel">
+    <h2>Top clicked</h2>
+    <div class="desc">Most-clicked buttons</div>
+    <div class="chart-wrap"><canvas id="clickedChart"></canvas></div>
+  </div>
+  <div class="panel">
+    <h2>Top hovered</h2>
+    <div class="desc">Most-hovered buttons</div>
+    <div class="chart-wrap"><canvas id="hoveredChart"></canvas></div>
+  </div>
+</div>
+
+<div class="panel events-panel">
+  <h2>Recent events</h2>
+  <div class="desc">Latest 200 events</div>
+  <div class="filters">
+    <input id="fUser" placeholder="Filter by username">
+    <select id="fAction">
+      <option value="">All actions</option>
+      <option value="clicked">Clicked only</option>
+      <option value="hovered">Hovered only</option>
+    </select>
+    <button class="btn" id="refresh">Refresh</button>
+  </div>
+  <table id="events">
+    <thead><tr><th>Time</th><th>User</th><th>Session</th><th>Button</th><th>Action</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+const COLOR = {
+  primary: '#6366f1', amber: '#f59e0b',
+  primaryFill: 'rgba(99,102,241,0.12)', amberFill: 'rgba(245,158,11,0.12)',
+  text: '#64748b', grid: '#eaecf3'
+};
+
+Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.color = COLOR.text;
+
+let timelineChart, donutChart, clickedChart, hoveredChart;
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
+
+async function loadSummary() {
+  const s = await getJSON('/api/analytics/summary');
+  const cards = [
+    { num: s.total_events,    label: 'Total events', icon: '⚡', cls: 'icon-primary' },
+    { num: s.clicks,          label: 'Clicks',       icon: '🖱️', cls: 'icon-primary' },
+    { num: s.hovers,          label: 'Hovers',       icon: '👁️', cls: 'icon-amber' },
+    { num: s.unique_users,    label: 'Users',        icon: '👤', cls: 'icon-emerald' },
+    { num: s.unique_sessions, label: 'Sessions',     icon: '🔗', cls: 'icon-violet' },
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c => `
+    <div class="card">
+      <div class="icon-tile ${c.cls}">${c.icon}</div>
+      <div class="num">${(c.num || 0).toLocaleString()}</div>
+      <div class="label">${c.label}</div>
+    </div>`).join('');
+
+  drawBar('clickedChart', s.top_clicked, COLOR.primary, ref => clickedChart = ref);
+  drawBar('hoveredChart', s.top_hovered, COLOR.amber,   ref => hoveredChart = ref);
+  drawDonut(s.clicks, s.hovers);
+}
+
+function drawBar(canvasId, data, color, setRef) {
+  const ctx = document.getElementById(canvasId);
+  if (canvasId === 'clickedChart' && clickedChart) clickedChart.destroy();
+  if (canvasId === 'hoveredChart' && hoveredChart) hoveredChart.destroy();
+  const chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: (data || []).map(d => d.button.length > 30 ? d.button.slice(0,30)+'…' : d.button),
+      datasets: [{ data: (data || []).map(d => d.count), backgroundColor: color, borderRadius: 6, barThickness: 16 }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { backgroundColor: '#0f172a', padding: 10, cornerRadius: 6 } },
+      scales: {
+        x: { ticks: { precision: 0 }, grid: { color: COLOR.grid } },
+        y: { grid: { display: false } }
+      }
+    }
+  });
+  setRef(chart);
+}
+
+function drawDonut(clicks, hovers) {
+  const ctx = document.getElementById('donutChart');
+  if (donutChart) donutChart.destroy();
+  donutChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Clicks', 'Hovers'],
+      datasets: [{ data: [clicks||0, hovers||0], backgroundColor: [COLOR.primary, COLOR.amber], borderWidth: 0 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '68%',
+      plugins: { legend: { position: 'bottom', labels: { padding: 16, boxWidth: 10 } },
+                 tooltip: { backgroundColor: '#0f172a', padding: 10, cornerRadius: 6 } }
+    }
+  });
+}
+
+async function loadTimeline() {
+  const data = await getJSON('/api/analytics/timeline?hours=24');
+  const ctx = document.getElementById('timelineChart');
+  if (timelineChart) timelineChart.destroy();
+  timelineChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: data.hours.map(h => h.slice(11, 16)),
+      datasets: [
+        { label: 'Clicks', data: data.clicks, borderColor: COLOR.primary, backgroundColor: COLOR.primaryFill,
+          fill: true, tension: 0.35, pointRadius: 3, pointBackgroundColor: COLOR.primary, borderWidth: 2 },
+        { label: 'Hovers', data: data.hovers, borderColor: COLOR.amber, backgroundColor: COLOR.amberFill,
+          fill: true, tension: 0.35, pointRadius: 3, pointBackgroundColor: COLOR.amber, borderWidth: 2 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: 'top', labels: { boxWidth: 12, padding: 14 } },
+                 tooltip: { backgroundColor: '#0f172a', padding: 10, cornerRadius: 6 } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { ticks: { precision: 0 }, grid: { color: COLOR.grid }, beginAtZero: true }
+      }
+    }
+  });
+}
+
+async function loadEvents() {
+  const u = document.getElementById('fUser').value.trim();
+  const a = document.getElementById('fAction').value;
+  const params = new URLSearchParams({ limit: 200 });
+  if (u) params.set('username', u);
+  if (a) params.set('action', a);
+
+  const data = await getJSON('/api/analytics/events?' + params);
+  const tb = document.querySelector('#events tbody');
+  tb.innerHTML = data.events.length
+    ? data.events.map(e => `
+      <tr>
+        <td>${fmtTime(e.timestamp)}</td>
+        <td>${escapeHTML(e.username)}</td>
+        <td class="session-cell" title="Click to copy"
+            onclick="navigator.clipboard.writeText(this.textContent); this.style.background='#d4f4dd'; setTimeout(()=>this.style.background='',600);">
+          ${escapeHTML(e.session_id)}
+        </td>
+        <td>${escapeHTML(e.button)}</td>
+        <td><span class="pill ${e.action}">${e.action}</span></td>
+      </tr>`).join('')
+    : '<tr><td colspan="5" class="empty">No events yet — interact with the LMS to populate.</td></tr>';
+}
+
+async function refreshAll() {
+  try { await Promise.all([loadSummary(), loadEvents(), loadTimeline()]); }
+  catch (e) { console.error('Dashboard refresh failed', e); }
+}
+
+document.getElementById('refresh').addEventListener('click', refreshAll);
+document.getElementById('fAction').addEventListener('change', loadEvents);
+document.getElementById('fUser').addEventListener('keydown', e => { if (e.key === 'Enter') loadEvents(); });
+
+refreshAll();
+setInterval(refreshAll, 10000);
+</script>
+</body>
+</html>
